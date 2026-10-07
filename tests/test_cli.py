@@ -169,3 +169,59 @@ def test_wordfence_error_fails_cleanly(tmp_path: Path, monkeypatch, capsys):
     )
     assert code == 1
     assert "Wordfence rejected the API key" in capsys.readouterr().err
+
+
+def test_remediate_flag_updates_manifest(tmp_path: Path, monkeypatch, capsys):
+    from vulnscan.models import VersionRange
+
+    (tmp_path / "requirements.txt").write_text("requests==2.30.0\nflask\n")
+
+    def fake_scan(settings):
+        result = fake_result(settings.project_path)
+        result.findings[0].vulnerabilities[0].affected_ranges = [
+            VersionRange(lower="0", upper="2.31.0")
+        ]
+        return result
+
+    monkeypatch.setattr(cli, "scan", fake_scan)
+    monkeypatch.setattr(cli, "fetch_versions", lambda settings, dep: ["2.30.0", "2.31.0", "2.32.4"])
+    code = cli.main(["--remediate", "requests", "--path", str(tmp_path)])
+    assert code == 0
+    assert (tmp_path / "requirements.txt").read_text() == "requests==2.31.0\nflask\n"
+    assert "pip install" in capsys.readouterr().out
+
+
+def test_remediate_flag_latest_strategy(tmp_path: Path, monkeypatch):
+    (tmp_path / "requirements.txt").write_text("requests==2.30.0\n")
+    monkeypatch.setattr(cli, "scan", lambda settings: fake_result(settings.project_path))
+    monkeypatch.setattr(cli, "fetch_versions", lambda settings, dep: ["2.30.0", "2.31.0", "2.32.4"])
+    code = cli.main(["--remediate", "requests", "--strategy", "latest", "--path", str(tmp_path)])
+    assert code == 0
+    assert (tmp_path / "requirements.txt").read_text() == "requests==2.32.4\n"
+
+
+def test_remediate_flag_unknown_package_fails(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "scan", lambda settings: fake_result(settings.project_path))
+    code = cli.main(["--remediate", "nothing-here", "--path", str(tmp_path)])
+    assert code == 1
+    assert "nothing-here" in capsys.readouterr().err
+
+
+def test_remediate_flag_without_safe_version_fails(tmp_path: Path, monkeypatch, capsys):
+    from vulnscan.models import VersionRange
+
+    (tmp_path / "requirements.txt").write_text("requests==2.30.0\n")
+
+    def fake_scan(settings):
+        result = fake_result(settings.project_path)
+        result.findings[0].vulnerabilities[0].affected_ranges = [
+            VersionRange(lower="0", upper=None)
+        ]
+        return result
+
+    monkeypatch.setattr(cli, "scan", fake_scan)
+    monkeypatch.setattr(cli, "fetch_versions", lambda settings, dep: ["2.30.0", "2.31.0"])
+    code = cli.main(["--remediate", "requests", "--path", str(tmp_path)])
+    assert code == 1
+    assert "no" in capsys.readouterr().err.lower()
+    assert (tmp_path / "requirements.txt").read_text() == "requests==2.30.0\n"

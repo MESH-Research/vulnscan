@@ -113,3 +113,43 @@ def test_dependency_optional_fields_default():
 def test_vulnerability_url_prefers_explicit_link():
     vuln = make_vuln(link="https://www.wordfence.com/threat-intel/vulnerabilities/id/abc")
     assert vuln.url == "https://www.wordfence.com/threat-intel/vulnerabilities/id/abc"
+
+
+from vulnscan.models import PACKAGIST as _PACKAGIST  # noqa: E402
+from vulnscan.models import VersionRange  # noqa: E402
+
+
+def test_version_range_osv_style_half_open():
+    rng = VersionRange(lower="2.3.0", upper="2.31.0")
+    assert rng.contains("2.3.0", PYPI) is True
+    assert rng.contains("2.30.0", PYPI) is True
+    assert rng.contains("2.31.0", PYPI) is False
+    assert rng.contains("2.2.9", PYPI) is False
+
+
+def test_version_range_inclusive_upper_and_unbounded():
+    rng = VersionRange(lower=None, upper="3.16.4", upper_inclusive=True)
+    assert rng.contains("3.16.4", _PACKAGIST) is True
+    assert rng.contains("3.16.5", _PACKAGIST) is False
+    unbounded = VersionRange(lower="0", upper=None)
+    assert unbounded.contains("999", PYPI) is True
+
+
+def test_version_range_handles_prerelease_ordering_for_pypi():
+    rng = VersionRange(lower="0", upper="2.31.0")
+    assert rng.contains("2.31.0rc1", PYPI) is True
+    assert rng.contains("2.31.0.post1", PYPI) is False
+
+
+def test_vulnerability_affects_uses_ranges_and_explicit_versions():
+    vuln = make_vuln(
+        affected_ranges=[VersionRange(lower="1.0", upper="1.5")], affected_versions=["2.0"]
+    )
+    assert vuln.affects("1.2", PYPI) is True
+    assert vuln.affects("1.5", PYPI) is False
+    assert vuln.affects("2.0", PYPI) is True
+    assert vuln.affects("2.1", PYPI) is False
+
+
+def test_vulnerability_affects_nothing_without_range_data():
+    assert make_vuln().affects("1.0", PYPI) is False

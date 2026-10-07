@@ -99,6 +99,7 @@ uv run vulnscan --path /path/to/project
 | `o` | Open the selected advisory (osv.dev or wordfence.com) in your browser |
 | `f` | Write the RSS and Atom feeds |
 | `e` | Export Markdown and plain-text reports |
+| `u` | Upgrade the selected dependency in its manifest (see below) |
 | `r` | Rescan |
 | `q` | Quit |
 
@@ -125,6 +126,41 @@ uv run vulnscan --markdown report.md --path /path/to/project   # explicit file
 uv run vulnscan --text - --path /path/to/project               # to stdout
 uv run vulnscan --update-feeds --markdown --text               # feeds and both reports
 ```
+
+## Remediation
+
+Select a vulnerable dependency in the TUI and press `u`. vulnscan looks up the
+versions published for it (PyPI, Packagist or wordpress.org) and offers two
+choices:
+
+- **Nearest safe version**: the smallest upgrade above the current version
+  that is outside every known advisory's affected range. This keeps you as
+  close as possible to what you have (for example `symfony/http-kernel` 5.4.0
+  goes to 5.4.20, not 6.x).
+- **Latest release**: the newest stable version. If even that is still
+  affected by an open advisory, the option says so.
+
+Choosing one rewrites the dependency's constraint in the manifest it came
+from, touching nothing else in the file. The operator style is preserved:
+`3.13.4` becomes `4.1.4`, `^12.2` becomes `^16.3`, `requests==2.30.0` becomes
+`requests==2.32.4`, `Django>=4.2,<5` becomes `Django>=4.2.11,<5`. Supported
+manifests: `composer.json`, `requirements*.txt`, `pyproject.toml` (PEP 621
+strings and Poetry tables), `Pipfile` and `setup.cfg`. Constraints that track
+a development branch (`dev-main`) are left for you to change by hand.
+
+Lock files are not touched. The status bar tells you the command to run next,
+such as `composer update wp-plugin/elementor --with-dependencies` or
+`uv lock && uv sync`. Press `r` afterwards to rescan.
+
+The same thing non-interactively:
+
+```
+uv run vulnscan --remediate wp-plugin/elementor --path /path/to/project
+uv run vulnscan --remediate requests --strategy latest --path /path/to/project
+```
+
+`--strategy nearest` is the default. Pre-release and yanked versions are never
+offered.
 
 ## Configuration
 

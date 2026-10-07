@@ -11,6 +11,7 @@ import httpx
 from vulnscan import __version__
 from vulnscan.models import (
     Dependency,
+    VersionRange,
     Vulnerability,
     normalize_name,
     normalize_severity,
@@ -49,6 +50,8 @@ def parse_osv_vulnerability(data: dict, package_name: str, ecosystem: str) -> Vu
     """Convert an OSV vulnerability record into our model, scoped to one package."""
     wanted = normalize_name(package_name, ecosystem)
     fixed: list[str] = []
+    ranges: list[VersionRange] = []
+    explicit: list[str] = []
     severity_label = (data.get("database_specific") or {}).get("severity")
     for affected in data.get("affected") or []:
         pkg = affected.get("package") or {}
@@ -59,9 +62,24 @@ def parse_osv_vulnerability(data: dict, package_name: str, ecosystem: str) -> Vu
         for rng in affected.get("ranges") or []:
             if str(rng.get("type", "")).upper() == "GIT":
                 continue  # commit hashes are not installable versions
+            lower: str | None = None
             for event in rng.get("events") or []:
-                if isinstance(event, dict) and event.get("fixed"):
-                    fixed.append(normalize_version(str(event["fixed"])))
+                if not isinstance(event, dict):
+                    continue
+                if event.get("introduced") is not None:
+                    lower = normalize_version(str(event["introduced"]))
+                elif event.get("fixed"):
+                    upper = normalize_version(str(event["fixed"]))
+                    fixed.append(upper)
+                    ranges.append(VersionRange(lower=lower, upper=upper))
+                    lower = None
+                elif event.get("last_affected"):
+                    upper = normalize_version(str(event["last_affected"]))
+                    ranges.append(VersionRange(lower=lower, upper=upper, upper_inclusive=True))
+                    lower = None
+            if lower is not None:
+                ranges.append(VersionRange(lower=lower, upper=None))
+        explicit.extend(normalize_version(str(v)) for v in affected.get("versions") or [])
         if not severity_label:
             severity_label = (affected.get("ecosystem_specific") or {}).get("severity")
 
@@ -93,6 +111,8 @@ def parse_osv_vulnerability(data: dict, package_name: str, ecosystem: str) -> Vu
         modified=_parse_datetime(data.get("modified")),
         fixed_versions=_dedupe_keep_order(fixed),
         references=_dedupe_keep_order(references),
+        affected_ranges=ranges,
+        affected_versions=_dedupe_keep_order(explicit),
     )
 
 
@@ -144,6 +164,10 @@ def dedupe_vulnerabilities(vulns: list[Vulnerability]) -> list[Vulnerability]:
                     {fv for m in members for fv in m.fixed_versions}, key=version_sort_key
                 ),
                 references=_dedupe_keep_order(r for m in members for r in m.references),
+                affected_ranges=list({rng for m in members for rng in m.affected_ranges}),
+                affected_versions=_dedupe_keep_order(
+                    v for m in members for v in m.affected_versions
+                ),
             )
         )
     return merged

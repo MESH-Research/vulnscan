@@ -8,6 +8,8 @@ from pathlib import Path
 
 from packaging.utils import canonicalize_name
 
+from vulnscan.versioncmp import compare_versions
+
 PYPI = "PyPI"
 PACKAGIST = "Packagist"
 WORDPRESS = "WordPress"
@@ -54,6 +56,27 @@ class Dependency:
         return (self.ecosystem, normalize_name(self.name, self.ecosystem))
 
 
+@dataclass(frozen=True)
+class VersionRange:
+    """A span of affected versions. `upper` is exclusive unless upper_inclusive is set."""
+
+    lower: str | None = None
+    lower_inclusive: bool = True
+    upper: str | None = None
+    upper_inclusive: bool = False
+
+    def contains(self, version: str, ecosystem: str) -> bool:
+        if self.lower is not None:
+            cmp = compare_versions(version, self.lower, ecosystem)
+            if cmp < 0 or (cmp == 0 and not self.lower_inclusive):
+                return False
+        if self.upper is not None:
+            cmp = compare_versions(version, self.upper, ecosystem)
+            if cmp > 0 or (cmp == 0 and not self.upper_inclusive):
+                return False
+        return True
+
+
 @dataclass
 class Vulnerability:
     """A single advisory as reported by OSV."""
@@ -70,6 +93,14 @@ class Vulnerability:
     references: list[str] = field(default_factory=list)
     link: str | None = None
     source: str = "osv"
+    affected_ranges: list[VersionRange] = field(default_factory=list)
+    affected_versions: list[str] = field(default_factory=list)
+
+    def affects(self, version: str, ecosystem: str) -> bool:
+        """Is `version` within the known affected ranges or explicit version list?"""
+        if any(compare_versions(version, v, ecosystem) == 0 for v in self.affected_versions):
+            return True
+        return any(rng.contains(version, ecosystem) for rng in self.affected_ranges)
 
     @property
     def cve_ids(self) -> list[str]:

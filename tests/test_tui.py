@@ -204,3 +204,88 @@ def test_detail_markdown_includes_wordfence_attribution():
     osv = Vulnerability("GHSA-1", "s", "d")
     assert WORDFENCE_COPYRIGHT in vulnerability_markdown(Finding(dep, [wf]), wf)
     assert WORDFENCE_COPYRIGHT not in vulnerability_markdown(Finding(dep, [osv]), osv)
+
+
+async def test_remediate_key_offers_options_and_applies_choice(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    project = settings.project_path
+    project.mkdir()
+    (project / "composer.json").write_text(
+        '{\n  "require": {\n    "monolog/monolog": "^1.0"\n  }\n}\n'
+    )
+
+    def fake_versions(dep):
+        assert dep.name == "monolog/monolog"
+        return ["1.0.0", "1.0.1", "1.5.0", "2.9.1"]
+
+    def scan_fn(s):
+        result = sample_result(s.project_path)
+        # make monolog's single advisory carry range data so planning can work
+        from vulnscan.models import VersionRange
+
+        result.findings[0].vulnerabilities[0].affected_ranges = [
+            VersionRange(lower="0", upper="1.0.1")
+        ]
+        return result
+
+    app = VulnScanApp(settings, scan_fn=scan_fn, versions_fn=fake_versions)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        screen = app.screen
+        assert screen.__class__.__name__ == "RemediateScreen"
+        text = screen.query_one("#remediate-options").render_str if False else None  # noqa: F841
+        from textual.widgets import OptionList
+
+        options = screen.query_one("#remediate-options", OptionList)
+        assert options.option_count == 2
+        prompts = [str(options.get_option_at_index(i).prompt) for i in range(options.option_count)]
+        assert any("1.0.1" in p for p in prompts)
+        assert any("2.9.1" in p for p in prompts)
+        await pilot.press("enter")  # first option: nearest safe version
+        await settle(app, pilot)
+        assert app.screen.__class__.__name__ != "RemediateScreen"
+        assert '"monolog/monolog": "^1.0.1"' in (project / "composer.json").read_text()
+        assert "composer update monolog/monolog" in app.status_text
+
+
+async def test_remediate_escape_cancels(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    project = settings.project_path
+    project.mkdir()
+    original = '{"require": {"monolog/monolog": "^1.0"}}'
+    (project / "composer.json").write_text(original)
+    app = VulnScanApp(
+        settings,
+        scan_fn=lambda s: sample_result(s.project_path),
+        versions_fn=lambda d: ["1.0.0", "2.0.0"],
+    )
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        assert app.screen.__class__.__name__ == "RemediateScreen"
+        await pilot.press("escape")
+        await settle(app, pilot)
+        assert app.screen.__class__.__name__ != "RemediateScreen"
+        assert (project / "composer.json").read_text() == original
+
+
+async def test_remediate_reports_registry_failure(tmp_path: Path):
+    from vulnscan.registry import RegistryError
+
+    settings = settings_for(tmp_path)
+
+    def failing(dep):
+        raise RegistryError("registry down")
+
+    app = VulnScanApp(
+        settings, scan_fn=lambda s: sample_result(s.project_path), versions_fn=failing
+    )
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        assert app.screen.__class__.__name__ != "RemediateScreen"
+        assert "registry down" in app.status_text

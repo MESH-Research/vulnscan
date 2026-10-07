@@ -8,17 +8,27 @@ from collections.abc import Callable
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import DataTable, Footer, Header, Markdown, Static
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Footer, Header, Label, Markdown, OptionList, Static
+from textual.widgets.option_list import Option
 
 from vulnscan.config import Settings
 from vulnscan.feeds import write_feeds
-from vulnscan.models import Finding, ScanResult, Vulnerability
+from vulnscan.models import Dependency, Finding, ScanResult, Vulnerability
+from vulnscan.registry import RegistryClient, RegistryError
+from vulnscan.remediate import (
+    RemediationError,
+    RemediationPlan,
+    apply_remediation,
+    plan_remediation,
+)
 from vulnscan.reports import write_reports
 from vulnscan.scanner import scan
 from vulnscan.wordfence import SOURCE as WORDFENCE_SOURCE
 from vulnscan.wordfence import wordfence_attribution
 
 ScanFn = Callable[[Settings], ScanResult]
+VersionsFn = Callable[[Dependency], list[str]]
 
 DEP_COLUMNS = (
     "Package",
@@ -70,6 +80,66 @@ def vulnerability_markdown(finding: Finding, vuln: Vulnerability) -> str:
     return "\n".join(lines)
 
 
+class RemediateScreen(ModalScreen[str | None]):
+    """Ask which upgrade to apply. Dismisses with 'nearest', 'latest' or None."""
+
+    DEFAULT_CSS = """
+    RemediateScreen { align: center middle; }
+    #remediate-box {
+        width: 90; height: auto; padding: 1 2; border: thick $primary; background: $surface;
+    }
+    #remediate-options { height: auto; margin-top: 1; }
+    #remediate-help { color: $text-muted; margin-top: 1; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, finding: Finding, plan: RemediationPlan) -> None:
+        super().__init__()
+        self.finding = finding
+        self.plan = plan
+
+    def compose(self) -> ComposeResult:
+        dep = self.finding.dependency
+        with Vertical(id="remediate-box"):
+            yield Label(
+                f"Upgrade {dep.name} (currently {self.plan.current or 'unknown'}, "
+                f"declared in {dep.source_file} as {dep.constraint or 'any version'})"
+            )
+            if self.plan.nearest_safe:
+                nearest = Option(
+                    f"Nearest safe version: {self.plan.nearest_safe}  "
+                    "(smallest upgrade that clears all known advisories)",
+                    id="nearest",
+                )
+            else:
+                nearest = Option(
+                    "Nearest safe version: none available", id="nearest", disabled=True
+                )
+            if self.plan.latest:
+                note = "" if self.plan.latest_is_safe else "  (still has known advisories!)"
+                latest = Option(f"Latest release: {self.plan.latest}{note}", id="latest")
+            else:
+                latest = Option("Latest release: none found", id="latest", disabled=True)
+            yield OptionList(nearest, latest, id="remediate-options")
+            yield Label(
+                "Enter to apply the highlighted option, Esc to cancel.", id="remediate-help"
+            )
+
+    def on_mount(self) -> None:
+        options = self.query_one("#remediate-options", OptionList)
+        options.focus()
+        for index in range(options.option_count):
+            if not options.get_option_at_index(index).disabled:
+                options.highlighted = index
+                break
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class VulnScanApp(App[None]):
     TITLE = "vulnscan"
     CSS = """
@@ -83,14 +153,21 @@ class VulnScanApp(App[None]):
         Binding("r", "rescan", "Rescan"),
         Binding("f", "write_feeds", "Write feeds"),
         Binding("e", "export_reports", "Export md/txt"),
+        Binding("u", "remediate", "Upgrade dep"),
         Binding("o", "open_advisory", "Open advisory"),
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, settings: Settings, scan_fn: ScanFn | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        scan_fn: ScanFn | None = None,
+        versions_fn: VersionsFn | None = None,
+    ) -> None:
         super().__init__()
         self.settings = settings
         self._scan_fn: ScanFn = scan_fn or scan
+        self._versions_fn: VersionsFn | None = versions_fn
         self.result: ScanResult | None = None
         self._status = "Starting scan..."
         self._current_finding: Finding | None = None
@@ -238,6 +315,65 @@ class VulnScanApp(App[None]):
             return
         self._set_status(f"Wrote {markdown} and {text}")
         self.notify("Reports written")
+
+    # -- remediation --------------------------------------------------------------
+
+    def _available_versions(self, dep: Dependency) -> list[str]:
+        if self._versions_fn is not None:
+            return self._versions_fn(dep)
+        return RegistryClient(timeout=self.settings.request_timeout).available_versions(dep)
+
+    def action_remediate(self) -> None:
+        finding = self._current_finding
+        if finding is None:
+            self.notify("Select a vulnerable dependency first.", severity="warning")
+            return
+        self._set_status(f"Looking up available versions of {finding.dependency.name} ...")
+        self.run_worker(
+            lambda: self._lookup_versions(finding),
+            thread=True,
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    def _lookup_versions(self, finding: Finding) -> None:
+        try:
+            plan = plan_remediation(finding, self._available_versions(finding.dependency))
+        except RegistryError as exc:
+            self.call_from_thread(self._set_status, f"Could not look up versions: {exc}")
+            return
+        self.call_from_thread(self._offer_remediation, finding, plan)
+
+    def _offer_remediation(self, finding: Finding, plan: RemediationPlan) -> None:
+        self._set_status(
+            f"{finding.dependency.name}: nearest safe {plan.nearest_safe or 'none'}, "
+            f"latest {plan.latest or 'none'}"
+        )
+
+        def on_choice(choice: str | None) -> None:
+            if choice is None:
+                self._set_status("Upgrade cancelled.")
+                return
+            target = plan.nearest_safe if choice == "nearest" else plan.latest
+            if target is None:
+                self._set_status("That option has no version to upgrade to.")
+                return
+            self._apply_remediation(finding, target)
+
+        self.push_screen(RemediateScreen(finding, plan), on_choice)
+
+    def _apply_remediation(self, finding: Finding, target: str) -> None:
+        dep = finding.dependency
+        try:
+            outcome = apply_remediation(self.settings.project_path, dep, target)
+        except (RemediationError, OSError) as exc:
+            self._set_status(f"Could not update {dep.source_file}: {exc}")
+            return
+        self._set_status(
+            f"Updated {dep.source_file}: {dep.name} {outcome.old_constraint or '(any)'} -> "
+            f"{outcome.new_constraint}. {outcome.hint} Press r to rescan afterwards."
+        )
+        self.notify(f"{dep.name} -> {outcome.new_constraint}")
 
     def action_open_advisory(self) -> None:
         if self._current_vuln is None:

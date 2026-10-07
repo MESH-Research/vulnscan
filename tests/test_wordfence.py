@@ -475,3 +475,10 @@ def test_refresh_uses_etag_and_accepts_304(tmp_path: Path):
     # The 304 refreshed the cache's freshness: a third client needs no request at all.
     make_guarded_client(handler, tmp_path).find_vulnerabilities([elementor])
     assert len(calls) == 2
+
+
+def test_parse_wordfence_record_records_affected_ranges():
+    vuln = parse_wordfence_record(RECORD, RECORD["software"][0])
+    assert len(vuln.affected_ranges) == 1
+    assert vuln.affects("3.13.4", WORDPRESS) is True
+    assert vuln.affects("3.13.5", WORDPRESS) is False

@@ -331,3 +331,34 @@ def test_parse_osv_vulnerability_ignores_git_commit_ranges():
         ],
     }
     assert parse_osv_vulnerability(data, "requests", PYPI).fixed_versions == ["2.32.4"]
+
+
+def test_parse_osv_vulnerability_records_affected_ranges_and_versions():
+    data = {
+        "id": "GHSA-r",
+        "affected": [
+            {
+                "package": {"ecosystem": "PyPI", "name": "requests"},
+                "ranges": [
+                    {"type": "ECOSYSTEM", "events": [{"introduced": "2.3.0"}, {"fixed": "2.31.0"}]},
+                    {
+                        "type": "GIT",
+                        "repo": "x",
+                        "events": [{"introduced": "0"}, {"fixed": "abcdef"}],
+                    },
+                    {
+                        "type": "ECOSYSTEM",
+                        "events": [{"introduced": "3.0.0"}, {"last_affected": "3.0.5"}],
+                    },
+                ],
+                "versions": ["2.3.0", "2.30.0"],
+            }
+        ],
+    }
+    vuln = parse_osv_vulnerability(data, "requests", PYPI)
+    assert len(vuln.affected_ranges) == 2
+    assert vuln.affected_versions == ["2.3.0", "2.30.0"]
+    assert vuln.affects("2.30.0", PYPI) is True
+    assert vuln.affects("2.31.0", PYPI) is False
+    assert vuln.affects("3.0.5", PYPI) is True
+    assert vuln.affects("3.0.6", PYPI) is False

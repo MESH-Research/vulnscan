@@ -16,7 +16,7 @@ from pathlib import Path
 import httpx
 
 from vulnscan import __version__
-from vulnscan.models import WORDPRESS, Dependency, Vulnerability, normalize_severity
+from vulnscan.models import WORDPRESS, Dependency, VersionRange, Vulnerability, normalize_severity
 from vulnscan.parsers.versions import version_in_range
 
 FEED_PATH = "/vulnerabilities/production"
@@ -94,6 +94,21 @@ def parse_wordfence_record(record: dict, software: dict) -> Vulnerability:
             references.append(url)
 
     fixed = [str(v) for v in software.get("patched_versions") or [] if v]
+    ranges: list[VersionRange] = []
+    affected = software.get("affected_versions") or {}
+    for rng in affected.values() if isinstance(affected, dict) else []:
+        if not isinstance(rng, dict):
+            continue
+        lower = str(rng.get("from_version", "*"))
+        upper = str(rng.get("to_version", "*"))
+        ranges.append(
+            VersionRange(
+                lower=None if lower in ("*", "") else lower,
+                lower_inclusive=bool(rng.get("from_inclusive", True)),
+                upper=None if upper in ("*", "") else upper,
+                upper_inclusive=bool(rng.get("to_inclusive", True)),
+            )
+        )
     return Vulnerability(
         id=cve or wordfence_id,
         summary=str(record.get("title") or "").strip(),
@@ -107,6 +122,7 @@ def parse_wordfence_record(record: dict, software: dict) -> Vulnerability:
         references=references,
         link=VULNERABILITY_URL.format(id=wordfence_id) if wordfence_id else None,
         source=SOURCE,
+        affected_ranges=ranges,
     )
 
 

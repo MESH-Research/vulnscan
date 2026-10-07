@@ -10,8 +10,10 @@ from pathlib import Path
 from vulnscan import __version__
 from vulnscan.config import Settings, load_settings
 from vulnscan.feeds import write_feeds
-from vulnscan.models import ScanResult
+from vulnscan.models import Finding, ScanResult, normalize_name
 from vulnscan.osv import OSVError
+from vulnscan.registry import RegistryClient, RegistryError
+from vulnscan.remediate import RemediationError, apply_remediation, plan_remediation
 from vulnscan.reports import render_markdown, render_text
 from vulnscan.scanner import scan
 from vulnscan.wordfence import WordfenceError
@@ -56,9 +58,79 @@ def build_parser() -> argparse.ArgumentParser:
         help="non-interactive: write a plain-text report to FILE ('-' for stdout; "
         "default: <feed dir>/vulns.txt)",
     )
+    parser.add_argument(
+        "--remediate",
+        metavar="PACKAGE",
+        help="non-interactive: scan, then rewrite PACKAGE's constraint in its manifest "
+        "(name, e.g. requests or wp-plugin/elementor, or a WordPress slug)",
+    )
+    parser.add_argument(
+        "--strategy",
+        choices=("nearest", "latest"),
+        default="nearest",
+        help="with --remediate: 'nearest' = smallest upgrade clearing all advisories "
+        "(default), 'latest' = newest release",
+    )
     parser.add_argument("--env-file", help="path to a .env file (default: ./.env)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
+
+
+def fetch_versions(settings: Settings, dep) -> list[str]:
+    return RegistryClient(timeout=settings.request_timeout).available_versions(dep)
+
+
+def find_finding(result: ScanResult, wanted: str) -> Finding | None:
+    needle = wanted.strip().lower()
+    for finding in result.findings:
+        dep = finding.dependency
+        names = {dep.name.lower(), normalize_name(dep.name, dep.ecosystem), dep.slug.lower()}
+        if needle in names:
+            return finding
+    return None
+
+
+def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
+    try:
+        result = scan(settings)
+    except SCAN_ERRORS as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finding = find_finding(result, args.remediate)
+    if finding is None:
+        print(
+            f"error: {args.remediate} is not among the vulnerable direct dependencies "
+            f"({len(result.findings)} found)",
+            file=sys.stderr,
+        )
+        return 1
+    dep = finding.dependency
+    try:
+        plan = plan_remediation(finding, fetch_versions(settings, dep))
+    except RegistryError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    target = plan.nearest_safe if args.strategy == "nearest" else plan.latest
+    if target is None:
+        print(
+            f"error: no {'safe' if args.strategy == 'nearest' else 'newer'} version of {dep.name} "
+            f"is available above {dep.version or 'the current version'}",
+            file=sys.stderr,
+        )
+        return 1
+    if args.strategy == "latest" and not plan.latest_is_safe:
+        print(f"warning: {target} still has known advisories", file=sys.stderr)
+    try:
+        outcome = apply_remediation(settings.project_path, dep, target)
+    except RemediationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"Updated {dep.source_file}: {dep.name} {outcome.old_constraint or '(any)'} -> "
+        f"{outcome.new_constraint}"
+    )
+    print(outcome.hint)
+    return 0
 
 
 def run_tui(settings: Settings) -> None:
@@ -135,6 +207,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not settings.project_path.exists():
         print(f"error: project path does not exist: {settings.project_path}", file=sys.stderr)
         return 1
+    if args.remediate:
+        return run_remediate(settings, args)
     if args.update_feeds or args.markdown is not None or args.text is not None:
         return run_non_interactive(settings, args)
     run_tui(settings)
