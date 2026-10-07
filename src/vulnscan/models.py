@@ -10,6 +10,7 @@ from packaging.utils import canonicalize_name
 
 PYPI = "PyPI"
 PACKAGIST = "Packagist"
+WORDPRESS = "WordPress"
 
 SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
 _SEVERITY_ALIASES = {"MODERATE": "MEDIUM", "IMPORTANT": "HIGH"}
@@ -44,6 +45,9 @@ class Dependency:
     version_source: str
     source_file: str
     dev: bool = False
+    kind: str = ""
+    slug: str = ""
+    custom_source: bool = False
 
     @property
     def key(self) -> tuple[str, str]:
@@ -64,6 +68,8 @@ class Vulnerability:
     modified: datetime | None = None
     fixed_versions: list[str] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
+    link: str | None = None
+    source: str = "osv"
 
     @property
     def cve_ids(self) -> list[str]:
@@ -71,7 +77,7 @@ class Vulnerability:
 
     @property
     def url(self) -> str:
-        return f"https://osv.dev/vulnerability/{self.id}"
+        return self.link or f"https://osv.dev/vulnerability/{self.id}"
 
 
 @dataclass

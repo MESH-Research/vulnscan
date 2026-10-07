@@ -14,6 +14,8 @@ from urllib.parse import quote, urljoin
 
 from vulnscan.config import Settings
 from vulnscan.models import Dependency, ScanResult, Vulnerability, normalize_name
+from vulnscan.wordfence import SOURCE as WORDFENCE_SOURCE
+from vulnscan.wordfence import wordfence_attribution
 
 ATOM_NS = "http://www.w3.org/2005/Atom"
 GENERATOR = "vulnscan"
@@ -84,6 +86,8 @@ def _entry_html(dep: Dependency, vuln: Vulnerability) -> str:
     parts.append("<p>References:</p><ul>")
     parts += [f'<li><a href="{escape(u, quote=True)}">{escape(u)}</a></li>' for u in links]
     parts.append("</ul>")
+    if vuln.source == WORDFENCE_SOURCE:
+        parts.append("<p><small>" + escape(wordfence_attribution()) + "</small></p>")
     return "\n".join(parts)
 
 

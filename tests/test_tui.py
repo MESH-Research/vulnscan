@@ -181,3 +181,26 @@ def test_current_vulnerability_none_before_scan(tmp_path: Path):
 def test_app_exposes_inspection_properties(tmp_path: Path, attr):
     app = VulnScanApp(settings_for(tmp_path), scan_fn=lambda s: sample_result(s.project_path))
     assert hasattr(app, attr)
+
+
+async def test_export_key_writes_markdown_and_text(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    app = VulnScanApp(settings, scan_fn=lambda s: sample_result(s.project_path))
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("e")
+        await settle(app, pilot)
+        assert settings.markdown_path.is_file()
+        assert settings.text_path.is_file()
+        assert "monolog/monolog" in settings.markdown_path.read_text()
+
+
+def test_detail_markdown_includes_wordfence_attribution():
+    from vulnscan.tui import vulnerability_markdown
+    from vulnscan.wordfence import WORDFENCE_COPYRIGHT
+
+    dep = Dependency("wp-plugin/elementor", PACKAGIST, "3.13.4", "3.13.4", "lock", "composer.json")
+    wf = Vulnerability("CVE-1", "s", "d", link="https://www.wordfence.com/x", source="wordfence")
+    osv = Vulnerability("GHSA-1", "s", "d")
+    assert WORDFENCE_COPYRIGHT in vulnerability_markdown(Finding(dep, [wf]), wf)
+    assert WORDFENCE_COPYRIGHT not in vulnerability_markdown(Finding(dep, [osv]), osv)

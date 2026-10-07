@@ -91,3 +91,53 @@ def test_load_lock_versions_ignores_corrupt_file(tmp_path: Path):
     (tmp_path / "composer.lock").write_text("{nope")
     (tmp_path / "poetry.lock").write_text('[[package]]\nname = "x"\nversion = "1.0"\n')
     assert load_lock_versions(tmp_path) == {(PYPI, "x"): "1.0"}
+
+
+def test_composer_lock_packages_metadata(tmp_path: Path):
+    from vulnscan.parsers.lockfiles import composer_lock_packages
+
+    lock = tmp_path / "composer.lock"
+    lock.write_text(
+        json.dumps(
+            {
+                "packages": [
+                    {
+                        "name": "wp-plugin/elementor",
+                        "version": "3.13.4",
+                        "type": "wordpress-plugin",
+                        "notification-url": "https://wp-packages.org/downloads",
+                        "dist": {
+                            "url": "https://downloads.wordpress.org/plugin/elementor.3.13.4.zip"
+                        },
+                    },
+                    {
+                        "name": "monolog/monolog",
+                        "version": "3.3.1",
+                        "type": "library",
+                        "notification-url": "https://packagist.org/downloads/",
+                    },
+                    {"name": "acme/private", "version": "dev-main", "type": "wordpress-plugin"},
+                ],
+                "packages-dev": [
+                    {"name": "phpunit/phpunit", "version": "v9.6.0", "type": "library"}
+                ],
+            }
+        )
+    )
+    packages = composer_lock_packages(lock)
+    assert packages["wp-plugin/elementor"] == {
+        "version": "3.13.4",
+        "type": "wordpress-plugin",
+        "notification_url": "https://wp-packages.org/downloads",
+        "dist_url": "https://downloads.wordpress.org/plugin/elementor.3.13.4.zip",
+    }
+    assert packages["monolog/monolog"]["notification_url"] == "https://packagist.org/downloads/"
+    assert packages["acme/private"]["notification_url"] is None
+    assert packages["acme/private"]["dist_url"] is None
+    assert packages["phpunit/phpunit"]["version"] == "9.6.0"
+
+
+def test_composer_lock_packages_missing_file(tmp_path: Path):
+    from vulnscan.parsers.lockfiles import composer_lock_packages
+
+    assert composer_lock_packages(tmp_path / "composer.lock") == {}

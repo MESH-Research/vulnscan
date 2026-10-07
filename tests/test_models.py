@@ -95,3 +95,21 @@ def test_vulnerability_defaults():
     assert vuln.aliases == []
     assert vuln.fixed_versions == []
     assert vuln.severity == "UNKNOWN"
+
+
+def test_normalize_name_wordpress_lowercases():
+    from vulnscan.models import WORDPRESS
+
+    assert normalize_name("WP-Plugin/Elementor", WORDPRESS) == "wp-plugin/elementor"
+
+
+def test_dependency_optional_fields_default():
+    dep = make_dep()
+    assert dep.kind == ""
+    assert dep.slug == ""
+    assert dep.custom_source is False
+
+
+def test_vulnerability_url_prefers_explicit_link():
+    vuln = make_vuln(link="https://www.wordfence.com/threat-intel/vulnerabilities/id/abc")
+    assert vuln.url == "https://www.wordfence.com/threat-intel/vulnerabilities/id/abc"

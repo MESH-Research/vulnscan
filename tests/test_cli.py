@@ -111,3 +111,61 @@ def test_help_exits_zero(flag, capsys):
         cli.main([flag])
     assert exc.value.code == 0
     assert "update-feeds" in capsys.readouterr().out
+
+
+def test_parser_export_flags(tmp_path: Path):
+    args = cli.build_parser().parse_args(["--markdown", "--text", "out.txt"])
+    assert args.markdown == "" and args.text == "out.txt"
+    args = cli.build_parser().parse_args([])
+    assert args.markdown is None and args.text is None
+
+
+def test_markdown_export_writes_default_path_without_feeds(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(cli, "scan", lambda settings: fake_result(settings.project_path))
+    code = cli.main(["--markdown", "--path", str(tmp_path), "--feed-dir", str(tmp_path / "out")])
+    assert code == 0
+    assert (tmp_path / "out" / "vulns.md").is_file()
+    assert not (tmp_path / "out" / "vulns.rss.xml").exists()
+    assert not (tmp_path / "out" / "vulns.txt").exists()
+
+
+def test_text_export_to_explicit_file_and_stdout(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "scan", lambda settings: fake_result(settings.project_path))
+    code = cli.main(["--text", str(tmp_path / "r.txt"), "--path", str(tmp_path)])
+    assert code == 0
+    assert "GHSA-1" in (tmp_path / "r.txt").read_text()
+    code = cli.main(["--text", "-", "--path", str(tmp_path)])
+    assert code == 0
+    assert "GHSA-1" in capsys.readouterr().out
+
+
+def test_exports_combine_with_update_feeds(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(cli, "scan", lambda settings: fake_result(settings.project_path))
+    code = cli.main(
+        [
+            "--update-feeds",
+            "--markdown",
+            "--text",
+            "--path",
+            str(tmp_path),
+            "--feed-dir",
+            str(tmp_path / "out"),
+        ]
+    )
+    assert code == 0
+    for name in ["vulns.rss.xml", "vulns.atom.xml", "vulns.md", "vulns.txt"]:
+        assert (tmp_path / "out" / name).is_file(), name
+
+
+def test_wordfence_error_fails_cleanly(tmp_path: Path, monkeypatch, capsys):
+    from vulnscan.wordfence import WordfenceError
+
+    def failing(settings):
+        raise WordfenceError("Wordfence rejected the API key")
+
+    monkeypatch.setattr(cli, "scan", failing)
+    code = cli.main(
+        ["--update-feeds", "--path", str(tmp_path), "--feed-dir", str(tmp_path / "out")]
+    )
+    assert code == 1
+    assert "Wordfence rejected the API key" in capsys.readouterr().err

@@ -119,3 +119,50 @@ def test_feed_paths_derive_from_feed_dir(tmp_path: Path):
     assert settings.rss_path == tmp_path / "f" / "r.xml"
     assert settings.atom_path == tmp_path / "f" / "a.xml"
     assert settings.state_path == tmp_path / "f" / "s.json"
+
+
+def test_new_settings_defaults(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    settings = load_settings(env={}, dotenv_path=tmp_path / "missing.env")
+    assert settings.wordfence_api_key == ""
+    assert settings.wordfence_url == "https://www.wordfence.com/api/intelligence/v3"
+    assert settings.wordfence_ttl_hours == 24.0
+    assert settings.cache_dir == (Path.home() / ".cache" / "vulnscan")
+    assert settings.ignore_dirs == ()
+    assert settings.markdown_filename == "vulns.md"
+    assert settings.text_filename == "vulns.txt"
+
+
+def test_new_settings_from_env(tmp_path: Path):
+    env = {
+        "VULNSCAN_WORDFENCE_API_KEY": "secret",
+        "VULNSCAN_WORDFENCE_URL": "http://localhost:1/v3/",
+        "VULNSCAN_WORDFENCE_TTL_HOURS": "6",
+        "VULNSCAN_CACHE_DIR": str(tmp_path / "cache"),
+        "VULNSCAN_IGNORE_DIRS": "legacy, old-site ,",
+        "VULNSCAN_MARKDOWN_FILE": "report.md",
+        "VULNSCAN_TEXT_FILE": "report.txt",
+    }
+    settings = load_settings(env=env, dotenv_path=tmp_path / "missing.env")
+    assert settings.wordfence_api_key == "secret"
+    assert settings.wordfence_url == "http://localhost:1/v3"
+    assert settings.wordfence_ttl_hours == 6.0
+    assert settings.cache_dir == (tmp_path / "cache").resolve()
+    assert settings.ignore_dirs == ("legacy", "old-site")
+    assert settings.markdown_filename == "report.md"
+    assert settings.text_filename == "report.txt"
+
+
+def test_cache_dir_honours_xdg(tmp_path: Path, monkeypatch):
+    env = {"XDG_CACHE_HOME": str(tmp_path / "xdg")}
+    settings = load_settings(env=env, dotenv_path=tmp_path / "missing.env")
+    assert settings.cache_dir == (tmp_path / "xdg" / "vulnscan").resolve()
+
+
+def test_report_paths_derive_from_feed_dir(tmp_path: Path):
+    settings = load_settings(
+        env={"VULNSCAN_FEED_DIR": str(tmp_path / "f")}, dotenv_path=tmp_path / "missing.env"
+    )
+    assert settings.markdown_path == (tmp_path / "f" / "vulns.md").resolve()
+    assert settings.text_path == (tmp_path / "f" / "vulns.txt").resolve()

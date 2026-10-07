@@ -13,7 +13,10 @@ from textual.widgets import DataTable, Footer, Header, Markdown, Static
 from vulnscan.config import Settings
 from vulnscan.feeds import write_feeds
 from vulnscan.models import Finding, ScanResult, Vulnerability
+from vulnscan.reports import write_reports
 from vulnscan.scanner import scan
+from vulnscan.wordfence import SOURCE as WORDFENCE_SOURCE
+from vulnscan.wordfence import wordfence_attribution
 
 ScanFn = Callable[[Settings], ScanResult]
 
@@ -62,6 +65,8 @@ def vulnerability_markdown(finding: Finding, vuln: Vulnerability) -> str:
         "",
     ]
     lines += [f"- <{url}>" for url in [vuln.url, *vuln.references]]
+    if vuln.source == WORDFENCE_SOURCE:
+        lines += ["", "---", "", f"_{wordfence_attribution()}_"]
     return "\n".join(lines)
 
 
@@ -77,6 +82,7 @@ class VulnScanApp(App[None]):
     BINDINGS = [
         Binding("r", "rescan", "Rescan"),
         Binding("f", "write_feeds", "Write feeds"),
+        Binding("e", "export_reports", "Export md/txt"),
         Binding("o", "open_advisory", "Open advisory"),
         Binding("q", "quit", "Quit"),
     ]
@@ -218,6 +224,18 @@ class VulnScanApp(App[None]):
             return
         self._set_status(f"Wrote {rss} and {atom}")
         self.notify("Feeds written")
+
+    def action_export_reports(self) -> None:
+        if self.result is None:
+            self.notify("Nothing to export: no completed scan.", severity="warning")
+            return
+        try:
+            markdown, text = write_reports(self.result, self.settings)
+        except OSError as exc:
+            self._set_status(f"Could not write reports: {exc}")
+            return
+        self._set_status(f"Wrote {markdown} and {text}")
+        self.notify("Reports written")
 
     def action_open_advisory(self) -> None:
         if self._current_vuln is None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -34,7 +35,37 @@ IGNORED_DIRS = {
     "dist",
 }
 
+# WordPress core directories: never contain the project's own manifests.
+WP_CORE_DIRS = {"wp-admin", "wp-includes"}
+
 Parser = Callable[[Path, Path], list[Dependency]]
+
+
+def composer_ignored_dirs(composer_json: Path) -> set[Path]:
+    """Directories Composer installs *into* (vendor dir, installer paths, WordPress core)."""
+    try:
+        data = json.loads(composer_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    base = composer_json.parent
+    targets: list[str] = []
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    targets.append(str(config.get("vendor-dir") or "vendor"))
+    extra = data.get("extra") if isinstance(data.get("extra"), dict) else {}
+    paths = extra.get("installer-paths") if isinstance(extra.get("installer-paths"), dict) else {}
+    for pattern in paths:
+        prefix = str(pattern).split("{$", 1)[0]
+        if prefix.strip("/"):
+            targets.append(prefix)
+    install_dir = extra.get("wordpress-install-dir")
+    if isinstance(install_dir, str):
+        targets.append(install_dir)
+    elif isinstance(install_dir, dict):
+        targets.extend(str(v) for v in install_dir.values())
+    return {(base / t.strip("/")).resolve() for t in targets if t.strip("/")}
+
 
 _EXACT_NAMES: dict[str, Parser] = {
     "composer.json": parse_composer_json,
@@ -58,12 +89,23 @@ def is_manifest(path: Path) -> bool:
     return _parser_for(path) is not None
 
 
-def discover_manifests(root: Path) -> list[Path]:
+def discover_manifests(root: Path, ignore_dirs: tuple[str, ...] = ()) -> list[Path]:
     if root.is_file():
         return [root] if is_manifest(root) else []
+    ignored_names = IGNORED_DIRS | WP_CORE_DIRS | set(ignore_dirs)
+    ignored_paths: set[Path] = set()
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in IGNORED_DIRS and not d.startswith("."))
+        here = Path(dirpath)
+        if "composer.json" in filenames:
+            ignored_paths |= composer_ignored_dirs(here / "composer.json")
+        dirnames[:] = sorted(
+            d
+            for d in dirnames
+            if d not in ignored_names
+            and not d.startswith(".")
+            and (here / d).resolve() not in ignored_paths
+        )
         for filename in sorted(filenames):
             path = Path(dirpath) / filename
             if is_manifest(path):
@@ -78,10 +120,12 @@ def parse_manifest(path: Path, root: Path) -> list[Dependency]:
     return parser(path, root)
 
 
-def parse_project(root: Path) -> tuple[list[Dependency], list[str]]:
+def parse_project(
+    root: Path, ignore_dirs: tuple[str, ...] = ()
+) -> tuple[list[Dependency], list[str]]:
     """Parse every manifest under root and resolve versions using adjacent lock files."""
     warnings: list[str] = []
-    manifests = discover_manifests(root)
+    manifests = discover_manifests(root, ignore_dirs=ignore_dirs)
     if not manifests:
         warnings.append(f"No dependency manifests found under {root}")
         return [], warnings

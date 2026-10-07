@@ -100,3 +100,86 @@ def test_parse_project_mixed_ecosystems(tmp_path: Path):
     (tmp_path / "requirements.txt").write_text("requests==2.0.0\n")
     deps, _ = parse_project(tmp_path)
     assert {(d.ecosystem, d.name) for d in deps} == {(PACKAGIST, "a/b"), (PYPI, "requests")}
+
+
+def test_discover_skips_composer_installer_paths_and_core_dir(tmp_path: Path):
+    (tmp_path / "composer.json").write_text(
+        json.dumps(
+            {
+                "require": {"a/b": "1.0.0"},
+                "config": {"vendor-dir": "deps"},
+                "extra": {
+                    "installer-paths": {
+                        "site/web/app/mu-plugins/{$name}/": ["type:wordpress-muplugin"],
+                        "site/web/app/plugins/{$name}/": ["type:wordpress-plugin"],
+                        "site/web/app/themes/{$name}/": ["type:wordpress-theme"],
+                    },
+                    "wordpress-install-dir": "site/web/wp",
+                },
+            }
+        )
+    )
+    for rel in [
+        "site/web/app/plugins/elementor/composer.json",
+        "site/web/app/themes/astra/inc/composer.json",
+        "site/web/app/mu-plugins/x/composer.json",
+        "site/web/wp/wp-includes/sodium_compat/composer.json",
+        "deps/acme/lib/composer.json",
+        "plugins/custom/composer.json",
+        "site/web/app/custom-tool/requirements.txt",
+    ]:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}")
+    found = sorted(p.relative_to(tmp_path).as_posix() for p in discover_manifests(tmp_path))
+    assert found == [
+        "composer.json",
+        "plugins/custom/composer.json",
+        "site/web/app/custom-tool/requirements.txt",
+    ]
+
+
+def test_discover_skips_wordpress_core_directories(tmp_path: Path):
+    for rel in ["wp-includes/x/composer.json", "wp-admin/y/composer.json", "composer.json"]:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}")
+    assert [p.name for p in discover_manifests(tmp_path)] == ["composer.json"]
+
+
+def test_discover_respects_extra_ignored_dirs(tmp_path: Path):
+    (tmp_path / "legacy").mkdir()
+    (tmp_path / "legacy" / "requirements.txt").write_text("")
+    (tmp_path / "requirements.txt").write_text("")
+    found = discover_manifests(tmp_path, ignore_dirs=("legacy",))
+    assert [p.relative_to(tmp_path).as_posix() for p in found] == ["requirements.txt"]
+
+
+def test_parse_project_passes_ignore_dirs(tmp_path: Path):
+    (tmp_path / "legacy").mkdir()
+    (tmp_path / "legacy" / "requirements.txt").write_text("old==1.0\n")
+    (tmp_path / "requirements.txt").write_text("new==1.0\n")
+    deps, _ = parse_project(tmp_path, ignore_dirs=("legacy",))
+    assert [d.name for d in deps] == ["new"]
+
+
+def test_parse_project_resolves_wordpress_plugin_version_from_composer_lock(tmp_path: Path):
+    from vulnscan.models import WORDPRESS
+
+    (tmp_path / "composer.json").write_text(
+        json.dumps({"require": {"wp-plugin/elementor": "^3.13"}})
+    )
+    (tmp_path / "composer.lock").write_text(
+        json.dumps(
+            {
+                "packages": [
+                    {"name": "wp-plugin/elementor", "version": "3.13.4", "type": "wordpress-plugin"}
+                ]
+            }
+        )
+    )
+    deps, warnings = parse_project(tmp_path)
+    assert [(d.ecosystem, d.slug, d.version, d.version_source) for d in deps] == [
+        (WORDPRESS, "elementor", "3.13.4", "lock")
+    ]
+    assert warnings == []

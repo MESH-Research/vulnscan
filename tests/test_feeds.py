@@ -245,3 +245,19 @@ def test_write_feeds_with_no_findings_writes_empty_feeds(tmp_path: Path):
     settings = settings_for(tmp_path)
     write_feeds(result_for(tmp_path, findings=[]), settings, now=NOW)
     assert ET.parse(settings.rss_path).getroot().find("channel").findall("item") == []
+
+
+def test_wordfence_entries_carry_attribution(tmp_path: Path):
+    from vulnscan.wordfence import WORDFENCE_COPYRIGHT, WORDFENCE_LICENSE_URL
+
+    wf = vuln(
+        "CVE-2023-1234",
+        link="https://www.wordfence.com/threat-intel/vulnerabilities/id/abc",
+        source="wordfence",
+    )
+    osv = vuln()
+    entries = build_entries(result_for(tmp_path, [Finding(dep(), [wf, osv])]), {}, NOW)
+    by_id = {e.link: e for e in entries}
+    assert WORDFENCE_COPYRIGHT in by_id[wf.url].content_html
+    assert WORDFENCE_LICENSE_URL in by_id[wf.url].content_html
+    assert WORDFENCE_COPYRIGHT not in by_id[osv.url].content_html

@@ -150,3 +150,95 @@ def test_resolve_keeps_other_fields():
     assert resolved.source_file == "req.txt"
     assert resolved.dev is True
     assert resolved.constraint == "==1.0"
+
+
+from vulnscan.models import WORDPRESS  # noqa: E402
+from vulnscan.parsers.versions import compare_versions, version_in_range  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "a,b,expected",
+    [
+        ("1.0", "1.0.1", -1),
+        ("1.0.1", "1.1", -1),
+        ("1.0", "1.0.0", 0),
+        ("3.13.4", "3.13.10", -1),
+        ("3.13.10", "3.13.4", 1),
+        ("1.0-RC1", "1.0", -1),
+        ("1.0-beta", "1.0-RC1", -1),
+        ("2.0.0", "2.0.0", 0),
+        ("6.5.2", "6.5", 1),
+        ("1.0-RC12.20251103", "1.0", -1),
+        ("1.3-alpha.20241204", "1.3", -1),
+        ("10.5.62", "9.6.33", 1),
+        ("v2.3.4", "2.3.4", 0),
+    ],
+)
+def test_compare_versions(a, b, expected):
+    assert compare_versions(a, b) == expected
+
+
+@pytest.mark.parametrize(
+    "version,frm,frm_inc,to,to_inc,expected",
+    [
+        ("3.13.4", "*", True, "3.13.4", True, True),
+        ("3.13.4", "*", True, "3.13.4", False, False),
+        ("3.13.5", "*", True, "3.13.4", True, False),
+        ("2.9", "3.0.0", True, "3.5", True, False),
+        ("3.0.0", "3.0.0", True, "3.5", True, True),
+        ("3.0.0", "3.0.0", False, "3.5", True, False),
+        ("1.0", "*", True, "*", True, True),
+        ("4.1", "4.0", True, "*", True, True),
+    ],
+)
+def test_version_in_range(version, frm, frm_inc, to, to_inc, expected):
+    assert version_in_range(version, frm, frm_inc, to, to_inc) is expected
+
+
+def test_resolve_wordpress_dependency_uses_composer_lock_entry():
+    wp = Dependency(
+        "wp-plugin/elementor",
+        WORDPRESS,
+        "^3.13",
+        None,
+        "unknown",
+        "composer.json",
+        kind="plugin",
+        slug="elementor",
+    )
+    resolved = resolve_dependency(wp, {(PACKAGIST, "wp-plugin/elementor"): "3.13.4"})
+    assert resolved.version == "3.13.4"
+    assert resolved.version_source == "lock"
+    assert resolved.kind == "plugin"
+    assert resolved.slug == "elementor"
+
+
+def test_resolve_wordpress_dependency_uses_composer_style_constraints():
+    pinned = Dependency(
+        "wp-plugin/elementor",
+        WORDPRESS,
+        "3.13.4",
+        None,
+        "unknown",
+        "composer.json",
+        kind="plugin",
+        slug="elementor",
+    )
+    assert (
+        resolve_dependency(pinned, {}).version,
+        resolve_dependency(pinned, {}).version_source,
+    ) == ("3.13.4", "pinned")
+    caret = Dependency(
+        "wp-theme/astra",
+        WORDPRESS,
+        "^4.1",
+        None,
+        "unknown",
+        "composer.json",
+        kind="theme",
+        slug="astra",
+    )
+    assert (
+        resolve_dependency(caret, {}).version,
+        resolve_dependency(caret, {}).version_source,
+    ) == ("4.1", "constraint")

@@ -161,3 +161,112 @@ def test_scan_dependency_ecosystem_preserved(tmp_path: Path):
     write_project(tmp_path)
     result = scan(settings_for(tmp_path), client=FakeClient({}))
     assert {d.ecosystem for d in result.dependencies} == {PYPI, "Packagist"}
+
+
+from vulnscan.models import WORDPRESS  # noqa: E402
+
+
+class FakeWordpressClient(FakeClient):
+    def __init__(self, table, warnings=None):
+        super().__init__(table)
+        self.warnings = warnings or []
+
+
+def write_wordpress_project(tmp_path: Path):
+    (tmp_path / "composer.json").write_text(
+        json.dumps({"require": {"wp-plugin/elementor": "3.13.4", "monolog/monolog": "1.0.0"}})
+    )
+
+
+def test_scan_routes_wordpress_dependencies_to_wordpress_client(tmp_path: Path):
+    write_wordpress_project(tmp_path)
+    osv = FakeClient({("monolog/monolog", "1.0.0"): [vuln("GHSA-M", "LOW")]})
+    wp = FakeWordpressClient({("wp-plugin/elementor", "3.13.4"): [vuln("CVE-2023-1234", "HIGH")]})
+    result = scan(settings_for(tmp_path, wordfence_api_key="k"), client=osv, wordpress_client=wp)
+    assert [d.name for d in osv.seen] == ["monolog/monolog"]
+    assert [d.name for d in wp.seen] == ["wp-plugin/elementor"]
+    assert [(f.dependency.name, f.worst_severity) for f in result.findings] == [
+        ("wp-plugin/elementor", "HIGH"),
+        ("monolog/monolog", "LOW"),
+    ]
+    assert result.findings[0].dependency.ecosystem == WORDPRESS
+
+
+def test_scan_warns_when_wordpress_dependencies_but_no_api_key(tmp_path: Path):
+    write_wordpress_project(tmp_path)
+    result = scan(settings_for(tmp_path, wordfence_api_key=""), client=FakeClient({}))
+    assert result.findings == []
+    assert any("WORDFENCE_API_KEY" in w and "1" in w for w in result.warnings)
+
+
+def test_scan_builds_wordfence_client_from_settings(tmp_path: Path, monkeypatch):
+    import vulnscan.scanner as scanner_module
+
+    created = {}
+
+    class Recording(FakeWordpressClient):
+        def __init__(self, api_key, base_url, timeout, cache_path, ttl_hours):
+            super().__init__({})
+            created.update(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout,
+                cache_path=cache_path,
+                ttl_hours=ttl_hours,
+            )
+
+    monkeypatch.setattr(scanner_module, "WordfenceClient", Recording)
+    write_wordpress_project(tmp_path)
+    settings = settings_for(
+        tmp_path,
+        wordfence_api_key="k",
+        wordfence_url="https://wf.example/v3",
+        cache_dir=tmp_path / "cache",
+        wordfence_ttl_hours=6.0,
+        request_timeout=9.0,
+    )
+    scan(settings, client=FakeClient({}))
+    assert created == {
+        "api_key": "k",
+        "base_url": "https://wf.example/v3",
+        "timeout": 9.0,
+        "cache_path": tmp_path / "cache" / "wordfence-production.json",
+        "ttl_hours": 6.0,
+    }
+
+
+def test_scan_does_not_build_wordfence_client_without_wordpress_deps(tmp_path: Path, monkeypatch):
+    import vulnscan.scanner as scanner_module
+
+    def boom(*args, **kwargs):
+        raise AssertionError("should not be constructed")
+
+    monkeypatch.setattr(scanner_module, "WordfenceClient", boom)
+    write_project(tmp_path)
+    scan(settings_for(tmp_path, wordfence_api_key="k"), client=FakeClient({}))
+
+
+def test_scan_collects_client_warnings(tmp_path: Path):
+    write_wordpress_project(tmp_path)
+    wp = FakeWordpressClient({}, warnings=["Using stale Wordfence cache"])
+    result = scan(
+        settings_for(tmp_path, wordfence_api_key="k"), client=FakeClient({}), wordpress_client=wp
+    )
+    assert "Using stale Wordfence cache" in result.warnings
+
+
+def test_scan_warns_about_custom_source_packages(tmp_path: Path):
+    (tmp_path / "composer.json").write_text(json.dumps({"require": {"acme/private": "1.0.0"}}))
+    (tmp_path / "composer.lock").write_text(
+        json.dumps({"packages": [{"name": "acme/private", "version": "1.0.0", "type": "library"}]})
+    )
+    result = scan(settings_for(tmp_path), client=FakeClient({}))
+    assert any("acme/private" in w and "custom" in w.lower() for w in result.warnings)
+
+
+def test_scan_passes_ignore_dirs(tmp_path: Path):
+    (tmp_path / "legacy").mkdir()
+    (tmp_path / "legacy" / "requirements.txt").write_text("old==1.0\n")
+    (tmp_path / "requirements.txt").write_text("new==1.0\n")
+    result = scan(settings_for(tmp_path, ignore_dirs=("legacy",)), client=FakeClient({}))
+    assert [d.name for d in result.dependencies] == ["new"]
