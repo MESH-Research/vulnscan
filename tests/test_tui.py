@@ -289,3 +289,98 @@ async def test_remediate_reports_registry_failure(tmp_path: Path):
         await settle(app, pilot)
         assert app.screen.__class__.__name__ != "RemediateScreen"
         assert "registry down" in app.status_text
+
+
+def _remediable_app(tmp_path: Path):
+    """App whose first finding (monolog) can be upgraded to 1.0.1 against a real composer.json."""
+    settings = settings_for(tmp_path)
+    project = settings.project_path
+    project.mkdir()
+    (project / "composer.json").write_text('{"require": {"monolog/monolog": "^1.0"}}')
+
+    def scan_fn(s):
+        from vulnscan.models import VersionRange
+
+        result = sample_result(s.project_path)
+        result.findings[0].vulnerabilities[0].affected_ranges = [
+            VersionRange(lower="0", upper="1.0.1")
+        ]
+        return result
+
+    return VulnScanApp(settings, scan_fn=scan_fn, versions_fn=lambda d: ["1.0.0", "1.0.1", "2.9.1"])
+
+
+def _row_text(table: DataTable, row: int) -> list[str]:
+    return [str(c) for c in table.get_row_at(row)]
+
+
+async def test_remediated_dependency_row_is_ticked_and_green(tmp_path: Path):
+    from rich.text import Text
+
+    app = _remediable_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        deps = app.query_one("#deps", DataTable)
+        assert "✔" not in "".join(_row_text(deps, 0))
+        await pilot.press("u")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        cells = deps.get_row_at(0)
+        assert "✔" in str(cells[0])
+        assert any("monolog/monolog" in str(c) for c in cells)
+        styled = [c for c in cells if isinstance(c, Text) and "green" in str(c.style)]
+        assert len(styled) == len(cells)
+        # The untouched second row stays unstyled.
+        assert "✔" not in "".join(_row_text(deps, 1))
+        assert not any(isinstance(c, Text) and "green" in str(c.style) for c in deps.get_row_at(1))
+        assert app.remediated == {("Packagist", "monolog/monolog"): "^1.0.1"}
+
+
+async def test_remediated_advisory_rows_are_marked(tmp_path: Path):
+    app = _remediable_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        vulns = app.query_one("#vulns", DataTable)
+        assert vulns.row_count == 1
+        assert "✔" in "".join(_row_text(vulns, 0))
+        # Moving to another dependency shows unmarked advisories; coming back shows marked ones.
+        deps = app.query_one("#deps", DataTable)
+        deps.move_cursor(row=1)
+        await settle(app, pilot)
+        assert "✔" not in "".join(_row_text(vulns, 0))
+        deps.move_cursor(row=0)
+        await settle(app, pilot)
+        assert "✔" in "".join(_row_text(vulns, 0))
+
+
+async def test_remediation_mark_survives_rescan(tmp_path: Path):
+    app = _remediable_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        await pilot.press("r")
+        await settle(app, pilot)
+        deps = app.query_one("#deps", DataTable)
+        assert "✔" in str(deps.get_row_at(0)[0])
+        assert "✔" not in "".join(_row_text(deps, 1))
+
+
+async def test_cancelled_remediation_leaves_row_unmarked(tmp_path: Path):
+    app = _remediable_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        await pilot.press("escape")
+        await settle(app, pilot)
+        deps = app.query_one("#deps", DataTable)
+        assert "✔" not in "".join(_row_text(deps, 0))
+        assert app.remediated == {}

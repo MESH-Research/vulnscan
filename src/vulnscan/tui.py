@@ -5,6 +5,7 @@ from __future__ import annotations
 import webbrowser
 from collections.abc import Callable
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -31,6 +32,7 @@ ScanFn = Callable[[Settings], ScanResult]
 VersionsFn = Callable[[Dependency], list[str]]
 
 DEP_COLUMNS = (
+    " ",
     "Package",
     "Ecosystem",
     "Version",
@@ -40,7 +42,16 @@ DEP_COLUMNS = (
     "Fixed in",
     "File",
 )
-VULN_COLUMNS = ("Advisory", "Severity", "CVE", "Summary")
+VULN_COLUMNS = ("Advisory", "Severity", "CVE", "Summary", "Status")
+REMEDIATED_STYLE = "bold green"
+TICK = "✔"
+
+
+def _cells(values: list[str], remediated: bool) -> list[str | Text]:
+    """Plain strings normally; green text once the dependency has been upgraded."""
+    if not remediated:
+        return list(values)
+    return [Text(v, style=REMEDIATED_STYLE) for v in values]
 
 
 def _plural(count: int, noun: str) -> str:
@@ -169,6 +180,9 @@ class VulnScanApp(App[None]):
         self._scan_fn: ScanFn = scan_fn or scan
         self._versions_fn: VersionsFn | None = versions_fn
         self.result: ScanResult | None = None
+        self._remediated: dict[tuple[str, str], str] = {}
+        self._dep_row_keys: list = []
+        self._dep_column_keys: list = []
         self._status = "Starting scan..."
         self._current_finding: Finding | None = None
         self._current_vuln: Vulnerability | None = None
@@ -180,6 +194,11 @@ class VulnScanApp(App[None]):
     @property
     def current_vulnerability(self) -> Vulnerability | None:
         return self._current_vuln
+
+    @property
+    def remediated(self) -> dict[tuple[str, str], str]:
+        """Dependencies upgraded this session: dependency key -> new constraint."""
+        return dict(self._remediated)
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -194,7 +213,7 @@ class VulnScanApp(App[None]):
 
     def on_mount(self) -> None:
         self.sub_title = str(self.settings.project_path)
-        self.query_one("#deps", DataTable).add_columns(*DEP_COLUMNS)
+        self._dep_column_keys = self.query_one("#deps", DataTable).add_columns(*DEP_COLUMNS)
         self.query_one("#vulns", DataTable).add_columns(*VULN_COLUMNS)
         self._start_scan()
 
@@ -232,18 +251,9 @@ class VulnScanApp(App[None]):
         self.result = result
         self._clear_tables()
         deps = self.query_one("#deps", DataTable)
-        for finding in result.findings:
-            dep = finding.dependency
-            deps.add_row(
-                dep.name,
-                dep.ecosystem,
-                dep.version or "?",
-                dep.version_source,
-                finding.worst_severity,
-                str(len(finding.vulnerabilities)),
-                ", ".join(finding.fixed_versions) or "-",
-                dep.source_file,
-            )
+        self._dep_row_keys = [
+            deps.add_row(*self._dep_cells(finding)) for finding in result.findings
+        ]
         summary = (
             f"{_plural(len(result.dependencies), 'dependency')} scanned, "
             f"{_plural(len(result.findings), 'vulnerable dependency')}, "
@@ -257,6 +267,50 @@ class VulnScanApp(App[None]):
         if result.findings:
             self._show_finding(0)
 
+    # -- rows -----------------------------------------------------------------------
+
+    def _is_remediated(self, finding: Finding) -> bool:
+        return finding.dependency.key in self._remediated
+
+    def _dep_cells(self, finding: Finding) -> list[str | Text]:
+        dep = finding.dependency
+        done = self._is_remediated(finding)
+        values = [
+            f"{TICK} upgraded" if done else "",
+            dep.name,
+            dep.ecosystem,
+            dep.version or "?",
+            dep.version_source,
+            finding.worst_severity,
+            str(len(finding.vulnerabilities)),
+            ", ".join(finding.fixed_versions) or "-",
+            dep.source_file,
+        ]
+        return _cells(values, done)
+
+    def _vuln_cells(self, finding: Finding, vuln: Vulnerability) -> list[str | Text]:
+        done = self._is_remediated(finding)
+        status = f"{TICK} upgraded to {self._remediated[finding.dependency.key]}" if done else ""
+        values = [
+            vuln.id,
+            vuln.severity,
+            ", ".join(vuln.cve_ids) or "-",
+            vuln.summary or "-",
+            status,
+        ]
+        return _cells(values, done)
+
+    def _refresh_dep_row(self, finding: Finding) -> None:
+        if not self.result or finding not in self.result.findings:
+            return
+        index = self.result.findings.index(finding)
+        deps = self.query_one("#deps", DataTable)
+        row_key = self._dep_row_keys[index]
+        for column_key, value in zip(self._dep_column_keys, self._dep_cells(finding), strict=True):
+            deps.update_cell(row_key, column_key, value, update_width=True)
+        if self._current_finding is finding:
+            self._show_finding(index)
+
     # -- selection ----------------------------------------------------------------
 
     def _show_finding(self, index: int) -> None:
@@ -267,9 +321,7 @@ class VulnScanApp(App[None]):
         vulns = self.query_one("#vulns", DataTable)
         vulns.clear()
         for vuln in finding.vulnerabilities:
-            vulns.add_row(
-                vuln.id, vuln.severity, ", ".join(vuln.cve_ids) or "-", vuln.summary or "-"
-            )
+            vulns.add_row(*self._vuln_cells(finding, vuln))
         if finding.vulnerabilities:
             self._show_vulnerability(0)
 
@@ -369,6 +421,8 @@ class VulnScanApp(App[None]):
         except (RemediationError, OSError) as exc:
             self._set_status(f"Could not update {dep.source_file}: {exc}")
             return
+        self._remediated[dep.key] = outcome.new_constraint
+        self._refresh_dep_row(finding)
         self._set_status(
             f"Updated {dep.source_file}: {dep.name} {outcome.old_constraint or '(any)'} -> "
             f"{outcome.new_constraint}. {outcome.hint} Press r to rescan afterwards."

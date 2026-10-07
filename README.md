@@ -148,6 +148,11 @@ manifests: `composer.json`, `requirements*.txt`, `pyproject.toml` (PEP 621
 strings and Poetry tables), `Pipfile` and `setup.cfg`. Constraints that track
 a development branch (`dev-main`) are left for you to change by hand.
 
+Once applied, the dependency's row (and its advisories) turn green with a
+✔ "upgraded" marker so you can see which items you have already dealt with.
+The marker persists across rescans in the same session, since the dependency
+will keep showing as vulnerable until the lock file is updated.
+
 Lock files are not touched. The status bar tells you the command to run next,
 such as `composer update wp-plugin/elementor --with-dependencies` or
 `uv lock && uv sync`. Press `r` afterwards to rescan.
