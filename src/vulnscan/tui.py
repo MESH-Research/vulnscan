@@ -70,8 +70,8 @@ class VulnScanApp(App[None]):
     CSS = """
     #deps { width: 3fr; height: 1fr; }
     #right { width: 2fr; height: 1fr; }
-    #vulns { height: 40%; }
-    #detail-scroll { height: 60%; border-top: solid $primary; }
+    #vulns { height: auto; max-height: 40%; min-height: 4; }
+    #detail-scroll { height: 1fr; border-top: solid $primary; padding: 0 1; }
     #status { height: auto; padding: 0 1; background: $panel; }
     """
     BINDINGS = [
