@@ -17,27 +17,27 @@ scanner, to feeds, CLI and TUI. Each task starts with failing tests.
 ## Task List
 
 ### Phase 1: Foundation
-- [ ] Task 1: Project scaffold (pyproject, uv, ruff, pytest, workflow)
-- [ ] Task 2: Models and config loading (`models.py`, `config.py`)
-- [ ] Task 3: Version resolution helpers (`parsers/versions.py`)
+- [x] Task 1: Project scaffold (pyproject, uv, ruff, pytest, workflow)
+- [x] Task 2: Models and config loading (`models.py`, `config.py`)
+- [x] Task 3: Version resolution helpers (`parsers/versions.py`)
 
 ### Phase 2: Parsers
-- [ ] Task 4: Python manifests (`parsers/python.py`)
-- [ ] Task 5: Composer manifest (`parsers/composer.py`)
-- [ ] Task 6: Lock files (`parsers/lockfiles.py`)
-- [ ] Task 7: Discovery and project parsing (`parsers/__init__.py`)
+- [x] Task 4: Python manifests (`parsers/python.py`)
+- [x] Task 5: Composer manifest (`parsers/composer.py`)
+- [x] Task 6: Lock files (`parsers/lockfiles.py`)
+- [x] Task 7: Discovery and project parsing (`parsers/__init__.py`)
 
 ### Checkpoint: parsers green
 
 ### Phase 3: Lookup and output
-- [ ] Task 8: OSV client and response parsing (`osv.py`)
-- [ ] Task 9: Scanner orchestration (`scanner.py`)
-- [ ] Task 10: Feeds and state (`feeds.py`)
+- [x] Task 8: OSV client and response parsing (`osv.py`)
+- [x] Task 9: Scanner orchestration (`scanner.py`)
+- [x] Task 10: Feeds and state (`feeds.py`)
 
 ### Phase 4: Interfaces
-- [ ] Task 11: CLI with non-interactive mode (`cli.py`)
-- [ ] Task 12: TUI (`tui.py`)
-- [ ] Task 13: README, .env.example
+- [x] Task 11: CLI with non-interactive mode (`cli.py`)
+- [x] Task 12: TUI (`tui.py`)
+- [x] Task 13: README, .env.example
 
 ## Risks and Mitigations
 
