@@ -57,6 +57,8 @@ def parse_osv_vulnerability(data: dict, package_name: str, ecosystem: str) -> Vu
         if normalize_name(str(pkg.get("name", "")), ecosystem) != wanted:
             continue
         for rng in affected.get("ranges") or []:
+            if str(rng.get("type", "")).upper() == "GIT":
+                continue  # commit hashes are not installable versions
             for event in rng.get("events") or []:
                 if isinstance(event, dict) and event.get("fixed"):
                     fixed.append(normalize_version(str(event["fixed"])))

@@ -308,3 +308,26 @@ def test_find_vulnerabilities_queries_unknown_versions_when_asked():
     unknown = Dependency("flask", PYPI, "", None, "unknown", "requirements.txt")
     make_client(handler).find_vulnerabilities([unknown], include_unknown_versions=True)
     assert captured == [{"package": {"name": "flask", "ecosystem": "PyPI"}}]
+
+
+def test_parse_osv_vulnerability_ignores_git_commit_ranges():
+    data = {
+        "id": "GHSA-git",
+        "affected": [
+            {
+                "package": {"ecosystem": "PyPI", "name": "requests"},
+                "ranges": [
+                    {
+                        "type": "GIT",
+                        "repo": "https://github.com/psf/requests",
+                        "events": [
+                            {"introduced": "0"},
+                            {"fixed": "74ea7cf7a6a27a4eeb2ae24e162bcc942a6706d5"},
+                        ],
+                    },
+                    {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.32.4"}]},
+                ],
+            }
+        ],
+    }
+    assert parse_osv_vulnerability(data, "requests", PYPI).fixed_versions == ["2.32.4"]
