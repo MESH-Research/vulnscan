@@ -92,11 +92,11 @@ class Finding:
     @property
     def fixed_versions(self) -> list[str]:
         return sorted(
-            {fv for v in self.vulnerabilities for fv in v.fixed_versions}, key=_version_sort_key
+            {fv for v in self.vulnerabilities for fv in v.fixed_versions}, key=version_sort_key
         )
 
 
-def _version_sort_key(version: str) -> tuple:
+def version_sort_key(version: str) -> tuple:
     from packaging.version import InvalidVersion, Version
 
     try:
