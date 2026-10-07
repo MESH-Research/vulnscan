@@ -166,3 +166,12 @@ def test_report_paths_derive_from_feed_dir(tmp_path: Path):
     )
     assert settings.markdown_path == (tmp_path / "f" / "vulns.md").resolve()
     assert settings.text_path == (tmp_path / "f" / "vulns.txt").resolve()
+
+
+def test_wordfence_min_interval_setting(tmp_path: Path):
+    default = load_settings(env={}, dotenv_path=tmp_path / "missing.env")
+    assert default.wordfence_min_interval_minutes == 30.0
+    custom = load_settings(
+        env={"VULNSCAN_WORDFENCE_MIN_INTERVAL_MINUTES": "5"}, dotenv_path=tmp_path / "missing.env"
+    )
+    assert custom.wordfence_min_interval_minutes == 5.0

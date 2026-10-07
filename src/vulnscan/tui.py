@@ -173,7 +173,9 @@ class VulnScanApp(App[None]):
             f"{_plural(len(result.warnings), 'warning')}."
         )
         if result.warnings:
-            summary += " " + " | ".join(result.warnings)
+            summary += f" First: {result.warnings[0]}"
+            if len(result.warnings) > 1:
+                summary += f" (+{len(result.warnings) - 1} more in the exported report)"
         self._set_status(summary.replace("dependencys", "dependencies"))
         if result.findings:
             self._show_finding(0)

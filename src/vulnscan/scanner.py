@@ -59,6 +59,7 @@ def scan(
                 timeout=settings.request_timeout,
                 cache_path=settings.cache_dir / WORDFENCE_CACHE_FILENAME,
                 ttl_hours=settings.wordfence_ttl_hours,
+                min_interval_minutes=settings.wordfence_min_interval_minutes,
             )
         if wordpress_client is None:
             warnings.append(

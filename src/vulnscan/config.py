@@ -32,6 +32,7 @@ _ENV_MAP: dict[str, tuple[str, Any]] = {
     "wordfence_api_key": ("WORDFENCE_API_KEY", ""),
     "wordfence_url": ("WORDFENCE_URL", "https://www.wordfence.com/api/intelligence/v3"),
     "wordfence_ttl_hours": ("WORDFENCE_TTL_HOURS", "24"),
+    "wordfence_min_interval_minutes": ("WORDFENCE_MIN_INTERVAL_MINUTES", "30"),
     "cache_dir": ("CACHE_DIR", None),  # default depends on XDG_CACHE_HOME, see load_settings
     "ignore_dirs": ("IGNORE_DIRS", ""),
     "markdown_filename": ("MARKDOWN_FILE", "vulns.md"),
@@ -70,6 +71,7 @@ class Settings:
     wordfence_api_key: str = ""
     wordfence_url: str = "https://www.wordfence.com/api/intelligence/v3"
     wordfence_ttl_hours: float = 24.0
+    wordfence_min_interval_minutes: float = 30.0
     cache_dir: Path = Path.home() / ".cache" / "vulnscan"
     ignore_dirs: tuple[str, ...] = ()
     markdown_filename: str = "vulns.md"
@@ -111,6 +113,7 @@ _COERCERS = {
     "query_unknown_versions": _to_bool,
     "wordfence_url": lambda v: str(v).rstrip("/"),
     "wordfence_ttl_hours": float,
+    "wordfence_min_interval_minutes": float,
     "cache_dir": lambda v: Path(v).expanduser().absolute(),
     "ignore_dirs": _to_tuple,
 }

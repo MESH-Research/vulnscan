@@ -1,10 +1,17 @@
 # vulnscan
 
-Point it at a Python or PHP project and it tells you which of your direct
-dependencies have known security advisories, which versions fix them, and
-publishes the result as RSS 2.0 and Atom 1.0 feeds. Advisory data comes from
-[OSV.dev](https://osv.dev), which aggregates GitHub Security Advisories, PyPI
-advisories, CVEs and more. No API key is needed.
+Point it at a Python, PHP or WordPress project and it tells you which of your
+direct dependencies have known security advisories, which versions fix them,
+and publishes the result as RSS 2.0 and Atom 1.0 feeds plus Markdown and plain
+text reports.
+
+Advisory data comes from two sources:
+
+- [OSV.dev](https://osv.dev) for PyPI and Packagist packages. It aggregates
+  GitHub Security Advisories, PyPI advisories, CVEs and more. No key needed.
+- [Wordfence Intelligence](https://www.wordfence.com/threat-intel/) for
+  WordPress core, plugins and themes installed through Composer. This needs a
+  free API key (see below).
 
 Only direct dependencies declared in your manifests are evaluated. Lock files
 are read solely to learn the exact installed version of those direct
@@ -15,16 +22,59 @@ dependencies; transitive dependencies are never scanned.
 | Ecosystem | Manifests | Lock files used for versions |
 |-----------|-----------|------------------------------|
 | PHP | `composer.json` | `composer.lock` |
+| WordPress | `composer.json` entries for `wp-plugin/*`, `wp-theme/*`, `wpackagist-plugin/*`, `wpackagist-theme/*`, `roots/wordpress`, `johnpbloch/wordpress`, and any package the lock file types as `wordpress-plugin`, `wordpress-muplugin`, `wordpress-theme` or `wordpress-core` | `composer.lock` |
 | Python | `pyproject.toml` (PEP 621, PEP 735 dependency groups, Poetry), `requirements*.txt` (with `-r` includes), `Pipfile`, `setup.cfg` | `uv.lock`, `poetry.lock`, `Pipfile.lock` |
 
 Manifests are discovered recursively, skipping `vendor/`, `node_modules/`,
-virtualenvs and similar directories.
+virtualenvs, `wp-admin/`, `wp-includes/`, and whatever a `composer.json`
+installs into (its `vendor-dir`, `extra.installer-paths` such as
+`web/app/plugins/{$name}/`, and `extra.wordpress-install-dir`). That keeps the
+`composer.json` files shipped inside installed plugins from being mistaken for
+your own. Add more directory names to skip with `VULNSCAN_IGNORE_DIRS`.
+
+Packages installed from a custom source (a VCS or `package` repository rather
+than Packagist or wordpress.org) are still looked up by name or slug, but are
+flagged in the warnings because no advisory database can be relied on to cover
+them.
 
 The version checked for each dependency is, in order of preference: the version
 in an adjacent lock file, an exact pin in the manifest (`==1.2.3`, `1.2.3`), or
 the lower bound of the constraint (`>=1.2`, `^1.2`, `~=1.2`). Dependencies with
 no lower bound at all are listed as warnings and not queried unless
 `VULNSCAN_QUERY_UNKNOWN_VERSIONS` is enabled.
+
+## WordPress advisories: Wordfence API key
+
+Wordfence publishes its vulnerability database under a free licence, but the
+v3 API requires a key. Create a free account at wordfence.com, open
+**Wordfence Intelligence** in the account dashboard, generate an API key under
+**Integrations**, and set:
+
+```
+VULNSCAN_WORDFENCE_API_KEY=your-key
+```
+
+Without a key, WordPress packages are listed but not checked and a warning
+says so. The feed is a single ~160 MB download covering every known WordPress
+vulnerability, so vulnscan is careful never to overload the API:
+
+- The feed is cached (slimmed to roughly half its size) under
+  `~/.cache/vulnscan/` and reused for `VULNSCAN_WORDFENCE_TTL_HOURS`
+  (default 24). Rescans in the TUI and repeated cron runs read the cache and
+  make no requests at all while it is fresh.
+- When the cache expires, the refresh is a conditional request carrying the
+  cached `ETag` / `Last-Modified` when the server supplied them, so an
+  unchanged feed can be answered with a `304` instead of a download.
+- At most one request is made per `VULNSCAN_WORDFENCE_MIN_INTERVAL_MINUTES`
+  (default 30), tracked in a marker file next to the cache. A failed download,
+  a rejected key or a `429` is not retried before that interval passes.
+- If a refresh fails, the stale cache is used and a warning is recorded. Only
+  when there is no cache at all does a failure abort the scan.
+
+The first scan therefore takes a minute or two; later scans are fast.
+
+Records derived from Wordfence carry their copyright notice and licence in the
+feeds, reports and TUI, as the licence requires.
 
 ## Install
 
@@ -46,8 +96,9 @@ uv run vulnscan --path /path/to/project
 |-----|--------|
 | `↑` `↓` | Move between dependencies / advisories |
 | `Tab` | Switch between the dependency and advisory tables |
-| `o` | Open the selected advisory on osv.dev in your browser |
+| `o` | Open the selected advisory (osv.dev or wordfence.com) in your browser |
 | `f` | Write the RSS and Atom feeds |
+| `e` | Export Markdown and plain-text reports |
 | `r` | Rescan |
 | `q` | Quit |
 
@@ -62,9 +113,18 @@ Non-interactive mode, for cron:
 uv run vulnscan --update-feeds --path /path/to/project --feed-dir /var/www/feeds
 ```
 
-This scans, rewrites both feeds, prints a summary and exits 0. If OSV cannot
-be reached it exits 1 and leaves the existing feeds untouched, so a transient
-outage never makes vulnerabilities disappear from your reader.
+This scans, rewrites both feeds, prints a summary and exits 0. If an advisory
+source cannot be reached it exits 1 and leaves the existing feeds untouched,
+so a transient outage never makes vulnerabilities disappear from your reader.
+
+Markdown and plain-text exports, alone or alongside the feeds:
+
+```
+uv run vulnscan --markdown --text --path /path/to/project      # <feed dir>/vulns.md and vulns.txt
+uv run vulnscan --markdown report.md --path /path/to/project   # explicit file
+uv run vulnscan --text - --path /path/to/project               # to stdout
+uv run vulnscan --update-feeds --markdown --text               # feeds and both reports
+```
 
 ## Configuration
 
@@ -85,6 +145,13 @@ option.
 | `VULNSCAN_TIMEOUT` | `30` | HTTP timeout in seconds |
 | `VULNSCAN_INCLUDE_DEV` | `true` | Include dev / test / optional dependencies |
 | `VULNSCAN_QUERY_UNKNOWN_VERSIONS` | `false` | Query packages whose version is unknown |
+| `VULNSCAN_WORDFENCE_API_KEY` | empty | Wordfence Intelligence API key (needed for WordPress packages) |
+| `VULNSCAN_WORDFENCE_URL` | `https://www.wordfence.com/api/intelligence/v3` | Wordfence API base URL |
+| `VULNSCAN_WORDFENCE_TTL_HOURS` | `24` | How long the cached Wordfence feed stays fresh |
+| `VULNSCAN_WORDFENCE_MIN_INTERVAL_MINUTES` | `30` | Minimum gap between requests to the Wordfence API |
+| `VULNSCAN_CACHE_DIR` | `$XDG_CACHE_HOME/vulnscan` or `~/.cache/vulnscan` | Cache location |
+| `VULNSCAN_IGNORE_DIRS` | empty | Extra directory names to skip, comma separated |
+| `VULNSCAN_MARKDOWN_FILE` / `VULNSCAN_TEXT_FILE` | `vulns.md` / `vulns.txt` | Report filenames inside the feed directory |
 
 ## Feeds
 

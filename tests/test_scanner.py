@@ -205,7 +205,7 @@ def test_scan_builds_wordfence_client_from_settings(tmp_path: Path, monkeypatch)
     created = {}
 
     class Recording(FakeWordpressClient):
-        def __init__(self, api_key, base_url, timeout, cache_path, ttl_hours):
+        def __init__(self, api_key, base_url, timeout, cache_path, ttl_hours, min_interval_minutes):
             super().__init__({})
             created.update(
                 api_key=api_key,
@@ -213,6 +213,7 @@ def test_scan_builds_wordfence_client_from_settings(tmp_path: Path, monkeypatch)
                 timeout=timeout,
                 cache_path=cache_path,
                 ttl_hours=ttl_hours,
+                min_interval_minutes=min_interval_minutes,
             )
 
     monkeypatch.setattr(scanner_module, "WordfenceClient", Recording)
@@ -223,6 +224,7 @@ def test_scan_builds_wordfence_client_from_settings(tmp_path: Path, monkeypatch)
         wordfence_url="https://wf.example/v3",
         cache_dir=tmp_path / "cache",
         wordfence_ttl_hours=6.0,
+        wordfence_min_interval_minutes=15.0,
         request_timeout=9.0,
     )
     scan(settings, client=FakeClient({}))
@@ -232,6 +234,7 @@ def test_scan_builds_wordfence_client_from_settings(tmp_path: Path, monkeypatch)
         "timeout": 9.0,
         "cache_path": tmp_path / "cache" / "wordfence-production.json",
         "ttl_hours": 6.0,
+        "min_interval_minutes": 15.0,
     }
 
 

@@ -141,6 +141,7 @@ class WordfenceClient:
         timeout: float = 120.0,
         cache_path: Path | None = None,
         ttl_hours: float = 24.0,
+        min_interval_minutes: float = 30.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.api_key = api_key
@@ -148,6 +149,7 @@ class WordfenceClient:
         self.timeout = timeout
         self.cache_path = cache_path
         self.ttl_hours = ttl_hours
+        self.min_interval_minutes = min_interval_minutes
         self._transport = transport
         self.warnings: list[str] = []
         self._index: dict[tuple[str, str], list[tuple[dict, dict]]] | None = None
@@ -159,6 +161,24 @@ class WordfenceClient:
             return None
         return time.time() - self.cache_path.stat().st_mtime
 
+    def _attempt_marker(self) -> Path | None:
+        if self.cache_path is None:
+            return None
+        return self.cache_path.with_name(self.cache_path.name + ".last-attempt")
+
+    def _seconds_since_last_attempt(self) -> float | None:
+        marker = self._attempt_marker()
+        if marker is None or not marker.is_file():
+            return None
+        return time.time() - marker.stat().st_mtime
+
+    def _record_attempt(self) -> None:
+        marker = self._attempt_marker()
+        if marker is None:
+            return
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(datetime.now(UTC).isoformat(), encoding="utf-8")
+
     def _read_cache(self) -> dict:
         assert self.cache_path is not None
         data = json.loads(self.cache_path.read_text(encoding="utf-8"))
@@ -166,17 +186,46 @@ class WordfenceClient:
             raise ValueError("cached feed is not a JSON object")
         return data
 
-    def _download(self) -> dict:
+    def _cached_validators(self) -> dict[str, str]:
+        """ETag / Last-Modified saved with the cache, for conditional requests."""
+        try:
+            meta = self._read_cache().get("_meta") or {}
+        except (OSError, ValueError, AssertionError):
+            return {}
+        headers = {}
+        if isinstance(meta.get("etag"), str):
+            headers["If-None-Match"] = meta["etag"]
+        if isinstance(meta.get("last_modified"), str):
+            headers["If-Modified-Since"] = meta["last_modified"]
+        return headers
+
+    def _download(self, cached_age: float | None) -> dict:
+        """Fetch the feed. Every call to the API is throttled by `min_interval_minutes`."""
+        since = self._seconds_since_last_attempt()
+        if since is not None and since < self.min_interval_minutes * 60:
+            wait = self.min_interval_minutes - since / 60
+            raise WordfenceError(
+                f"Wordfence feed was last requested {since / 60:.0f} minutes ago; not "
+                f"contacting the API again for {max(wait, 1):.0f} more minute(s)"
+            )
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "User-Agent": f"vulnscan/{__version__}",
             "Accept": "application/json",
         }
+        if cached_age is not None:
+            headers.update(self._cached_validators())
+        self._record_attempt()
         try:
             with httpx.Client(timeout=self.timeout, transport=self._transport) as http:
                 response = http.get(self.base_url + FEED_PATH, headers=headers)
         except httpx.HTTPError as exc:
             raise WordfenceError(f"Wordfence feed download failed: {exc}") from exc
+        if response.status_code == 304 and cached_age is not None and self.cache_path:
+            os.utime(self.cache_path, None)  # unchanged upstream: cache is fresh again
+            return self._read_cache()
+        if response.status_code == 429:
+            raise WordfenceError("Wordfence rate limit hit (HTTP 429); using cache if available")
         if response.status_code in (401, 403):
             raise WordfenceError(
                 f"Wordfence rejected the API key (HTTP {response.status_code}). Check "
@@ -191,6 +240,9 @@ class WordfenceClient:
         if not isinstance(data, dict):
             raise WordfenceError("Wordfence feed has an unexpected shape")
         data = slim_feed(data)
+        data["_meta"]["etag"] = response.headers.get("ETag")
+        data["_meta"]["last_modified"] = response.headers.get("Last-Modified")
+        data["_meta"]["downloaded_at"] = datetime.now(UTC).isoformat()
         if self.cache_path is not None:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.cache_path.with_name(self.cache_path.name + ".tmp")
@@ -207,7 +259,7 @@ class WordfenceClient:
             except (OSError, ValueError):
                 pass
         try:
-            return self._download()
+            return self._download(age)
         except WordfenceError as exc:
             if age is None:
                 raise

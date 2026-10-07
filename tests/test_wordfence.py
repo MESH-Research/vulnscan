@@ -340,3 +340,138 @@ def test_cache_is_slimmed_but_still_matches(tmp_path: Path):
     found = again.find_vulnerabilities([elementor])
     assert found[elementor][0].id == "CVE-2023-1234"
     assert found[elementor][0].fixed_versions == ["3.13.5"]
+
+
+# --- rate limiting: never hit the API more than once per minimum interval ------------------
+
+
+def make_guarded_client(handler, tmp_path: Path, min_interval_minutes=30.0, ttl_hours=24.0):
+    return WordfenceClient(
+        api_key="KEY",
+        base_url="https://wf.test/api/intelligence/v3",
+        timeout=1.0,
+        cache_path=tmp_path / "cache" / "wordfence.json",
+        ttl_hours=ttl_hours,
+        min_interval_minutes=min_interval_minutes,
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def test_failed_download_is_not_retried_within_minimum_interval(tmp_path: Path):
+    calls: list = []
+
+    def failing(request):
+        calls.append(request)
+        raise httpx.ConnectError("offline")
+
+    elementor = wp_dep("wp-plugin/elementor", "plugin", "elementor", "3.13.4")
+    with pytest.raises(WordfenceError):
+        make_guarded_client(failing, tmp_path).find_vulnerabilities([elementor])
+    assert len(calls) == 1
+    with pytest.raises(WordfenceError) as exc:
+        make_guarded_client(failing, tmp_path).find_vulnerabilities([elementor])
+    assert len(calls) == 1  # second client did not touch the API
+    assert "minute" in str(exc.value).lower()
+
+
+def test_rejected_key_is_not_retried_within_minimum_interval(tmp_path: Path):
+    calls: list = []
+    handler = feed_handler(FEED, expected_key="OTHER", calls=calls)
+    elementor = wp_dep("wp-plugin/elementor", "plugin", "elementor", "3.13.4")
+    with pytest.raises(WordfenceError):
+        make_guarded_client(handler, tmp_path).find_vulnerabilities([elementor])
+    with pytest.raises(WordfenceError):
+        make_guarded_client(handler, tmp_path).find_vulnerabilities([elementor])
+    assert len(calls) == 1
+
+
+def test_stale_cache_used_without_api_call_within_minimum_interval(tmp_path: Path):
+    calls: list = []
+
+    def failing(request):
+        calls.append(request)
+        raise httpx.ConnectError("offline")
+
+    cache = tmp_path / "cache" / "wordfence.json"
+    cache.parent.mkdir(parents=True)
+    cache.write_text(json.dumps(FEED))
+    old = (datetime.now(UTC) - timedelta(days=3)).timestamp()
+    import os
+
+    os.utime(cache, (old, old))
+    elementor = wp_dep("wp-plugin/elementor", "plugin", "elementor", "3.13.4")
+    first = make_guarded_client(failing, tmp_path)
+    assert set(first.find_vulnerabilities([elementor])) == {elementor}
+    second = make_guarded_client(failing, tmp_path)
+    assert set(second.find_vulnerabilities([elementor])) == {elementor}
+    assert len(calls) == 1
+    assert second.warnings
+
+
+def test_attempts_are_allowed_again_after_interval(tmp_path: Path):
+    calls: list = []
+
+    def failing(request):
+        calls.append(request)
+        raise httpx.ConnectError("offline")
+
+    elementor = wp_dep("wp-plugin/elementor", "plugin", "elementor", "3.13.4")
+    with pytest.raises(WordfenceError):
+        make_guarded_client(failing, tmp_path, min_interval_minutes=0).find_vulnerabilities(
+            [elementor]
+        )
+    with pytest.raises(WordfenceError):
+        make_guarded_client(failing, tmp_path, min_interval_minutes=0).find_vulnerabilities(
+            [elementor]
+        )
+    assert len(calls) == 2
+
+
+def test_fresh_cache_never_contacts_api_even_with_rescans(tmp_path: Path):
+    calls: list = []
+    handler = feed_handler(FEED, calls=calls)
+    elementor = wp_dep("wp-plugin/elementor", "plugin", "elementor", "3.13.4")
+    for _ in range(5):
+        client = make_guarded_client(handler, tmp_path)
+        client.find_vulnerabilities([elementor])
+        client.find_vulnerabilities([elementor])
+    assert len(calls) == 1
+
+
+# --- conditional requests: a refresh after the TTL should be a 304 when nothing changed ------
+
+
+def etag_handler(feed: dict, etag: str, calls: list):
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.headers.get("Authorization") != "Bearer KEY":
+            return httpx.Response(401)
+        if request.headers.get("If-None-Match") == etag:
+            return httpx.Response(304)
+        return httpx.Response(
+            200, json=feed, headers={"ETag": etag, "Last-Modified": "Tue, 06 Oct 2026 10:00:00 GMT"}
+        )
+
+    return handler
+
+
+def test_refresh_uses_etag_and_accepts_304(tmp_path: Path):
+    calls: list = []
+    handler = etag_handler(FEED, '"abc123"', calls)
+    elementor = wp_dep("wp-plugin/elementor", "plugin", "elementor", "3.13.4")
+    make_guarded_client(handler, tmp_path).find_vulnerabilities([elementor])
+    cache = tmp_path / "cache" / "wordfence.json"
+    old = (datetime.now(UTC) - timedelta(days=3)).timestamp()
+    import os
+
+    os.utime(cache, (old, old))
+    client = make_guarded_client(handler, tmp_path, min_interval_minutes=0)
+    found = client.find_vulnerabilities([elementor])
+    assert set(found) == {elementor}
+    assert len(calls) == 2
+    assert calls[1].headers.get("If-None-Match") == '"abc123"'
+    assert calls[1].headers.get("If-Modified-Since") == "Tue, 06 Oct 2026 10:00:00 GMT"
+    assert client.warnings == []
+    # The 304 refreshed the cache's freshness: a third client needs no request at all.
+    make_guarded_client(handler, tmp_path).find_vulnerabilities([elementor])
+    assert len(calls) == 2
