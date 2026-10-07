@@ -1,0 +1,49 @@
+[project]
+name = "vulnscan"
+version = "1.0.0"
+description = "Scan Python and PHP project dependencies for known vulnerabilities and publish RSS/Atom feeds"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "textual>=0.80",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "packaging>=24.0",
+]
+
+[project.scripts]
+vulnscan = "vulnscan.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vulnscan"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.commitizen]
+version = "1.0.0"
+version_files = [
+    "__version__.py",
+    "pyproject.toml:version"
+]
+update_changelog_on_bump = true
