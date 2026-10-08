@@ -125,10 +125,11 @@ def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
     except RemediationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print(
-        f"Updated {dep.source_file}: {dep.name} {outcome.old_constraint or '(any)'} -> "
-        f"{outcome.new_constraint}"
-    )
+    for change in outcome.changes:
+        print(
+            f"Updated {change.source_file}: {change.old_constraint or '(any)'} -> "
+            f"{change.new_constraint}"
+        )
     print(outcome.hint)
     return 0
 
@@ -148,7 +149,8 @@ def _print_summary(result: ScanResult, written: list[Path]) -> None:
         dep = finding.dependency
         ids = ", ".join(v.id for v in finding.vulnerabilities)
         fixed = ", ".join(finding.fixed_versions) or "no fix listed"
-        print(f"  [{finding.worst_severity}] {dep.name} {dep.version or '?'} ({dep.source_file})")
+        files = ", ".join(dep.source_files)
+        print(f"  [{finding.worst_severity}] {dep.name} {dep.version or '?'} ({files})")
         print(f"      advisories: {ids}")
         print(f"      fixed in: {fixed}")
     for warning in result.warnings:

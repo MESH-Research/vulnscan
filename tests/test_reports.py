@@ -2,7 +2,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from vulnscan.config import Settings
-from vulnscan.models import PYPI, WORDPRESS, Dependency, Finding, ScanResult, Vulnerability
+from vulnscan.models import (
+    PYPI,
+    WORDPRESS,
+    Declaration,
+    Dependency,
+    Finding,
+    ScanResult,
+    Vulnerability,
+)
 from vulnscan.reports import render_markdown, render_text, write_reports
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
@@ -153,3 +161,34 @@ def test_reports_include_wordfence_attribution_only_when_used(tmp_path: Path):
         assert WORDFENCE_COPYRIGHT in out
         assert WORDFENCE_LICENSE_URL in out
         assert WORDFENCE_COPYRIGHT not in render(sample(tmp_path))
+
+
+def _multi_declared(tmp_path: Path) -> ScanResult:
+    dep = Dependency(
+        "authlib",
+        PYPI,
+        "==1.2.0",
+        "1.2.0",
+        "pinned",
+        "requirements/base.txt",
+        declarations=(
+            Declaration("requirements/base.txt", "==1.2.0"),
+            Declaration("requirements/production.txt", ">=1.2"),
+        ),
+    )
+    vuln = Vulnerability("GHSA-A", "summary", "details", severity="HIGH")
+    return ScanResult(tmp_path / "proj", [dep], [Finding(dep, [vuln])], [], NOW)
+
+
+def test_markdown_lists_every_declaring_file(tmp_path: Path):
+    text = render_markdown(_multi_declared(tmp_path))
+    summary_row = next(line for line in text.splitlines() if line.startswith("| authlib"))
+    assert "requirements/base.txt" in summary_row
+    assert "requirements/production.txt" in summary_row
+    assert "requirements/production.txt as >=1.2" in text
+
+
+def test_text_report_lists_every_declaring_file(tmp_path: Path):
+    text = render_text(_multi_declared(tmp_path))
+    assert "requirements/base.txt as ==1.2.0" in text
+    assert "requirements/production.txt as >=1.2" in text

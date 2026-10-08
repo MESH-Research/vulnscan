@@ -41,7 +41,7 @@ def _dep_facts(finding: Finding) -> list[tuple[str, str]]:
     return [
         ("Ecosystem", dep.ecosystem + (f" {dep.kind}" if dep.kind else "")),
         ("Version", f"{dep.version or 'unknown'} (from {dep.version_source})"),
-        ("Declared in", f"{dep.source_file} as {dep.constraint or 'any version'}"),
+        ("Declared in", dep.declared_in_text),
         ("Fixed in", ", ".join(finding.fixed_versions) or "no fix listed"),
     ]
 
@@ -63,7 +63,8 @@ def render_markdown(result: ScanResult) -> str:
             ids = ", ".join(v.id for v in finding.vulnerabilities)
             lines.append(
                 f"| {dep.name} | {dep.ecosystem} | {dep.version or '?'} | {finding.worst_severity} "
-                f"| {ids} | {', '.join(finding.fixed_versions) or '-'} | {dep.source_file} |"
+                f"| {ids} | {', '.join(finding.fixed_versions) or '-'} "
+                f"| {', '.join(dep.source_files)} |"
             )
         lines += ["", "## Details", ""]
         for finding in result.findings:

@@ -65,8 +65,11 @@ def vulnerability_markdown(finding: Finding, vuln: Vulnerability) -> str:
         lines += [f"**{vuln.summary}**", ""]
     lines += [
         f"- **Package:** {dep.name} {dep.version or '(unknown version)'} ({dep.ecosystem})",
-        f"- **Declared in:** {dep.source_file} as `{dep.constraint or 'any version'}`"
-        f" (version from {dep.version_source})",
+        "- **Declared in:** "
+        + "; ".join(
+            f"{d.source_file} as `{d.constraint or 'any version'}`" for d in dep.declared_in
+        )
+        + f" (version from {dep.version_source})",
         f"- **Severity:** {vuln.severity}" + (f" (`{vuln.cvss}`)" if vuln.cvss else ""),
         f"- **CVE:** {', '.join(vuln.cve_ids) or 'none assigned'}",
         f"- **Aliases:** {', '.join(vuln.aliases) or 'none'}",
@@ -114,7 +117,7 @@ class RemediateScreen(ModalScreen[str | None]):
         with Vertical(id="remediate-box"):
             yield Label(
                 f"Upgrade {dep.name} (currently {self.plan.current or 'unknown'}, "
-                f"declared in {dep.source_file} as {dep.constraint or 'any version'})"
+                f"declared in {dep.declared_in_text})"
             )
             if self.plan.nearest_safe:
                 nearest = Option(
@@ -284,7 +287,7 @@ class VulnScanApp(App[None]):
             finding.worst_severity,
             str(len(finding.vulnerabilities)),
             ", ".join(finding.fixed_versions) or "-",
-            dep.source_file,
+            ", ".join(dep.source_files),
         ]
         return _cells(values, done)
 
@@ -419,14 +422,15 @@ class VulnScanApp(App[None]):
         try:
             outcome = apply_remediation(self.settings.project_path, dep, target)
         except (RemediationError, OSError) as exc:
-            self._set_status(f"Could not update {dep.source_file}: {exc}")
+            self._set_status(f"Could not update {dep.name}: {exc}")
             return
         self._remediated[dep.key] = outcome.new_constraint
         self._refresh_dep_row(finding)
-        self._set_status(
-            f"Updated {dep.source_file}: {dep.name} {outcome.old_constraint or '(any)'} -> "
-            f"{outcome.new_constraint}. {outcome.hint} Press r to rescan afterwards."
+        edits = "; ".join(
+            f"{c.source_file}: {c.old_constraint or '(any)'} -> {c.new_constraint}"
+            for c in outcome.changes
         )
+        self._set_status(f"Updated {edits}. {outcome.hint} Press r to rescan afterwards.")
         self.notify(f"{dep.name} -> {outcome.new_constraint}")
 
     def action_open_advisory(self) -> None:

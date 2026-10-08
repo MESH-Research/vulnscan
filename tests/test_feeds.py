@@ -15,7 +15,7 @@ from vulnscan.feeds import (
     save_state,
     write_feeds,
 )
-from vulnscan.models import PYPI, Dependency, Finding, ScanResult, Vulnerability
+from vulnscan.models import PYPI, Declaration, Dependency, Finding, ScanResult, Vulnerability
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
@@ -261,3 +261,22 @@ def test_wordfence_entries_carry_attribution(tmp_path: Path):
     assert WORDFENCE_COPYRIGHT in by_id[wf.url].content_html
     assert WORDFENCE_LICENSE_URL in by_id[wf.url].content_html
     assert WORDFENCE_COPYRIGHT not in by_id[osv.url].content_html
+
+
+def test_entry_content_lists_every_declaring_file(tmp_path: Path):
+    d = Dependency(
+        "authlib",
+        PYPI,
+        "==1.2.0",
+        "1.2.0",
+        "pinned",
+        "requirements/base.txt",
+        declarations=(
+            Declaration("requirements/base.txt", "==1.2.0"),
+            Declaration("requirements/production.txt", ">=1.2"),
+        ),
+    )
+    result = ScanResult(tmp_path / "proj", [d], [Finding(d, [vuln()])], [], NOW)
+    entries = build_entries(result, {}, NOW)
+    assert "requirements/base.txt as ==1.2.0" in entries[0].content_html
+    assert "requirements/production.txt as &gt;=1.2" in entries[0].content_html

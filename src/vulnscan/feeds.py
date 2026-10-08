@@ -71,7 +71,7 @@ def _entry_html(dep: Dependency, vuln: Vulnerability) -> str:
     rows = [
         ("Package", f"{dep.name} ({dep.ecosystem})"),
         ("Version", f"{dep.version or 'unknown'} (from {dep.version_source})"),
-        ("Declared in", f"{dep.source_file} as {dep.constraint or 'any version'}"),
+        ("Declared in", dep.declared_in_text),
         ("Severity", vuln.severity + (f" ({vuln.cvss})" if vuln.cvss else "")),
         ("Fixed in", ", ".join(vuln.fixed_versions) or "no fix listed"),
         ("CVE", ", ".join(vuln.cve_ids) or "none assigned"),

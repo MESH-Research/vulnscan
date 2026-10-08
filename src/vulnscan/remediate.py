@@ -15,6 +15,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 
 from vulnscan.models import PACKAGIST, PYPI, WORDPRESS, Dependency, Finding, normalize_name
+from vulnscan.parsers import is_requirements_file
 from vulnscan.versioncmp import compare_versions, sort_versions
 
 
@@ -31,11 +32,33 @@ class RemediationPlan:
 
 
 @dataclass(frozen=True)
-class RemediationResult:
+class RemediationChange:
+    """One manifest rewritten by :func:`apply_remediation`."""
+
     path: Path
+    source_file: str
     old_constraint: str
     new_constraint: str
+
+
+@dataclass(frozen=True)
+class RemediationResult:
+    """Every manifest edit made for one dependency, plus the command to run afterwards."""
+
+    changes: tuple[RemediationChange, ...]
     hint: str
+
+    @property
+    def path(self) -> Path:
+        return self.changes[0].path
+
+    @property
+    def old_constraint(self) -> str:
+        return self.changes[0].old_constraint
+
+    @property
+    def new_constraint(self) -> str:
+        return self.changes[0].new_constraint
 
 
 # --- planning ---------------------------------------------------------------------------------
@@ -145,17 +168,21 @@ def _name_pattern(name: str) -> str:
     return "".join("[-_.]" if ch in "-_." else re.escape(ch) for ch in name)
 
 
-def _edit_composer(text: str, dep: Dependency, new_version: str) -> tuple[str, str, str]:
+def _edit_composer(
+    text: str, dep: Dependency, new_version: str, source_file: str
+) -> tuple[str, str, str]:
     pattern = re.compile(r'("' + re.escape(dep.name) + r'"\s*:\s*")([^"]*)(")', re.IGNORECASE)
     match = pattern.search(text)
     if not match:
-        raise RemediationError(f"{dep.name} not found in composer.json")
+        raise RemediationError(f"{dep.name} not found in {source_file}")
     old = match.group(2)
     new = rewrite_composer_constraint(old, new_version)
     return text[: match.start(2)] + new + text[match.end(2) :], old, new
 
 
-def _edit_requirement_lines(text: str, dep: Dependency, new_version: str) -> tuple[str, str, str]:
+def _edit_requirement_lines(
+    text: str, dep: Dependency, new_version: str, source_file: str
+) -> tuple[str, str, str]:
     lines = text.splitlines(keepends=True)
     for i, raw in enumerate(lines):
         line = raw.rstrip("\r\n")
@@ -165,13 +192,15 @@ def _edit_requirement_lines(text: str, dep: Dependency, new_version: str) -> tup
             return "".join(lines), line.strip(), rewritten.strip()
         if rewritten is not None:
             return text, line.strip(), line.strip()
-    raise RemediationError(f"{dep.name} not found in {dep.source_file}")
+    raise RemediationError(f"{dep.name} not found in {source_file}")
 
 
 _TOML_STRING = re.compile(r'"([^"\\]*)"|\'([^\']*)\'')
 
 
-def _edit_pyproject(text: str, dep: Dependency, new_version: str) -> tuple[str, str, str]:
+def _edit_pyproject(
+    text: str, dep: Dependency, new_version: str, source_file: str
+) -> tuple[str, str, str]:
     # PEP 621 / dependency-group style: a quoted PEP 508 requirement string.
     for match in _TOML_STRING.finditer(text):
         literal = match.group(1) if match.group(1) is not None else match.group(2)
@@ -197,10 +226,12 @@ def _edit_pyproject(text: str, dep: Dependency, new_version: str) -> tuple[str, 
                 else "^" + new_version
             )
             return text[: match.start(2)] + new + text[match.end(2) :], old, new
-    raise RemediationError(f"{dep.name} not found in {dep.source_file}")
+    raise RemediationError(f"{dep.name} not found in {source_file}")
 
 
-def _edit_pipfile(text: str, dep: Dependency, new_version: str) -> tuple[str, str, str]:
+def _edit_pipfile(
+    text: str, dep: Dependency, new_version: str, source_file: str
+) -> tuple[str, str, str]:
     name = _name_pattern(dep.name)
     for pattern in (
         re.compile(r'^(\s*"?' + name + r'"?\s*=\s*")([^"]*)(")', re.IGNORECASE | re.MULTILINE),
@@ -214,12 +245,12 @@ def _edit_pipfile(text: str, dep: Dependency, new_version: str) -> tuple[str, st
             old = match.group(2)
             new = rewrite_pep508_specifier("" if old.strip() == "*" else old, new_version)
             return text[: match.start(2)] + new + text[match.end(2) :], old, new
-    raise RemediationError(f"{dep.name} not found in Pipfile")
+    raise RemediationError(f"{dep.name} not found in {source_file}")
 
 
-def follow_up_hint(project_root: Path, dep: Dependency) -> str:
-    """The command that makes the manifest change take effect."""
-    manifest = Path(dep.source_file)
+def follow_up_hint(project_root: Path, dep: Dependency, source_file: str | None = None) -> str:
+    """The command that makes the change to ``source_file`` (default: the primary) take effect."""
+    manifest = Path(source_file or dep.source_file)
     directory = (project_root / manifest).parent
     where = manifest.parent.as_posix()
     where = "" if where in ("", ".") else f" (in {where})"
@@ -242,27 +273,41 @@ def follow_up_hint(project_root: Path, dep: Dependency) -> str:
     return f"Run `{command}`{where} to apply it."
 
 
-def apply_remediation(project_root: Path, dep: Dependency, new_version: str) -> RemediationResult:
-    """Rewrite the dependency's constraint in its manifest to require new_version."""
-    path = project_root / dep.source_file
-    if not path.is_file():
-        raise RemediationError(f"{dep.source_file} does not exist under {project_root}")
+def _editor_for(path: Path, dep: Dependency, source_file: str):
     name = path.name.lower()
     if name == "composer.json" and dep.ecosystem in (PACKAGIST, WORDPRESS):
-        editor = _edit_composer
-    elif name == "pyproject.toml":
-        editor = _edit_pyproject
-    elif name == "pipfile":
-        editor = _edit_pipfile
-    elif name == "setup.cfg" or (name.endswith(".txt") and "requirements" in name):
-        editor = _edit_requirement_lines
-    else:
-        raise RemediationError(f"Don't know how to edit {dep.source_file}")
-    text = path.read_text(encoding="utf-8")
-    new_text, old, new = editor(text, dep, new_version)
-    if new_text != text:
-        path.write_text(new_text, encoding="utf-8")
-    return RemediationResult(path, old, new, follow_up_hint(project_root, dep))
+        return _edit_composer
+    if name == "pyproject.toml":
+        return _edit_pyproject
+    if name == "pipfile":
+        return _edit_pipfile
+    if name == "setup.cfg" or is_requirements_file(path):
+        return _edit_requirement_lines
+    raise RemediationError(f"Don't know how to edit {source_file}")
+
+
+def apply_remediation(project_root: Path, dep: Dependency, new_version: str) -> RemediationResult:
+    """Rewrite the dependency's constraint to require ``new_version`` in every manifest
+    that declares it.
+
+    Every rewrite is computed before any file is written, so a manifest that cannot be
+    edited (missing, unsupported, or no longer declaring the package) leaves all of them
+    untouched and raises :class:`RemediationError`.
+    """
+    pending: list[tuple[Path, str, str, RemediationChange]] = []
+    for source_file in dep.source_files:
+        path = project_root / source_file
+        if not path.is_file():
+            raise RemediationError(f"{source_file} does not exist under {project_root}")
+        editor = _editor_for(path, dep, source_file)
+        text = path.read_text(encoding="utf-8")
+        new_text, old, new = editor(text, dep, new_version, source_file)
+        pending.append((path, text, new_text, RemediationChange(path, source_file, old, new)))
+    for path, text, new_text, _change in pending:
+        if new_text != text:
+            path.write_text(new_text, encoding="utf-8")
+    hints = dict.fromkeys(follow_up_hint(project_root, dep, sf) for sf in dep.source_files)
+    return RemediationResult(tuple(c for *_, c in pending), " ".join(hints))
 
 
 def display_name(dep: Dependency) -> str:

@@ -5,8 +5,16 @@ import pytest
 from textual.widgets import DataTable, Markdown
 
 from vulnscan.config import Settings
-from vulnscan.models import PACKAGIST, PYPI, Dependency, Finding, ScanResult, Vulnerability
-from vulnscan.tui import VulnScanApp
+from vulnscan.models import (
+    PACKAGIST,
+    PYPI,
+    Declaration,
+    Dependency,
+    Finding,
+    ScanResult,
+    Vulnerability,
+)
+from vulnscan.tui import VulnScanApp, vulnerability_markdown
 
 
 def settings_for(tmp_path: Path) -> Settings:
@@ -384,3 +392,66 @@ async def test_cancelled_remediation_leaves_row_unmarked(tmp_path: Path):
         deps = app.query_one("#deps", DataTable)
         assert "✔" not in "".join(_row_text(deps, 0))
         assert app.remediated == {}
+
+
+def _multi_file_app(tmp_path: Path) -> VulnScanApp:
+    from vulnscan.models import VersionRange
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "requirements.txt").write_text("requests==2.30.0\n")
+    (project / "requirements-prod.txt").write_text("requests>=2.30\n")
+    dep = Dependency(
+        "requests",
+        PYPI,
+        "==2.30.0",
+        "2.30.0",
+        "pinned",
+        "requirements.txt",
+        declarations=(
+            Declaration("requirements.txt", "==2.30.0"),
+            Declaration("requirements-prod.txt", ">=2.30"),
+        ),
+    )
+    vuln = Vulnerability(
+        "GHSA-1",
+        "s",
+        "d",
+        severity="HIGH",
+        affected_ranges=[VersionRange(lower="0", upper="2.31.0")],
+    )
+
+    def scan_fn(s):
+        return ScanResult(project, [dep], [Finding(dep, [vuln])], [], datetime.now(UTC))
+
+    return VulnScanApp(
+        settings_for(tmp_path), scan_fn=scan_fn, versions_fn=lambda d: ["2.30.0", "2.31.0"]
+    )
+
+
+async def test_dependency_table_lists_every_declaring_file(tmp_path: Path):
+    app = _multi_file_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        row = "".join(_row_text(app.query_one("#deps", DataTable), 0))
+        assert "requirements.txt" in row
+        assert "requirements-prod.txt" in row
+        finding = app.result.findings[0]
+        detail = vulnerability_markdown(finding, finding.vulnerabilities[0])
+        assert "requirements.txt" in detail
+        assert "requirements-prod.txt" in detail
+        assert ">=2.30" in detail
+
+
+async def test_remediation_updates_every_declaring_file(tmp_path: Path):
+    app = _multi_file_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert (tmp_path / "proj" / "requirements.txt").read_text() == "requests==2.31.0\n"
+        assert (tmp_path / "proj" / "requirements-prod.txt").read_text() == "requests>=2.31.0\n"
+        assert "requirements-prod.txt" in app.status_text
+        assert app.remediated == {("PyPI", "requests"): "requests==2.31.0"}

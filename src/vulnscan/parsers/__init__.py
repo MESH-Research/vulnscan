@@ -75,14 +75,19 @@ _EXACT_NAMES: dict[str, Parser] = {
 }
 
 
+def is_requirements_file(path: Path) -> bool:
+    """``requirements*.txt``, ``*requirements*.txt`` or any ``*.txt`` in a ``requirements/`` dir."""
+    lowered = path.name.lower()
+    return lowered.endswith(".txt") and (
+        "requirements" in lowered or path.parent.name.lower() == "requirements"
+    )
+
+
 def _parser_for(path: Path) -> Parser | None:
-    name = path.name
-    lowered = name.lower()
+    lowered = path.name.lower()
     if lowered in _EXACT_NAMES:
         return _EXACT_NAMES[lowered]
-    if lowered.endswith(".txt") and (
-        "requirements" in lowered or path.parent.name.lower() == "requirements"
-    ):
+    if is_requirements_file(path):
         return parse_requirements_txt
     return None
 

@@ -7,6 +7,7 @@ from vulnscan.models import (
     PACKAGIST,
     PYPI,
     WORDPRESS,
+    Declaration,
     Dependency,
     Finding,
     VersionRange,
@@ -317,3 +318,75 @@ def test_follow_up_hint_mentions_lock_tools(tmp_path: Path):
     assert "composer update a/b" in follow_up_hint(
         tmp_path / "nolock", dep("a/b", PACKAGIST, "1", "composer.json")
     )
+
+
+# --- several declaring files --------------------------------------------------------------
+
+
+def _multi_dep(tmp_path: Path) -> Dependency:
+    (tmp_path / "requirements").mkdir()
+    (tmp_path / "requirements" / "base.txt").write_text("authlib==1.2.0\nrequests==2.30.0\n")
+    (tmp_path / "requirements" / "production.txt").write_text("-r base.txt\nauthlib>=1.2\n")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname="x"\ndependencies=["authlib==1.2.0", "flask"]\n'
+    )
+    return Dependency(
+        "authlib",
+        PYPI,
+        "==1.2.0",
+        "1.2.0",
+        "pinned",
+        "requirements/base.txt",
+        declarations=(
+            Declaration("requirements/base.txt", "==1.2.0"),
+            Declaration("requirements/production.txt", ">=1.2"),
+            Declaration("pyproject.toml", "==1.2.0"),
+        ),
+    )
+
+
+def test_apply_remediation_rewrites_every_declaring_file(tmp_path: Path):
+    d = _multi_dep(tmp_path)
+    result = apply_remediation(tmp_path, d, "1.3.1")
+    assert (tmp_path / "requirements" / "base.txt").read_text() == (
+        "authlib==1.3.1\nrequests==2.30.0\n"
+    )
+    assert (tmp_path / "requirements" / "production.txt").read_text() == (
+        "-r base.txt\nauthlib>=1.3.1\n"
+    )
+    assert '"authlib==1.3.1", "flask"' in (tmp_path / "pyproject.toml").read_text()
+    assert [
+        (c.path.relative_to(tmp_path).as_posix(), c.old_constraint, c.new_constraint)
+        for c in result.changes
+    ] == [
+        ("requirements/base.txt", "authlib==1.2.0", "authlib==1.3.1"),
+        ("requirements/production.txt", "authlib>=1.2", "authlib>=1.3.1"),
+        ("pyproject.toml", "authlib==1.2.0", "authlib==1.3.1"),
+    ]
+    assert result.path == tmp_path / "requirements" / "base.txt"
+    assert (result.old_constraint, result.new_constraint) == ("authlib==1.2.0", "authlib==1.3.1")
+    assert "pip install -r base.txt" in result.hint
+    assert "pip install -r production.txt" in result.hint
+    assert "uv lock" in result.hint
+
+
+def test_apply_remediation_writes_nothing_when_one_file_cannot_be_edited(tmp_path: Path):
+    d = _multi_dep(tmp_path)
+    (tmp_path / "requirements" / "production.txt").write_text("-r base.txt\n")
+    with pytest.raises(RemediationError, match="production.txt"):
+        apply_remediation(tmp_path, d, "1.3.1")
+    assert (tmp_path / "requirements" / "base.txt").read_text() == (
+        "authlib==1.2.0\nrequests==2.30.0\n"
+    )
+    assert '"authlib==1.2.0"' in (tmp_path / "pyproject.toml").read_text()
+
+
+def test_apply_remediation_edits_txt_inside_requirements_directory(tmp_path: Path):
+    (tmp_path / "requirements").mkdir()
+    (tmp_path / "requirements" / "base.txt").write_text("authlib==1.2.0\n")
+    result = apply_remediation(
+        tmp_path, dep("authlib", PYPI, "==1.2.0", "requirements/base.txt"), "1.3.1"
+    )
+    assert (tmp_path / "requirements" / "base.txt").read_text() == "authlib==1.3.1\n"
+    assert "pip install -r base.txt" in result.hint
+    assert "(in requirements)" in result.hint

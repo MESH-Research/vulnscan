@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from vulnscan import cli
-from vulnscan.models import PYPI, Dependency, Finding, ScanResult, Vulnerability
+from vulnscan.models import PYPI, Declaration, Dependency, Finding, ScanResult, Vulnerability
 from vulnscan.osv import OSVError
 
 
@@ -225,3 +225,43 @@ def test_remediate_flag_without_safe_version_fails(tmp_path: Path, monkeypatch, 
     assert code == 1
     assert "no" in capsys.readouterr().err.lower()
     assert (tmp_path / "requirements.txt").read_text() == "requests==2.30.0\n"
+
+
+def multi_file_result(path: Path) -> ScanResult:
+    d = Dependency(
+        "requests",
+        PYPI,
+        "==2.30.0",
+        "2.30.0",
+        "pinned",
+        "requirements.txt",
+        declarations=(
+            Declaration("requirements.txt", "==2.30.0"),
+            Declaration("requirements-prod.txt", ">=2.30"),
+        ),
+    )
+    v = Vulnerability("GHSA-1", "s", "d", severity="HIGH", fixed_versions=["2.31.0"])
+    return ScanResult(path, [d], [Finding(d, [v])], [], datetime.now(UTC))
+
+
+def test_remediate_flag_updates_every_declaring_file(tmp_path: Path, monkeypatch, capsys):
+    (tmp_path / "requirements.txt").write_text("requests==2.30.0\n")
+    (tmp_path / "requirements-prod.txt").write_text("requests>=2.30\n")
+    monkeypatch.setattr(cli, "scan", lambda settings: multi_file_result(settings.project_path))
+    monkeypatch.setattr(cli, "fetch_versions", lambda settings, dep: ["2.30.0", "2.32.4"])
+    code = cli.main(["--remediate", "requests", "--strategy", "latest", "--path", str(tmp_path)])
+    assert code == 0
+    assert (tmp_path / "requirements.txt").read_text() == "requests==2.32.4\n"
+    assert (tmp_path / "requirements-prod.txt").read_text() == "requests>=2.32.4\n"
+    out = capsys.readouterr().out
+    assert "requirements.txt" in out
+    assert "requirements-prod.txt" in out
+
+
+def test_summary_lists_every_declaring_file(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "scan", lambda settings: multi_file_result(settings.project_path))
+    code = cli.main(["--update-feeds", "--path", str(tmp_path), "--feed-dir", str(tmp_path / "o")])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "requirements.txt" in out
+    assert "requirements-prod.txt" in out
