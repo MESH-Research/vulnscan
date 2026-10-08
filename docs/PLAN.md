@@ -39,6 +39,19 @@ scanner, to feeds, CLI and TUI. Each task starts with failing tests.
 - [x] Task 12: TUI (`tui.py`)
 - [x] Task 13: README, .env.example
 
+### Phase 5: Multiple declarations, ignores, ntfy, open source
+- [ ] Task 14: `Declaration` model, `merge_declarations`, scanner uses it (`models.py`, `scanner.py`)
+- [ ] Task 15: Remediation edits every declaring manifest (`remediate.py`, `cli.py`, `tui.py`)
+- [ ] Task 16: All outputs list every declaring file (`reports.py`, `feeds.py`, `tui.py`, `cli.py`)
+- [ ] Task 17: Ignore patterns by name/path/glob, `.vulnscanignore`, `--ignore` (`parsers/__init__.py`, `config.py`, `cli.py`)
+- [ ] Task 18: ntfy client, message building and sent-state (`ntfy.py`, `config.py`)
+- [ ] Task 19: Watch loop with signals and `--ntfy/--once/--resend/--interval` (`ntfy.py`, `cli.py`)
+- [ ] Task 20: Open-source packaging: LICENSE, CONTRIBUTING, SECURITY, CI, metadata, README
+- [ ] Task 21: MkDocs site with API reference, `.readthedocs.yaml`, docstrings
+
+### Checkpoint: Phase 5
+- [ ] `uv run pytest` and `uv run ruff check .` clean, `mkdocs build --strict` clean
+
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |
@@ -46,3 +59,5 @@ scanner, to feeds, CLI and TUI. Each task starts with failing tests.
 | OSV batch pagination | Med | Follow `next_page_token` per query |
 | Loose constraints give wrong version | Med | Prefer lock files; label version source in UI |
 | OSV outage empties feeds | High | Fail without writing feeds |
+| ntfy outage loses notifications | Med | Record ids as sent only after a 2xx; retry next cycle |
+| Partial multi-file remediation | Med | Compute every rewrite before writing any file |

@@ -53,8 +53,13 @@ src/vulnscan/
     lockfiles.py    composer.lock, uv.lock, poetry.lock, Pipfile.lock
     versions.py     constraint -> exact / minimum version resolution
   osv.py            OSV.dev client and response parsing
+  wordfence.py      Wordfence Intelligence client (WordPress core/plugins/themes)
+  registry.py       available-version lookup on PyPI, Packagist, wordpress.org
+  remediate.py      choose and apply upgrades by rewriting manifest constraints
   scanner.py        orchestration: parse -> resolve -> query -> findings
   feeds.py          RSS / Atom rendering and first-seen state
+  reports.py        Markdown and plain-text reports
+  ntfy.py           push notifications to an ntfy topic and the watch loop
   tui.py            Textual application
 tests/              pytest unit tests, one file per module
 docs/               this spec and the plan
@@ -122,6 +127,37 @@ class Dependency:
    readers do not re-notify on each regeneration. A small state file
    records when each entry was first seen, used as its published date.
 8. Transitive dependencies are never evaluated.
+9. A package declared in several manifests (for example
+   `requirements/base.txt`, `requirements/production.txt` and
+   `pyproject.toml`) at the same resolved version is one dependency with
+   several *declarations*. Every output (TUI, reports, feeds, CLI summary)
+   lists all of its files, and remediation rewrites the constraint in each
+   of them. Different resolved versions remain separate dependencies.
+10. Directories can be excluded from manifest discovery by name or by path
+    relative to the project root, with shell wildcards, from three places:
+    `VULNSCAN_IGNORE_DIRS`, repeatable `--ignore` flags, and a
+    `.vulnscanignore` file in the project root (one pattern per line, `#`
+    comments). A name pattern (no `/`) matches a directory anywhere in the
+    tree; a path pattern matches the project-relative path.
+11. ntfy mode (`--ntfy`): a non-interactive loop that rescans every
+    `VULNSCAN_NTFY_INTERVAL_MINUTES` and pushes one notification per
+    dependency whose (dependency, advisory) pairs have not been sent before
+    for this project. The first run therefore sends everything. Sent ids are
+    recorded in `VULNSCAN_NTFY_STATE_FILE` under the feed directory only after
+    a successful publish, so a failed push is retried on the next cycle.
+    `SIGUSR1` re-sends every current finding immediately; `--resend` does the
+    same at start-up; `--once` runs a single cycle and exits (for cron);
+    `SIGINT`/`SIGTERM` stop the loop. Scan or publish failures are logged and
+    never stop the loop. Credentials: `VULNSCAN_NTFY_TOKEN` (bearer) or
+    `VULNSCAN_NTFY_USER` / `VULNSCAN_NTFY_PASSWORD` (basic). Messages are
+    published as JSON to `VULNSCAN_NTFY_SERVER` for topic `VULNSCAN_NTFY_TOPIC`
+    with a priority derived from the worst severity and a click URL to the
+    first advisory.
+12. The repository is publishable as open source: MIT licence, README with
+    an acknowledgement that LLM assistance was used, CONTRIBUTING and
+    SECURITY documents, a CI workflow running ruff and pytest, and an MkDocs
+    site (human guides plus an API reference generated from docstrings)
+    buildable on Read the Docs.
 
 ## Success Criteria
 
@@ -132,7 +168,17 @@ class Dependency:
   (dependency, advisory) pair.
 - The TUI shows the findings table and the advisory detail for a selection.
 
+## Assumptions
+
+- ntfy notifications group by dependency: one message lists all of that
+  dependency's newly seen advisories. Resolved advisories are not announced.
+- Licence is MIT with the git author as copyright holder; change `LICENSE`
+  and `pyproject.toml` if another licence is wanted.
+- Documentation uses MkDocs with mkdocstrings so the API reference comes
+  straight from docstrings; `.readthedocs.yaml` builds it.
+
 ## Open Questions
 
 None blocking. Defaults chosen: feeds written to `./feeds/`, OSV base URL
-`https://api.osv.dev`, dev dependencies included.
+`https://api.osv.dev`, dev dependencies included, ntfy server
+`https://ntfy.sh`, ntfy interval 60 minutes.
