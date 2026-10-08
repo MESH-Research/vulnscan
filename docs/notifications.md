@@ -24,9 +24,10 @@ channel has not seen before. It states:
   or unknown), which also sets the ntfy priority and the Teams card colour;
 - the installed version and where it was read from (lock file, pin or
   constraint);
-- the **upgrade that clears every advisory**: the smallest published version
-  above the installed one that no advisory affects, looked up on PyPI,
-  Packagist or wordpress.org, or a note that no safe version exists yet;
+- the **upgrade that clears every advisory**: the smallest published,
+  stable, non-yanked version above the installed one that none of the
+  package's advisories affect, looked up on PyPI, Packagist or
+  wordpress.org, or a note that no safe version exists yet;
 - the latest release and whether it is still affected;
 - for each advisory: its id linked to the full record, the CVE id linked to
   the NVD entry, severity with the CVSS vector, a summary and description,
@@ -68,7 +69,7 @@ Send `SIGUSR1` to the running process and it immediately rescans and pushes
 every current finding to every channel again, regardless of state:
 
 ```
-kill -USR1 $(pgrep -f 'vulnscan --')
+kill -USR1 <pid of the vulnscan process>
 ```
 
 To do the same at start-up, add `--resend`. `SIGINT` (Ctrl-C) and `SIGTERM`

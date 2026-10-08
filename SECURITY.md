@@ -12,16 +12,20 @@ expect an acknowledgement within a week.
 ## What vulnscan does with your data
 
 - Package names and versions from your manifests are sent to OSV.dev
-  (PyPI and Packagist packages) and, when upgrading, to PyPI, Packagist or
-  wordpress.org to list available versions.
+  (PyPI and Packagist packages). When upgrading, and in notification mode,
+  package names are also sent to PyPI, Packagist or wordpress.org to list
+  the available versions.
 - WordPress packages are matched locally against a cached copy of the
   Wordfence Intelligence feed; only the download of that feed (with your API
   key) contacts Wordfence.
-- In ntfy mode, advisory titles, package names, versions and the manifest
-  paths that declare them are sent to the ntfy server you configure.
+- In notification mode, the project directory name, package names,
+  versions, the manifest paths that declare them, and the advisories' ids,
+  summaries and descriptions are sent to the ntfy server and/or the Teams
+  webhook you configure.
 
 Nothing else leaves your machine. Keep `.env` out of version control: it
-holds the Wordfence key and any ntfy credentials.
+holds the Wordfence key, any ntfy credentials and the Teams webhook URL,
+which lets anyone post to that channel.
 
 ## Reporting a vulnerability in a package vulnscan found
 

@@ -34,8 +34,8 @@ a filename, or `-` for stdout; with no argument they go to
 
 ## Warnings
 
-Every output lists the scan's warnings: dependencies whose version could
-not be determined (and were therefore not queried), packages installed from
-a custom source rather than Packagist or wordpress.org, WordPress packages
-skipped for want of a Wordfence key, and a stale Wordfence cache that could
-not be refreshed.
+Every output lists the scan's warnings: no manifests found at all,
+dependencies whose version could not be determined (and were therefore not
+queried), packages installed from a custom source rather than Packagist or
+wordpress.org, WordPress packages skipped for want of a Wordfence key, and
+a stale Wordfence cache that could not be refreshed.

@@ -8,11 +8,12 @@ manifests we mis-read, and new advisory sources are all welcome.
 vulnscan uses [uv](https://docs.astral.sh/uv/) for everything.
 
 ```
-git clone https://github.com/<owner>/vulnscan.git
+git clone <repository url>
 cd vulnscan
 uv sync --all-groups
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
+uv run mkdocs build --strict
 ```
 
 Tests never touch the network: HTTP clients are given `httpx.MockTransport`
@@ -25,7 +26,8 @@ fakes and manifests are written into pytest's `tmp_path`.
    `bug/short-description-<issue>`.
 3. Write a failing test, then the code that makes it pass. Tests assert on
    returned values and files written, not on how a function was implemented.
-4. Run `uv run ruff check .`, `uv run ruff format .` and `uv run pytest`.
+4. Run `uv run ruff check .`, `uv run ruff format .`, `uv run pytest` and, if
+   you touched docstrings or `docs/`, `uv run mkdocs build --strict`.
 5. Commit with a [Conventional Commits](https://www.conventionalcommits.org/)
    message, for example `fix(parsers): handle Pipfile tables without versions`,
    and reference the issue in the footer. Releases and the changelog are

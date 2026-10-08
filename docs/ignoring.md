@@ -1,13 +1,18 @@
 # Ignoring directories
 
 Manifest discovery walks the whole project tree. Some directories are
-always skipped: version control metadata, virtual environments,
-`node_modules/`, `vendor/`, `build/`, `dist/`, WordPress core
-(`wp-admin/`, `wp-includes/`), any directory starting with a dot, and
-whatever a `composer.json` installs *into* (its `vendor-dir`,
-`extra.installer-paths` such as `web/app/plugins/{$name}/`, and
-`extra.wordpress-install-dir`). That last rule keeps the `composer.json`
-files shipped inside installed plugins from being mistaken for your own.
+always skipped:
+
+- any directory whose name starts with a dot (`.git`, `.venv`, `.tox`,
+  `.nox`, `.hg`, `.svn` and so on);
+- `venv`, `env`, `site-packages`, `__pycache__`, `node_modules`, `vendor`,
+  `build` and `dist`, wherever they appear;
+- WordPress core: `wp-admin` and `wp-includes`;
+- whatever a `composer.json` installs *into*: its `config.vendor-dir`,
+  the prefixes of `extra.installer-paths` such as
+  `web/app/plugins/{$name}/`, and `extra.wordpress-install-dir`. This keeps
+  the `composer.json` files shipped inside installed plugins and themes
+  from being mistaken for your own.
 
 Beyond those, you can exclude anything else. A typical reason is a
 quarantine directory: plugins you know are dangerous, have isolated, and

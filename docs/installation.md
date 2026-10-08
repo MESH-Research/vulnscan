@@ -12,8 +12,9 @@ uv run vulnscan --help
 ```
 
 `uv sync` creates a virtual environment with the runtime dependencies
-(`textual`, `httpx`, `python-dotenv`, `packaging`). Add `--all-groups` to
-also install the test and documentation tooling.
+(`textual`, `httpx`, `python-dotenv`, `packaging`) and the `dev` group
+(`pytest`, `ruff`). Add `--all-groups` to also install the documentation
+tooling (`mkdocs`, `mkdocs-material`, `mkdocstrings`).
 
 ## As a tool
 
@@ -39,8 +40,10 @@ Without a key, WordPress packages are listed but not checked and a warning
 says so. See [Configuration](configuration.md#wordfence) for how the feed is
 cached so the API is never hammered.
 
-## ntfy (optional)
+## Notifications (optional)
 
 To receive push notifications, install the ntfy app on your phone and
 subscribe to a topic, either on the public `https://ntfy.sh` or on your own
-server. See [Notifications](notifications.md).
+server. To post to Microsoft Teams, create a webhook flow in the target
+channel with the Workflows app. Both are described under
+[Notifications](notifications.md).

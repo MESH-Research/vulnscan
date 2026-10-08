@@ -8,6 +8,3 @@ build:
     - pip install uv
     - uv sync --all-groups
     - uv run mkdocs build --strict --site-dir $READTHEDOCS_OUTPUT/html
-
-mkdocs:
-  configuration: mkdocs.yml

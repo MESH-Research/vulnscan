@@ -2,41 +2,52 @@
 
 ## Objective
 
-A terminal application that scans a Python or PHP project's dependency
-manifests, looks up known security vulnerabilities for each *direct*
-dependency, and publishes the results as RSS 2.0 and Atom 1.0 feeds.
+A terminal application that scans a Python, PHP or WordPress project's
+dependency manifests, looks up known security vulnerabilities for each
+*direct* dependency, shows them in a TUI, publishes them as RSS 2.0 and
+Atom 1.0 feeds or Markdown and plain-text reports, rewrites manifests to
+upgrade past them, and pushes new ones to ntfy and Microsoft Teams.
 
 Users:
 
-- A developer who runs the TUI to browse vulnerable dependencies and read the
-  CVE / advisory behind each one.
+- A developer who runs the TUI to browse vulnerable dependencies, read the
+  CVE / advisory behind each one and apply upgrades.
 - A cron job that runs the non-interactive mode to refresh the feeds that a
-  feed reader subscribes to.
+  feed reader subscribes to, or to write reports.
+- A long-running watch process that notifies a phone or a Teams channel
+  the first time each advisory appears.
 
 Success looks like: pointing the tool at a project directory and, within a
 few seconds, seeing which pinned/locked dependency versions have advisories,
-which versions fix them, and having two feed files on disk that reflect the
-same information.
+which versions fix them, every manifest that declares them, and having
+feed files on disk that reflect the same information.
 
 ## Tech Stack
 
 - Python >= 3.12, packaged and run with `uv`
 - `textual` for the TUI
-- `httpx` for HTTP (OSV.dev API)
+- `httpx` for HTTP (OSV.dev, Wordfence, PyPI / Packagist / wordpress.org
+  version lists, ntfy, Teams webhooks)
 - `python-dotenv` for `.env` loading
 - `packaging` for PEP 508 / PEP 440 parsing
 - Standard library `tomllib`, `json`, `configparser`, `xml.etree` for
   parsing manifests and rendering feeds
 - `pytest` + `pytest-asyncio` for tests, `ruff` for linting
+- `mkdocs` + `mkdocs-material` + `mkdocstrings` for the documentation site
 
 ## Commands
 
 ```
-Install:  uv sync
-Test:     uv run pytest
-Lint:     uv run ruff check . && uv run ruff format --check .
-TUI:      uv run vulnscan [--path DIR]
-Feeds:    uv run vulnscan --update-feeds [--path DIR] [--feed-dir DIR]
+Install:    uv sync --all-groups
+Test:       uv run pytest
+Lint:       uv run ruff check . && uv run ruff format --check .
+Docs:       uv run mkdocs build --strict
+TUI:        uv run vulnscan [--path DIR]
+Feeds:      uv run vulnscan --update-feeds [--path DIR] [--feed-dir DIR]
+Reports:    uv run vulnscan --markdown [FILE] --text [FILE]
+Upgrade:    uv run vulnscan --remediate PACKAGE [--strategy nearest|latest]
+Notify:     uv run vulnscan --ntfy --msteams [--once] [--resend] [--interval MIN]
+Ignore:     uv run vulnscan --ignore PATTERN ...
 ```
 
 ## Project Structure
@@ -64,7 +75,7 @@ src/vulnscan/
   msteams.py        Microsoft Teams channel (Adaptive Cards via webhook)
   tui.py            Textual application
 tests/              pytest unit tests, one file per module
-docs/               this spec and the plan
+docs/               MkDocs guides, API reference pages, these design notes
 ```
 
 ## Code Style
@@ -75,18 +86,20 @@ class Dependency:
     """A direct dependency declared in a manifest."""
 
     name: str
-    ecosystem: str  # "PyPI" or "Packagist"
+    ecosystem: str  # "PyPI", "Packagist" or "WordPress"
     constraint: str  # constraint as written, "" if none
     version: str | None  # resolved exact version, if known
     version_source: str  # "lock" | "pinned" | "constraint" | "unknown"
-    source_file: str  # path relative to the project root
+    source_file: str  # primary manifest, relative to the project root
     dev: bool = False
+    declarations: tuple[Declaration, ...] = ()  # every (file, constraint) pair
 ```
 
 - Type hints everywhere, dataclasses for data, no inheritance hierarchies
   for parsers (plain functions registered in a table).
 - Functions take explicit inputs and return values; no module-level state.
-- External I/O (HTTP, filesystem) is injected so tests can substitute fakes.
+- External I/O (HTTP, filesystem, signals, sleeping) is injected so tests
+  can substitute fakes.
 
 ## Testing Strategy
 
@@ -117,14 +130,25 @@ class Dependency:
    directory, an exact pin in the manifest, the lower bound of the
    constraint. Dependencies with no determinable version are reported as
    warnings and not queried (configurable).
-4. Vulnerabilities fetched from OSV.dev by package, ecosystem and version.
-   Each is presented with its OSV id, CVE aliases, severity, summary,
-   details, fixed versions and reference URLs.
+4. Vulnerabilities for PyPI and Packagist packages fetched from OSV.dev by
+   package, ecosystem and version; for WordPress core, plugins and themes
+   from the Wordfence Intelligence feed, cached locally and refreshed
+   conditionally no more often than a configurable interval. Each is
+   presented with its id, CVE aliases, severity, summary, details, fixed
+   versions and reference URLs. Wordfence-derived records carry the
+   attribution its licence requires.
 5. TUI lists vulnerable dependencies; selecting one lists its
    advisories; selecting an advisory shows the full disclosure. Keys to
-   rescan, write feeds, open the advisory in a browser, quit.
+   rescan, write feeds, export reports, upgrade a dependency, open the
+   advisory in a browser, quit.
 6. `--update-feeds` scans and writes both feeds without any UI, exiting
-   non-zero if the scan fails.
+   non-zero if the scan fails. `--markdown` and `--text` write reports to a
+   file, stdout or the feed directory.
+6a. Remediation (`u` in the TUI, `--remediate PACKAGE`): the versions
+    published for the package are fetched from its registry (stable,
+    non-yanked only); the user chooses the nearest safe version or the
+    latest release; the constraint is rewritten in place, keeping the
+    operator style, and the follow-up lock command is reported.
 7. Feed entries have stable ids per (project, dependency, advisory) so
    readers do not re-notify on each regeneration. A small state file
    records when each entry was first seen, used as its published date.
@@ -177,11 +201,17 @@ class Dependency:
 - Both feed files validate as well-formed XML with one entry per
   (dependency, advisory) pair.
 - The TUI shows the findings table and the advisory detail for a selection.
+- Remediation rewrites every declaring manifest and nothing else in them.
+- Notification mode sends everything on a first run, only new advisories
+  afterwards, independently per channel, and retries failed deliveries.
 
 ## Assumptions
 
-- ntfy notifications group by dependency: one message lists all of that
+- Notifications group by dependency: one message lists all of that
   dependency's newly seen advisories. Resolved advisories are not announced.
+- Teams is reached through a Workflows incoming webhook; its message format
+  is the Adaptive Card envelope documented by Microsoft, and legacy
+  Microsoft 365 connector URLs accept the same payload.
 - Licence is MIT with the git author as copyright holder; change `LICENSE`
   and `pyproject.toml` if another licence is wanted.
 - Documentation uses MkDocs with mkdocstrings so the API reference comes
@@ -191,4 +221,4 @@ class Dependency:
 
 None blocking. Defaults chosen: feeds written to `./feeds/`, OSV base URL
 `https://api.osv.dev`, dev dependencies included, ntfy server
-`https://ntfy.sh`, ntfy interval 60 minutes.
+`https://ntfy.sh`, notification interval 60 minutes.

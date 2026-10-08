@@ -65,8 +65,8 @@ safe.
 `scan(settings)` is the orchestration: parse, drop dev dependencies if
 configured, merge declarations, warn about custom sources, query each
 source, and return a `ScanResult` with findings sorted by worst severity
-then name. Clients can be passed in, which is how the tests and the TUI
-inject fakes.
+then name. The OSV and Wordfence clients can be passed in, which is how
+the tests inject fakes; the TUI instead injects a whole scan function.
 
 ## Outputs
 

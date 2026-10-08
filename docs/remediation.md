@@ -41,8 +41,10 @@ format is unsupported) nothing is written and the error names the file.
 Lock files are not touched. The status bar (or the command line output)
 tells you the command to run next for each manifest, such as
 `composer update wp-plugin/elementor --with-dependencies`, `uv lock && uv
-sync`, `poetry lock && poetry install` or `pip install -r base.txt (in
-requirements)`. Press `r` afterwards to rescan.
+sync`, `poetry lock && poetry install`, `pipenv lock && pipenv sync`,
+`pip install -e .` for a `setup.cfg`, or `pip install -r base.txt` (with
+the directory to run it in when the manifest is not at the project root).
+Press `r` afterwards to rescan.
 
 In the TUI the dependency's row and its advisories turn green with a ✔
 "upgraded" marker so you can see what you have already dealt with. The

@@ -7,8 +7,13 @@ scanner, to feeds, CLI and TUI. Each task starts with failing tests.
 
 ## Architecture Decisions
 
-- OSV.dev as the single advisory source: free, covers PyPI and Packagist,
-  returns CVE aliases, fixed versions and references in one schema.
+- OSV.dev as the advisory source for PyPI and Packagist: free, returns CVE
+  aliases, fixed versions and references in one schema. Wordfence
+  Intelligence added later for WordPress, as a locally cached feed because
+  its API is a single bulk download with strict rate limits.
+- Notifications share one builder (`notify.py`) and treat ntfy and Teams as
+  interchangeable channels with separate sent-state, so more channels can
+  be added without touching the loop.
 - Lock files only resolve versions of direct dependencies; manifests define
   the dependency set. This satisfies "no transitive evaluation".
 - Hand-rolled RSS/Atom via `xml.etree` to avoid an lxml dependency.
@@ -49,6 +54,11 @@ scanner, to feeds, CLI and TUI. Each task starts with failing tests.
 - [x] Task 20: Open-source packaging: LICENSE, CONTRIBUTING, SECURITY, CI, metadata, README
 - [x] Task 21: MkDocs site with API reference, `.readthedocs.yaml`, docstrings
 
+### Phase 6: Microsoft Teams
+- [x] Task 22: Shared `notify.py` (notifications with registry-backed fix availability, per-channel state, watch loop); ntfy becomes a channel
+- [x] Task 23: `msteams.py` Adaptive Card renderer and webhook client, `--msteams`, `VULNSCAN_INTERVAL_MINUTES` rename
+- [x] Task 24: Docs for both channels
+
 ### Checkpoint: Phase 5
 - [x] `uv run pytest` and `uv run ruff check .` clean, `mkdocs build --strict` clean
 
@@ -61,3 +71,4 @@ scanner, to feeds, CLI and TUI. Each task starts with failing tests.
 | OSV outage empties feeds | High | Fail without writing feeds |
 | ntfy outage loses notifications | Med | Record ids as sent only after a 2xx; retry next cycle |
 | Partial multi-file remediation | Med | Compute every rewrite before writing any file |
+| Teams rejects messages over 28 KB or throttles bursts | Med | Trim details, then advisories, until the card fits; pace posts at under four per second |

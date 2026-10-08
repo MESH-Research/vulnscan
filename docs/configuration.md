@@ -15,7 +15,7 @@ to `.env` and adjust.
 | `VULNSCAN_QUERY_UNKNOWN_VERSIONS` | `false` | Query packages whose version cannot be determined. Reports every advisory ever published for them, so this is noisy |
 | `VULNSCAN_IGNORE_DIRS` | empty | Directories to skip, comma separated: names, project-relative paths or globs (`--ignore`). See [Ignoring directories](ignoring.md) |
 | `VULNSCAN_OSV_URL` | `https://api.osv.dev` | OSV API base URL |
-| `VULNSCAN_TIMEOUT` | `30` | HTTP timeout in seconds, for every service |
+| `VULNSCAN_TIMEOUT` | `30` | HTTP timeout in seconds, for every service (OSV, Wordfence, the package registries, ntfy, Teams) |
 
 ## Output
 
@@ -38,12 +38,13 @@ to `.env` and adjust.
 | `VULNSCAN_WORDFENCE_MIN_INTERVAL_MINUTES` | `30` | Minimum gap between requests to the API, even after failures |
 | `VULNSCAN_CACHE_DIR` | `$XDG_CACHE_HOME/vulnscan` or `~/.cache/vulnscan` | Where the feed is cached |
 
-The Wordfence feed is a single download of roughly 160 MB covering every
+The Wordfence feed is a single large download (over 100 MB) covering every
 known WordPress vulnerability, so vulnscan is careful never to overload the
 API:
 
-- The feed is cached (slimmed to about half its size) and reused for the
-  TTL. Rescans and repeated cron runs make no requests while it is fresh.
+- The feed is cached (with the per-record copyright boilerplate stripped
+  and the notice kept once) and reused for the TTL. Rescans and repeated
+  cron runs make no requests while it is fresh.
 - When the cache expires, the refresh is a conditional request carrying the
   cached `ETag` / `Last-Modified`, so an unchanged feed is answered with a
   `304` instead of a download.
