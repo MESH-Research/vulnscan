@@ -80,7 +80,9 @@ def _parser_for(path: Path) -> Parser | None:
     lowered = name.lower()
     if lowered in _EXACT_NAMES:
         return _EXACT_NAMES[lowered]
-    if lowered.endswith(".txt") and "requirements" in lowered:
+    if lowered.endswith(".txt") and (
+        "requirements" in lowered or path.parent.name.lower() == "requirements"
+    ):
         return parse_requirements_txt
     return None
 

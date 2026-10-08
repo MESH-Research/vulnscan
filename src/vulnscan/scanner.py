@@ -5,19 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from vulnscan.config import Settings
-from vulnscan.models import WORDPRESS, Dependency, Finding, ScanResult, severity_rank
+from vulnscan.models import WORDPRESS, Finding, ScanResult, merge_declarations, severity_rank
 from vulnscan.osv import OSVClient
 from vulnscan.parsers import parse_project
 from vulnscan.wordfence import WordfenceClient
 
 WORDFENCE_CACHE_FILENAME = "wordfence-production.json"
-
-
-def _unique(deps: list[Dependency]) -> list[Dependency]:
-    seen: dict[tuple, Dependency] = {}
-    for dep in deps:
-        seen.setdefault((dep.key, dep.version), dep)
-    return list(seen.values())
 
 
 def _plural(count: int, singular: str, plural: str) -> str:
@@ -35,7 +28,7 @@ def scan(
     deps, warnings = parse_project(settings.project_path, ignore_dirs=settings.ignore_dirs)
     if not settings.include_dev:
         deps = [d for d in deps if not d.dev]
-    deps = _unique(deps)
+    deps = merge_declarations(deps)
 
     for dep in deps:
         if dep.custom_source:

@@ -104,6 +104,25 @@ def test_scan_collapses_duplicate_dependencies(tmp_path: Path):
     assert len([d for d in result.dependencies if d.name == "requests"]) == 1
 
 
+def test_scan_lists_every_file_declaring_a_collapsed_dependency(tmp_path: Path):
+    (tmp_path / "requirements").mkdir()
+    (tmp_path / "requirements" / "base.txt").write_text("authlib==1.2.0\n")
+    (tmp_path / "requirements" / "production.txt").write_text("-r base.txt\nAuthLib==1.2.0\n")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname="x"\ndependencies=["authlib==1.2.0"]\n'
+    )
+    client = FakeClient({("authlib", "1.2.0"): [vuln("GHSA-A")]})
+    result = scan(settings_for(tmp_path), client=client)
+    assert len(result.findings) == 1
+    dep = result.findings[0].dependency
+    assert dep.source_files == [
+        "pyproject.toml",
+        "requirements/base.txt",
+        "requirements/production.txt",
+    ]
+    assert len(client.seen) == 1
+
+
 def test_scan_reports_unknown_versions_as_warnings_and_does_not_query_them(tmp_path: Path):
     (tmp_path / "requirements.txt").write_text("flask\n")
     client = FakeClient({})

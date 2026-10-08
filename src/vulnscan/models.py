@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -37,6 +37,15 @@ def severity_rank(label: str) -> int:
 
 
 @dataclass(frozen=True)
+class Declaration:
+    """One place a dependency is declared: a manifest file and the constraint written there."""
+
+    source_file: str
+    constraint: str
+    dev: bool = False
+
+
+@dataclass(frozen=True)
 class Dependency:
     """A direct dependency declared in a manifest."""
 
@@ -50,10 +59,53 @@ class Dependency:
     kind: str = ""
     slug: str = ""
     custom_source: bool = False
+    declarations: tuple[Declaration, ...] = ()
 
     @property
     def key(self) -> tuple[str, str]:
         return (self.ecosystem, normalize_name(self.name, self.ecosystem))
+
+    @property
+    def declared_in(self) -> list[Declaration]:
+        """Every place this dependency is declared, the primary location first."""
+        if self.declarations:
+            return list(self.declarations)
+        return [Declaration(self.source_file, self.constraint, self.dev)]
+
+    @property
+    def source_files(self) -> list[str]:
+        """Distinct manifest paths declaring this dependency, in declaration order."""
+        return list(dict.fromkeys(d.source_file for d in self.declared_in))
+
+    @property
+    def declared_in_text(self) -> str:
+        """Human-readable list such as ``a.txt as ==1.0; b.txt as >=1``."""
+        return "; ".join(
+            f"{d.source_file} as {d.constraint or 'any version'}" for d in self.declared_in
+        )
+
+
+def merge_declarations(deps: list[Dependency]) -> list[Dependency]:
+    """Collapse the same package at the same version declared in several manifests.
+
+    The first occurrence stays the primary location; the others are appended as
+    ``declarations``. A merged dependency counts as dev only if every declaration is dev.
+    """
+    merged: dict[tuple, Dependency] = {}
+    locations: dict[tuple, list[Declaration]] = {}
+    for dep in deps:
+        ident = (dep.key, dep.version)
+        new = [d for d in dep.declared_in if d not in locations.get(ident, [])]
+        if ident not in merged:
+            merged[ident] = dep
+            locations[ident] = new
+        else:
+            locations[ident].extend(new)
+    result = []
+    for ident, dep in merged.items():
+        decls = tuple(locations[ident])
+        result.append(replace(dep, declarations=decls, dev=all(d.dev for d in decls)))
+    return result
 
 
 @dataclass(frozen=True)

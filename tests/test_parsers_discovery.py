@@ -34,6 +34,24 @@ def test_discover_manifests_recurses_and_skips_vendor_dirs(tmp_path: Path):
     assert found == ["api/pyproject.toml", "composer.json"]
 
 
+def test_txt_files_inside_a_requirements_directory_are_manifests(tmp_path: Path):
+    (tmp_path / "requirements").mkdir()
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "requirements" / "base.txt").write_text("authlib==1.2.0\n")
+    (tmp_path / "requirements" / "production.txt").write_text("-r base.txt\n")
+    (tmp_path / "requirements" / "README.md").write_text("")
+    (tmp_path / "docs" / "notes.txt").write_text("not a manifest")
+    assert is_manifest(tmp_path / "requirements" / "base.txt")
+    assert not is_manifest(tmp_path / "docs" / "notes.txt")
+    found = sorted(p.relative_to(tmp_path).as_posix() for p in discover_manifests(tmp_path))
+    assert found == ["requirements/base.txt", "requirements/production.txt"]
+    deps, _ = parse_project(tmp_path)
+    assert [(d.name, d.source_file) for d in deps] == [
+        ("authlib", "requirements/base.txt"),
+        ("authlib", "requirements/base.txt"),
+    ]
+
+
 def test_discover_manifests_accepts_a_file(tmp_path: Path):
     req = tmp_path / "requirements.txt"
     req.write_text("")
