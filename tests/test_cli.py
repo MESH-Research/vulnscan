@@ -265,3 +265,41 @@ def test_summary_lists_every_declaring_file(tmp_path: Path, monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "requirements.txt" in out
     assert "requirements-prod.txt" in out
+
+
+def test_ignore_flag_is_repeatable_and_overrides_environment(tmp_path: Path, monkeypatch):
+    seen = {}
+
+    def fake_scan(settings):
+        seen["settings"] = settings
+        return fake_result(settings.project_path)
+
+    monkeypatch.setattr(cli, "scan", fake_scan)
+    monkeypatch.setenv("VULNSCAN_IGNORE_DIRS", "from-env")
+    code = cli.main(
+        [
+            "--text",
+            "-",
+            "--path",
+            str(tmp_path),
+            "--ignore",
+            "legacy",
+            "--ignore",
+            "web/app/plugins/graveyard,*-old",
+        ]
+    )
+    assert code == 0
+    assert seen["settings"].ignore_dirs == ("legacy", "web/app/plugins/graveyard", "*-old")
+
+
+def test_ignore_dirs_come_from_environment_without_the_flag(tmp_path: Path, monkeypatch):
+    seen = {}
+
+    def fake_scan(settings):
+        seen["settings"] = settings
+        return fake_result(settings.project_path)
+
+    monkeypatch.setattr(cli, "scan", fake_scan)
+    monkeypatch.setenv("VULNSCAN_IGNORE_DIRS", "from-env")
+    assert cli.main(["--text", "-", "--path", str(tmp_path)]) == 0
+    assert seen["settings"].ignore_dirs == ("from-env",)

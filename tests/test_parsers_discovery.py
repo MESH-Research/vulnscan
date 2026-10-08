@@ -2,7 +2,14 @@ import json
 from pathlib import Path
 
 from vulnscan.models import PACKAGIST, PYPI
-from vulnscan.parsers import discover_manifests, is_manifest, parse_manifest, parse_project
+from vulnscan.parsers import (
+    discover_manifests,
+    is_manifest,
+    load_ignore_file,
+    matches_ignore,
+    parse_manifest,
+    parse_project,
+)
 
 
 def test_is_manifest_recognises_known_files(tmp_path: Path):
@@ -201,3 +208,86 @@ def test_parse_project_resolves_wordpress_plugin_version_from_composer_lock(tmp_
         (WORDPRESS, "elementor", "3.13.4", "lock")
     ]
     assert warnings == []
+
+
+# --- ignore patterns --------------------------------------------------------------------------
+
+
+def _touch(root: Path, *rels: str) -> None:
+    for rel in rels:
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("")
+
+
+def _found(root: Path, **kwargs) -> list[str]:
+    return sorted(p.relative_to(root).as_posix() for p in discover_manifests(root, **kwargs))
+
+
+def test_matches_ignore_by_name_anywhere_in_the_tree():
+    assert matches_ignore("web/app/plugins/graveyard", ("graveyard",))
+    assert matches_ignore("graveyard", ("graveyard",))
+    assert not matches_ignore("web/app/plugins/graveyard-2", ("graveyard",))
+    assert not matches_ignore("web/app/plugins/live", ("graveyard",))
+
+
+def test_matches_ignore_by_project_relative_path():
+    patterns = ("web/app/plugins/graveyard",)
+    assert matches_ignore("web/app/plugins/graveyard", patterns)
+    assert not matches_ignore("other/graveyard", patterns)
+    assert not matches_ignore("web/app/plugins", patterns)
+
+
+def test_matches_ignore_accepts_wildcards_and_sloppy_spelling():
+    assert matches_ignore("web/app/plugins/graveyard", ("./web/app/plugins/grave*/",))
+    assert matches_ignore("plugins/foo-old", ("*-old",))
+    assert matches_ignore("web/app/plugins/graveyard", ("web/*/plugins/graveyard",))
+    assert not matches_ignore("web/app/plugins/graveyard", ("", "  ", "#graveyard"))
+
+
+def test_discover_ignores_a_path_only_where_it_is_given(tmp_path: Path):
+    _touch(
+        tmp_path,
+        "composer.json",
+        "web/app/plugins/graveyard/evil/composer.json",
+        "web/app/plugins/live/composer.json",
+        "other/graveyard/composer.json",
+    )
+    found = _found(tmp_path, ignore_dirs=("web/app/plugins/graveyard",))
+    assert found == [
+        "composer.json",
+        "other/graveyard/composer.json",
+        "web/app/plugins/live/composer.json",
+    ]
+    assert _found(tmp_path, ignore_dirs=("graveyard",)) == [
+        "composer.json",
+        "web/app/plugins/live/composer.json",
+    ]
+
+
+def test_discover_reads_vulnscanignore_from_the_project_root(tmp_path: Path):
+    _touch(
+        tmp_path,
+        "requirements.txt",
+        "legacy/requirements.txt",
+        "web/app/plugins/graveyard/composer.json",
+        "web/app/plugins/live/composer.json",
+        "tools/scratch-old/requirements.txt",
+    )
+    (tmp_path / ".vulnscanignore").write_text(
+        "# directories we never want scanned\n\nlegacy\nweb/app/plugins/graveyard/\n*-old\n"
+    )
+    assert load_ignore_file(tmp_path) == ("legacy", "web/app/plugins/graveyard/", "*-old")
+    assert _found(tmp_path) == ["requirements.txt", "web/app/plugins/live/composer.json"]
+    deps, _ = parse_project(tmp_path)
+    assert {d.source_file for d in deps} == set()
+
+
+def test_vulnscanignore_combines_with_explicit_patterns(tmp_path: Path):
+    _touch(tmp_path, "a/requirements.txt", "b/requirements.txt", "c/requirements.txt")
+    (tmp_path / ".vulnscanignore").write_text("a\n")
+    assert _found(tmp_path, ignore_dirs=("b",)) == ["c/requirements.txt"]
+
+
+def test_load_ignore_file_is_empty_without_a_file(tmp_path: Path):
+    assert load_ignore_file(tmp_path) == ()

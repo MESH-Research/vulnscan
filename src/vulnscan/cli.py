@@ -71,6 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --remediate: 'nearest' = smallest upgrade clearing all advisories "
         "(default), 'latest' = newest release",
     )
+    parser.add_argument(
+        "--ignore",
+        action="append",
+        metavar="PATTERN",
+        help="directory to skip: a name (anywhere), a path relative to the project, or a "
+        "glob; repeatable or comma separated; overrides VULNSCAN_IGNORE_DIRS. A "
+        ".vulnscanignore file in the project root is always read as well",
+    )
     parser.add_argument("--env-file", help="path to a .env file (default: ./.env)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -201,7 +209,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         settings = load_settings(
             dotenv_path=Path(args.env_file) if args.env_file else None,
-            overrides={"project_path": args.path, "feed_dir": args.feed_dir},
+            overrides={
+                "project_path": args.path,
+                "feed_dir": args.feed_dir,
+                "ignore_dirs": ",".join(args.ignore) if args.ignore else None,
+            },
         )
     except ValueError as exc:
         print(f"error: invalid configuration: {exc}", file=sys.stderr)

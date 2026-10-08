@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 from collections.abc import Callable
@@ -92,6 +93,51 @@ def _parser_for(path: Path) -> Parser | None:
     return None
 
 
+IGNORE_FILENAME = ".vulnscanignore"
+
+
+def load_ignore_file(root: Path) -> tuple[str, ...]:
+    """Patterns from ``<root>/.vulnscanignore``: one per line, blank lines and ``#`` comments
+    skipped. Returns an empty tuple when the file is absent or unreadable."""
+    path = root / IGNORE_FILENAME
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return ()
+    patterns = []
+    for line in lines:
+        text = line.strip()
+        if text and not text.startswith("#"):
+            patterns.append(text)
+    return tuple(patterns)
+
+
+def _normalise_pattern(pattern: str) -> str:
+    text = pattern.strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text.strip("/")
+
+
+def matches_ignore(rel_path: str, patterns: tuple[str, ...]) -> bool:
+    """Does the project-relative directory ``rel_path`` match any ignore pattern?
+
+    A pattern without ``/`` matches the directory's own name anywhere in the tree; one
+    with ``/`` matches the whole project-relative path. Both accept shell wildcards.
+    Blank patterns and ``#`` comments never match.
+    """
+    rel = rel_path.strip("/")
+    name = rel.rsplit("/", 1)[-1]
+    for raw in patterns:
+        pattern = _normalise_pattern(raw)
+        if not pattern or pattern.startswith("#"):
+            continue
+        subject = rel if "/" in pattern else name
+        if fnmatch.fnmatchcase(subject, pattern):
+            return True
+    return False
+
+
 def is_manifest(path: Path) -> bool:
     return _parser_for(path) is not None
 
@@ -99,19 +145,26 @@ def is_manifest(path: Path) -> bool:
 def discover_manifests(root: Path, ignore_dirs: tuple[str, ...] = ()) -> list[Path]:
     if root.is_file():
         return [root] if is_manifest(root) else []
-    ignored_names = IGNORED_DIRS | WP_CORE_DIRS | set(ignore_dirs)
+    ignored_names = IGNORED_DIRS | WP_CORE_DIRS
+    patterns = tuple(ignore_dirs) + load_ignore_file(root)
     ignored_paths: set[Path] = set()
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         here = Path(dirpath)
         if "composer.json" in filenames:
             ignored_paths |= composer_ignored_dirs(here / "composer.json")
+        try:
+            prefix = here.relative_to(root).as_posix()
+        except ValueError:
+            prefix = ""
+        prefix = "" if prefix in ("", ".") else prefix + "/"
         dirnames[:] = sorted(
             d
             for d in dirnames
             if d not in ignored_names
             and not d.startswith(".")
             and (here / d).resolve() not in ignored_paths
+            and not matches_ignore(prefix + d, patterns)
         )
         for filename in sorted(filenames):
             path = Path(dirpath) / filename

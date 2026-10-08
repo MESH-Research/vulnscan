@@ -175,3 +175,9 @@ def test_wordfence_min_interval_setting(tmp_path: Path):
         env={"VULNSCAN_WORDFENCE_MIN_INTERVAL_MINUTES": "5"}, dotenv_path=tmp_path / "missing.env"
     )
     assert custom.wordfence_min_interval_minutes == 5.0
+
+
+def test_ignore_dirs_accepts_names_and_paths(tmp_path: Path):
+    env = {"VULNSCAN_IGNORE_DIRS": "legacy, web/app/plugins/graveyard ,*-old"}
+    settings = load_settings(env=env, dotenv_path=tmp_path / "missing.env")
+    assert settings.ignore_dirs == ("legacy", "web/app/plugins/graveyard", "*-old")
