@@ -1,0 +1,3 @@
+# vulnscan.models
+
+::: vulnscan.models

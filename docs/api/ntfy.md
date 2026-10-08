@@ -1,0 +1,3 @@
+# vulnscan.ntfy
+
+::: vulnscan.ntfy

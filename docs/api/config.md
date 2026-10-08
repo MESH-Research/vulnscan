@@ -1,0 +1,3 @@
+# vulnscan.config
+
+::: vulnscan.config

@@ -1,0 +1,3 @@
+# vulnscan.reports
+
+::: vulnscan.reports

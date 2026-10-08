@@ -1,0 +1,3 @@
+# vulnscan.remediate
+
+::: vulnscan.remediate

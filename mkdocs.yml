@@ -1,0 +1,76 @@
+site_name: vulnscan
+site_description: Scan Python, PHP and WordPress dependencies for known vulnerabilities
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            members_order: source
+            show_root_heading: true
+            show_source: true
+            show_signature_annotations: true
+            separate_signature: true
+            filters: ["!^_"]
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.highlight
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Usage:
+      - Interactive and command line: usage.md
+      - Ignoring directories: ignoring.md
+      - Upgrading dependencies: remediation.md
+      - Notifications with ntfy: notifications.md
+      - Feeds and reports: feeds.md
+  - Configuration: configuration.md
+  - How it works: architecture.md
+  - API reference:
+      - Overview: api/index.md
+      - models: api/models.md
+      - config: api/config.md
+      - parsers: api/parsers.md
+      - scanner: api/scanner.md
+      - osv: api/osv.md
+      - wordfence: api/wordfence.md
+      - registry: api/registry.md
+      - remediate: api/remediate.md
+      - feeds: api/feeds.md
+      - reports: api/reports.md
+      - ntfy: api/ntfy.md
+      - cli: api/cli.md
+      - tui: api/tui.md
+      - versioncmp: api/versioncmp.md
+  - Design notes:
+      - Specification: design/spec.md
+      - Implementation plan: design/plan.md
+  - Contributing: contributing.md
