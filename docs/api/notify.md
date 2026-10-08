@@ -1,0 +1,3 @@
+# vulnscan.notify
+
+::: vulnscan.notify

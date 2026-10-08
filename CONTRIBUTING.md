@@ -48,7 +48,9 @@ src/vulnscan/
   remediate.py    upgrade planning and manifest rewriting
   feeds.py        RSS and Atom
   reports.py      Markdown and plain text
-  ntfy.py         ntfy notifications and the watch loop
+  notify.py       notification building, sent state and the watch loop
+  ntfy.py         ntfy channel
+  msteams.py      Microsoft Teams channel (Adaptive Cards)
   tui.py          Textual interface
 tests/            one test module per source module
 docs/             MkDocs site (guides plus API reference from docstrings)

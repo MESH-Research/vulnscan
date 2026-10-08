@@ -16,8 +16,8 @@ the first time a new advisory appears.
   includes), `Pipfile`, `setup.cfg`; versions come from `composer.lock`,
   `uv.lock`, `poetry.lock` and `Pipfile.lock`.
 - **Interfaces:** an interactive terminal UI, non-interactive modes for
-  cron, and a continuous watch mode with [ntfy](https://ntfy.sh)
-  notifications.
+  cron, and a continuous watch mode that pushes new advisories to
+  [ntfy](https://ntfy.sh) and/or a Microsoft Teams channel.
 - **Scope:** direct dependencies only. Lock files are read solely to learn
   the installed version of those direct dependencies; transitive
   dependencies are never scanned.
@@ -79,33 +79,51 @@ untouched, so an outage never makes vulnerabilities disappear from your
 reader. Feed entry ids are stable per (project, dependency, advisory), so
 readers notify you once per new advisory.
 
-### Notifications with ntfy
+### Notifications: ntfy and Microsoft Teams
 
 ```
-uv run vulnscan --ntfy --path /path/to/project
+uv run vulnscan --ntfy --path /path/to/project              # push to an ntfy topic
+uv run vulnscan --msteams --path /path/to/project           # post to a Teams channel
+uv run vulnscan --ntfy --msteams --path /path/to/project    # both
 ```
 
-Rescans every `VULNSCAN_NTFY_INTERVAL_MINUTES` (default 60, or
-`--interval`) and sends one ntfy notification per dependency with advisories
-that have not been sent before for this project. The first run therefore
+Rescans every `VULNSCAN_INTERVAL_MINUTES` (default 60, or `--interval`)
+and sends one notification per dependency with advisories that have not
+been sent to that channel before for this project. The first run therefore
 pushes everything currently found; afterwards only new advisories arrive.
-Ids are recorded only after the server accepts the message, so a failed
-push is retried next cycle, and a failed scan is logged and the loop
-carries on.
+Each channel keeps its own record, so adding Teams later gives it the full
+backlog while ntfy stays quiet. Ids are recorded only after the service
+accepts the message, so a failed push is retried next cycle, and a failed
+scan is logged and the loop carries on.
+
+Every notification says how severe the worst new advisory is, which
+version fixes each advisory and whether that version has actually been
+published, the smallest upgrade that clears every advisory for the
+package, the latest release and whether it is still affected, a link to
+each advisory and its CVE record, a summary of the problem, and the
+manifests that declare the package. On Teams this is an Adaptive Card with
+colour-coded severity and buttons to open each advisory; on ntfy it is a
+plain-text message whose priority follows the severity.
 
 - `kill -USR1 <pid>` re-sends every current finding immediately.
 - `--resend` does the same at start-up.
 - `--once` runs a single cycle and exits, for cron.
 - `SIGINT` / `SIGTERM` stop cleanly.
 
-Configure the topic and credentials in `.env`:
+Configure the destinations in `.env`:
 
 ```
+VULNSCAN_INTERVAL_MINUTES=60
 VULNSCAN_NTFY_SERVER=https://ntfy.sh
 VULNSCAN_NTFY_TOPIC=mysite-vulns
 VULNSCAN_NTFY_TOKEN=tk_xxxxxxxxxxxx        # or VULNSCAN_NTFY_USER / VULNSCAN_NTFY_PASSWORD
-VULNSCAN_NTFY_INTERVAL_MINUTES=60
+VULNSCAN_MSTEAMS_WEBHOOK_URL=https://....webhook.office.com/...
 ```
+
+The Teams URL comes from a *Workflows* flow in the target channel
+(**Workflows → Send webhook alerts to a channel**, or any flow using the
+"When a Teams webhook request is received" trigger that posts the received
+Adaptive Card).
 
 ### Upgrading a dependency
 
@@ -182,8 +200,10 @@ both. [`.env.example`](.env.example) lists every option with comments.
 | `VULNSCAN_NTFY_TOPIC` | empty | ntfy topic (required for `--ntfy`) |
 | `VULNSCAN_NTFY_TOKEN` | empty | ntfy access token |
 | `VULNSCAN_NTFY_USER` / `VULNSCAN_NTFY_PASSWORD` | empty | ntfy basic authentication |
-| `VULNSCAN_NTFY_INTERVAL_MINUTES` | `60` | Minutes between scans in `--ntfy` mode |
-| `VULNSCAN_NTFY_STATE_FILE` | `ntfy-state.json` | Which advisories have been sent |
+| `VULNSCAN_NTFY_STATE_FILE` | `ntfy-state.json` | Which advisories ntfy has received |
+| `VULNSCAN_MSTEAMS_WEBHOOK_URL` | empty | Teams incoming webhook URL (required for `--msteams`) |
+| `VULNSCAN_MSTEAMS_STATE_FILE` | `msteams-state.json` | Which advisories Teams has received |
+| `VULNSCAN_INTERVAL_MINUTES` | `60` | Minutes between scans in `--ntfy` / `--msteams` mode |
 
 ### Wordfence API key
 
@@ -234,5 +254,4 @@ for reporting problems, and `docs/` for the design notes and architecture.
 
 This application was developed with the assistance of large language models
 (artificial intelligence tools) for drafting code, tests and documentation.
-All of it has been reviewed, tested and is maintained by humans; bug reports
-and corrections are very welcome.
+Bug reports and corrections are very welcome.

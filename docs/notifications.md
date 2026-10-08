@@ -1,23 +1,98 @@
-# Notifications with ntfy
+# Notifications
 
-ntfy mode keeps vulnscan running, rescans a project at a fixed interval, and
-pushes a notification through [ntfy](https://ntfy.sh) the first time each
-advisory is seen for that project. Install the ntfy app on your phone (or
-use the web app), subscribe to a topic, and you have a real-time pager for
-new vulnerabilities in your dependencies.
+Notification mode keeps vulnscan running, rescans a project at a fixed
+interval, and pushes a message the first time each advisory is seen for
+that project. Two channels are available and can run together:
 
-## Configuration
+- **ntfy** (`--ntfy`): a push notification to the [ntfy](https://ntfy.sh)
+  app on your phone, or any ntfy client.
+- **Microsoft Teams** (`--msteams`): an Adaptive Card posted to a channel
+  through an incoming webhook.
+
+```
+uv run vulnscan --ntfy
+uv run vulnscan --msteams
+uv run vulnscan --ntfy --msteams
+```
+
+## What a notification contains
+
+Each notification covers one dependency and only the advisories that
+channel has not seen before. It states:
+
+- the **severity** of the worst new advisory (critical, high, medium, low
+  or unknown), which also sets the ntfy priority and the Teams card colour;
+- the installed version and where it was read from (lock file, pin or
+  constraint);
+- the **upgrade that clears every advisory**: the smallest published version
+  above the installed one that no advisory affects, looked up on PyPI,
+  Packagist or wordpress.org, or a note that no safe version exists yet;
+- the latest release and whether it is still affected;
+- for each advisory: its id linked to the full record, the CVE id linked to
+  the NVD entry, severity with the CVSS vector, a summary and description,
+  the **lowest fixed version above the installed one and whether it is
+  actually available** on the registry, and the publication date;
+- every manifest that declares the package and the constraint written there.
+
+If the registry cannot be reached, the notification still goes out with the
+upgrade advice marked as unknown.
+
+## Running
+
+Each cycle:
+
+1. scans the project exactly as the TUI would;
+2. for each channel, compares every (dependency, advisory) pair against
+   that channel's sent-state file;
+3. sends one notification per dependency that has unsent advisories;
+4. records the ids the service accepted;
+5. sleeps for `VULNSCAN_INTERVAL_MINUTES` (override with
+   `--interval MINUTES`).
+
+The first run has no state, so it sends everything currently found. After
+that only genuinely new advisories arrive. Because state is kept per
+channel (`ntfy-state.json`, `msteams-state.json` in the feed directory),
+adding a channel later gives it the full backlog while the other stays
+quiet. If a service cannot be reached, nothing is recorded for the failed
+messages and they are retried on the next cycle. A scan failure (OSV or
+Wordfence unreachable) is logged and the loop carries on; it never exits on
+its own. Progress is logged to stderr with timestamps, so it suits a
+systemd service or a `screen` session.
+
+Because the Wordfence feed is cached and only refreshed when it expires, a
+short interval does not hammer the API.
+
+### Re-sending everything
+
+Send `SIGUSR1` to the running process and it immediately rescans and pushes
+every current finding to every channel again, regardless of state:
+
+```
+kill -USR1 $(pgrep -f 'vulnscan --')
+```
+
+To do the same at start-up, add `--resend`. `SIGINT` (Ctrl-C) and `SIGTERM`
+stop the loop cleanly.
+
+### One cycle at a time (cron)
+
+```
+*/30 * * * * cd /srv/vulnscan && uv run vulnscan --ntfy --msteams --once
+```
+
+`--once` runs a single scan-and-notify cycle and exits 0, or 1 if the scan
+failed. Combine with `--resend` to push everything.
+
+## ntfy
 
 In `.env`:
 
 ```
-VULNSCAN_PROJECT_PATH=/srv/mysite
 VULNSCAN_NTFY_SERVER=https://ntfy.sh          # or your own server
 VULNSCAN_NTFY_TOPIC=mysite-vulns
 VULNSCAN_NTFY_TOKEN=tk_xxxxxxxxxxxxxxxx         # access token, or:
 #VULNSCAN_NTFY_USER=me
 #VULNSCAN_NTFY_PASSWORD=secret
-VULNSCAN_NTFY_INTERVAL_MINUTES=60
 ```
 
 Use a token (`Bearer` authentication) or a user and password (basic
@@ -25,82 +100,59 @@ authentication). If both are set the token wins. Topics on the public
 `ntfy.sh` are open to anyone who guesses the name, so pick an unguessable
 one or run your own server with access control.
 
-## Running
-
-```
-uv run vulnscan --ntfy
-```
-
-Each cycle:
-
-1. scans the project exactly as the TUI would;
-2. compares every (dependency, advisory) pair against the sent-state file
-   (`VULNSCAN_NTFY_STATE_FILE`, default `ntfy-state.json` in the feed
-   directory);
-3. sends one notification per dependency that has advisories not yet sent,
-   listing only those new advisories;
-4. records the ids it successfully sent;
-5. sleeps for `VULNSCAN_NTFY_INTERVAL_MINUTES` (override with
-   `--interval MINUTES`).
-
-The first run has no state, so it sends everything currently found. After
-that only genuinely new advisories arrive. If the ntfy server cannot be
-reached, nothing is recorded for the failed messages and they are retried
-on the next cycle. A scan failure (OSV or Wordfence unreachable) is logged
-and the loop carries on; it never exits on its own. Progress is logged to
-stderr with timestamps, so it suits a systemd service or a `screen`
-session.
-
-Because the Wordfence feed is cached and only refreshed when it expires, a
-short interval does not hammer the API: a one-minute interval makes one
-request to OSV per cycle and almost none to Wordfence.
-
-## Re-sending everything
-
-Send `SIGUSR1` to the running process and it immediately rescans and pushes
-every current finding again, regardless of state:
-
-```
-kill -USR1 $(pgrep -f 'vulnscan --ntfy')
-```
-
-To do the same at start-up, add `--resend`. `SIGINT` (Ctrl-C) and `SIGTERM`
-stop the loop cleanly.
-
-## One cycle at a time (cron)
-
-If you would rather schedule it yourself:
-
-```
-*/30 * * * * cd /srv/vulnscan && uv run vulnscan --ntfy --once
-```
-
-`--once` runs a single scan-and-notify cycle and exits 0, or 1 if the scan
-failed. Combine with `--resend` to push everything.
-
-## What a notification looks like
-
-Title: `authlib 1.2.0: 2 new advisories`
-
-Body:
+A message looks like this. Title: `authlib 1.2.0: 2 new advisories`
 
 ```
 Project: mysite
 Severity: CRITICAL
+Upgrade to: 1.4.0 (available on PyPI, clears all)
 
 GHSA-xxxx-xxxx-xxxx (CVE-2025-1234) [CRITICAL]: JWT algorithm confusion
-  fixed in: 1.3.1
+  fixed in: 1.3.1 (available on PyPI)
 GHSA-yyyy-yyyy-yyyy [HIGH]: Second issue
-  fixed in: 1.4.0
+  fixed in: 1.4.0 (available on PyPI)
 
 Declared in: requirements/base.txt, requirements/production.txt
 ```
 
-The notification's priority follows the worst severity among the *new*
-advisories (critical = urgent, high = high, medium or unknown = default,
-low = low), its tags carry the severity, and tapping it opens the first
-advisory. One topic can serve several projects: the project name is in the
-body and ids are tracked per project.
+Priority follows the worst severity (critical = urgent, high = high,
+medium or unknown = default, low = low), the tags carry the severity, and
+tapping the notification opens the first advisory.
+
+## Microsoft Teams
+
+Teams receives webhooks through the **Workflows** app:
+
+1. In Teams, open the channel, choose **More options (…) → Workflows**.
+2. Pick the **Send webhook alerts to a channel** template (or build a flow
+   from the "When a Teams webhook request is received" trigger that posts
+   the received Adaptive Card).
+3. Save it and copy the webhook URL into `.env`:
+
+```
+VULNSCAN_MSTEAMS_WEBHOOK_URL=https://prod-00.westus.logic.azure.com:443/workflows/...
+```
+
+Anyone with the URL can post to the channel, so keep it out of version
+control. Legacy Microsoft 365 connector URLs (`*.webhook.office.com`) are
+accepted too while they still work.
+
+Each notification is one message carrying one Adaptive Card:
+
+- a colour-coded headline (red for critical and high, amber for medium,
+  green for low) with the package, version and number of new advisories;
+- a fact table: severity, project, package, installed version, the upgrade
+  that clears every advisory and whether it is available, the latest
+  release, and every declaring manifest;
+- a section per advisory with the linked id and summary, severity and CVSS
+  vector, linked CVE, lowest available fix, publication date and the
+  description;
+- buttons that open the first six advisories.
+
+Teams rejects messages over 28 KB, so descriptions are shortened and, if
+need be, trailing advisories are dropped with a line saying how many were
+left out. Posts are spaced to stay under the webhook's four-per-second
+limit.
 
 ## Running as a service
 
@@ -113,7 +165,7 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=/srv/vulnscan
-ExecStart=/usr/local/bin/uv run vulnscan --ntfy --path /srv/mysite
+ExecStart=/usr/local/bin/uv run vulnscan --ntfy --msteams --path /srv/mysite
 ExecReload=/bin/kill -USR1 $MAINPID
 Restart=on-failure
 

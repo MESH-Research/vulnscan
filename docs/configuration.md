@@ -57,18 +57,20 @@ The first scan therefore takes a minute or two; later scans are fast.
 Records derived from Wordfence carry their copyright notice and licence in
 the feeds, reports and TUI, as the licence requires.
 
-## ntfy
+## Notifications
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `VULNSCAN_INTERVAL_MINUTES` | `60` | Minutes between scans in `--ntfy` / `--msteams` mode (`--interval`) |
 | `VULNSCAN_NTFY_SERVER` | `https://ntfy.sh` | ntfy server base URL |
 | `VULNSCAN_NTFY_TOPIC` | empty | Topic to publish to (required for `--ntfy`) |
 | `VULNSCAN_NTFY_TOKEN` | empty | Access token (bearer authentication) |
 | `VULNSCAN_NTFY_USER` / `VULNSCAN_NTFY_PASSWORD` | empty | Basic authentication, used when no token is set |
-| `VULNSCAN_NTFY_INTERVAL_MINUTES` | `60` | Minutes between scans in watch mode (`--interval`) |
-| `VULNSCAN_NTFY_STATE_FILE` | `ntfy-state.json` | Records which advisories have been sent, inside the feed directory |
+| `VULNSCAN_NTFY_STATE_FILE` | `ntfy-state.json` | Records which advisories ntfy has received, inside the feed directory |
+| `VULNSCAN_MSTEAMS_WEBHOOK_URL` | empty | Microsoft Teams incoming webhook URL (required for `--msteams`) |
+| `VULNSCAN_MSTEAMS_STATE_FILE` | `msteams-state.json` | Records which advisories Teams has received, inside the feed directory |
 
-See [Notifications with ntfy](notifications.md).
+See [Notifications](notifications.md).
 
 ## Precedence
 

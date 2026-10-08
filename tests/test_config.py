@@ -190,8 +190,10 @@ def test_ntfy_defaults(tmp_path: Path):
     assert settings.ntfy_token == ""
     assert settings.ntfy_user == ""
     assert settings.ntfy_password == ""
-    assert settings.ntfy_interval_minutes == 60.0
+    assert settings.interval_minutes == 60.0
     assert settings.ntfy_state_path == settings.feed_dir / "ntfy-state.json"
+    assert settings.msteams_webhook_url == ""
+    assert settings.msteams_state_path == settings.feed_dir / "msteams-state.json"
 
 
 def test_ntfy_values_from_environment(tmp_path: Path):
@@ -201,13 +203,17 @@ def test_ntfy_values_from_environment(tmp_path: Path):
         "VULNSCAN_NTFY_TOKEN": "tk_abc",
         "VULNSCAN_NTFY_USER": "me",
         "VULNSCAN_NTFY_PASSWORD": "pw",
-        "VULNSCAN_NTFY_INTERVAL_MINUTES": "15",
+        "VULNSCAN_INTERVAL_MINUTES": "15",
         "VULNSCAN_NTFY_STATE_FILE": "sent.json",
+        "VULNSCAN_MSTEAMS_WEBHOOK_URL": "https://example.webhook.office.com/abc",
+        "VULNSCAN_MSTEAMS_STATE_FILE": "teams.json",
     }
     settings = load_settings(env=env, dotenv_path=tmp_path / "missing.env")
     assert settings.ntfy_server == "https://ntfy.example.org"
     assert settings.ntfy_topic == "vulns"
     assert settings.ntfy_token == "tk_abc"
     assert (settings.ntfy_user, settings.ntfy_password) == ("me", "pw")
-    assert settings.ntfy_interval_minutes == 15.0
+    assert settings.interval_minutes == 15.0
     assert settings.ntfy_state_path == settings.feed_dir / "sent.json"
+    assert settings.msteams_webhook_url == "https://example.webhook.office.com/abc"
+    assert settings.msteams_state_path == settings.feed_dir / "teams.json"

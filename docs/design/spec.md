@@ -59,7 +59,9 @@ src/vulnscan/
   scanner.py        orchestration: parse -> resolve -> query -> findings
   feeds.py          RSS / Atom rendering and first-seen state
   reports.py        Markdown and plain-text reports
-  ntfy.py           push notifications to an ntfy topic and the watch loop
+  notify.py         notification building, per-channel sent state, watch loop
+  ntfy.py           ntfy channel
+  msteams.py        Microsoft Teams channel (Adaptive Cards via webhook)
   tui.py            Textual application
 tests/              pytest unit tests, one file per module
 docs/               this spec and the plan
@@ -139,12 +141,20 @@ class Dependency:
     `.vulnscanignore` file in the project root (one pattern per line, `#`
     comments). A name pattern (no `/`) matches a directory anywhere in the
     tree; a path pattern matches the project-relative path.
-11. ntfy mode (`--ntfy`): a non-interactive loop that rescans every
-    `VULNSCAN_NTFY_INTERVAL_MINUTES` and pushes one notification per
-    dependency whose (dependency, advisory) pairs have not been sent before
-    for this project. The first run therefore sends everything. Sent ids are
-    recorded in `VULNSCAN_NTFY_STATE_FILE` under the feed directory only after
-    a successful publish, so a failed push is retried on the next cycle.
+11. Notification modes (`--ntfy`, `--msteams`, or both): a non-interactive
+    loop that rescans every `VULNSCAN_INTERVAL_MINUTES` and pushes one
+    notification per dependency whose (dependency, advisory) pairs have not
+    been sent to that channel before for this project. The first run
+    therefore sends everything. Sent ids are recorded per channel
+    (`VULNSCAN_NTFY_STATE_FILE`, `VULNSCAN_MSTEAMS_STATE_FILE`) under the feed
+    directory only after a successful publish, so a failed push is retried
+    on the next cycle. Each notification carries the worst severity of the
+    new advisories, per advisory the lowest fixed version above the
+    installed one and whether the registry has published it, the smallest
+    upgrade clearing every advisory, the latest release and whether it is
+    affected, advisory and CVE links, a summary and the declaring files.
+    Teams receives an Adaptive Card posted to a Workflows incoming webhook
+    (`VULNSCAN_MSTEAMS_WEBHOOK_URL`), kept under 28 KB.
     `SIGUSR1` re-sends every current finding immediately; `--resend` does the
     same at start-up; `--once` runs a single cycle and exits (for cron);
     `SIGINT`/`SIGTERM` stop the loop. Scan or publish failures are logged and

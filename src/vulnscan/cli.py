@@ -12,7 +12,9 @@ from vulnscan import __version__
 from vulnscan.config import Settings, load_settings
 from vulnscan.feeds import write_feeds
 from vulnscan.models import Finding, ScanResult, normalize_name
-from vulnscan.ntfy import NtfyClient, WatchControl, install_signal_handlers, run_watch
+from vulnscan.msteams import TeamsClient
+from vulnscan.notify import Target, WatchControl, install_signal_handlers, run_watch
+from vulnscan.ntfy import NtfyClient
 from vulnscan.osv import OSVError
 from vulnscan.registry import RegistryClient, RegistryError
 from vulnscan.remediate import RemediationError, apply_remediation, plan_remediation
@@ -77,22 +79,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ntfy",
         action="store_true",
-        help="non-interactive: rescan every VULNSCAN_NTFY_INTERVAL_MINUTES and push new "
-        "findings to an ntfy topic; SIGUSR1 re-sends everything, SIGINT/SIGTERM stop",
+        help="non-interactive: rescan every VULNSCAN_INTERVAL_MINUTES and push new findings "
+        "to an ntfy topic; SIGUSR1 re-sends everything, SIGINT/SIGTERM stop. Combine with "
+        "--msteams to notify both",
     )
     parser.add_argument(
-        "--once", action="store_true", help="with --ntfy: run a single cycle and exit"
+        "--msteams",
+        action="store_true",
+        help="non-interactive: like --ntfy, but post an Adaptive Card to a Microsoft Teams "
+        "incoming webhook (VULNSCAN_MSTEAMS_WEBHOOK_URL)",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="with --ntfy/--msteams: run a single cycle and exit",
     )
     parser.add_argument(
         "--resend",
         action="store_true",
-        help="with --ntfy: push every current finding at start, not only unsent ones",
+        help="with --ntfy/--msteams: push every current finding at start, not only unsent ones",
     )
     parser.add_argument(
         "--interval",
         type=float,
         metavar="MINUTES",
-        help="with --ntfy: minutes between scans (VULNSCAN_NTFY_INTERVAL_MINUTES)",
+        help="with --ntfy/--msteams: minutes between scans (VULNSCAN_INTERVAL_MINUTES)",
     )
     parser.add_argument(
         "--ignore",
@@ -189,15 +200,29 @@ def build_ntfy_client(settings: Settings) -> NtfyClient:
     )
 
 
-def run_ntfy(settings: Settings, args: argparse.Namespace) -> int:
-    """Run ``--ntfy`` mode: scan and push new findings, once or on an interval.
+def build_msteams_client(settings: Settings) -> TeamsClient:
+    """Create a :class:`TeamsClient` from the ``msteams_*`` settings."""
+    return TeamsClient(settings.msteams_webhook_url, timeout=settings.request_timeout)
 
-    Signal handlers are installed only for the continuous loop. Returns 2 when no
-    topic is configured, otherwise the exit code of :func:`vulnscan.ntfy.run_watch`.
+
+def run_notifications(settings: Settings, args: argparse.Namespace) -> int:
+    """Run ``--ntfy`` and/or ``--msteams`` mode: scan and push new findings, once or forever.
+
+    Each requested channel keeps its own sent-state file. Signal handlers are installed
+    only for the continuous loop. Returns 2 when a requested channel is not configured,
+    otherwise the exit code of :func:`vulnscan.notify.run_watch`.
     """
-    if not settings.ntfy_topic:
-        print("error: ntfy mode needs VULNSCAN_NTFY_TOPIC (and usually a token)", file=sys.stderr)
-        return 2
+    targets: list[Target] = []
+    if args.ntfy:
+        if not settings.ntfy_topic:
+            print("error: --ntfy needs VULNSCAN_NTFY_TOPIC (and usually a token)", file=sys.stderr)
+            return 2
+        targets.append(Target(build_ntfy_client(settings), settings.ntfy_state_path))
+    if args.msteams:
+        if not settings.msteams_webhook_url:
+            print("error: --msteams needs VULNSCAN_MSTEAMS_WEBHOOK_URL", file=sys.stderr)
+            return 2
+        targets.append(Target(build_msteams_client(settings), settings.msteams_state_path))
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr
     )
@@ -208,8 +233,9 @@ def run_ntfy(settings: Settings, args: argparse.Namespace) -> int:
     return run_watch(
         settings,
         control,
-        build_ntfy_client(settings),
+        targets,
         scan_fn=scan,
+        versions_fn=lambda dep: fetch_versions(settings, dep),
         resend_first=args.resend,
         once=args.once,
     )
@@ -298,7 +324,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "project_path": args.path,
                 "feed_dir": args.feed_dir,
                 "ignore_dirs": ",".join(args.ignore) if args.ignore else None,
-                "ntfy_interval_minutes": args.interval,
+                "interval_minutes": args.interval,
             },
         )
     except ValueError as exc:
@@ -307,8 +333,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not settings.project_path.exists():
         print(f"error: project path does not exist: {settings.project_path}", file=sys.stderr)
         return 1
-    if args.ntfy:
-        return run_ntfy(settings, args)
+    if args.ntfy or args.msteams:
+        return run_notifications(settings, args)
     if args.remediate:
         return run_remediate(settings, args)
     if args.update_feeds or args.markdown is not None or args.text is not None:

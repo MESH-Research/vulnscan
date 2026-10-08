@@ -17,8 +17,8 @@ discover manifests ──> parse ──> resolve versions ──> merge declarat
                                                              │
                  ┌───────────────┬───────────────┬───────────┼───────────────┐
                  ▼               ▼               ▼           ▼               ▼
-               TUI         RSS / Atom       Markdown /    ntfy push      remediation
-                                            plain text
+               TUI         RSS / Atom       Markdown /   ntfy / Teams    remediation
+                                            plain text   notifications
 ```
 
 ## Discovery and parsing (`vulnscan.parsers`)
@@ -73,10 +73,17 @@ inject fakes.
 - `vulnscan.feeds` renders RSS and Atom with `xml.etree` and keeps a
   first-seen state file so entry dates and ids are stable.
 - `vulnscan.reports` renders Markdown and plain text.
-- `vulnscan.ntfy` builds one message per dependency with unsent advisories,
-  publishes through ntfy's JSON API, and keeps its own sent-state file. The
-  watch loop in `run_watch` is driven by a `WatchControl` whose flags are set
-  by signal handlers; tests drive it with a subclass instead of signals.
+- `vulnscan.notify` builds one `Notification` per dependency with unsent
+  advisories, asking the registry (once per dependency) which fixed versions
+  are actually published and which upgrade clears every advisory. Each
+  channel is a `Target`: a client with a `send()` method plus its own
+  sent-state file, so ntfy and Teams track independently. The watch loop in
+  `run_watch` is driven by a `WatchControl` whose flags are set by signal
+  handlers; tests drive it with a subclass instead of signals.
+- `vulnscan.ntfy` renders a notification as text with an ntfy priority;
+  `vulnscan.msteams` renders it as an Adaptive Card inside the Teams webhook
+  message envelope, trimming details until it fits the 28 KB limit and
+  pacing posts under the four-per-second throttle.
 - `vulnscan.remediate` plans an upgrade from the registry's version list
   (`vulnscan.registry`) and rewrites constraints textually, preserving the
   operator style and everything else in the file.

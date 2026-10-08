@@ -19,14 +19,16 @@ whenever something new turns up.
   in full, or writes them out non-interactively for cron.
 - Lists every manifest that declares a vulnerable package, and upgrades the
   constraint in all of them in one go.
-- Keeps a watch on a project and sends an [ntfy](https://ntfy.sh) push
-  notification for each advisory the first time it is seen.
+- Keeps a watch on a project and pushes each advisory the first time it is
+  seen to [ntfy](https://ntfy.sh) (your phone) and/or a Microsoft Teams
+  channel, with the fix version, whether it is published, severity, CVE
+  links and a summary.
 
 ## Where to start
 
 - [Installation](installation.md)
 - [Usage](usage.md) for the TUI and the command line modes
-- [Notifications with ntfy](notifications.md) for continuous monitoring
+- [Notifications](notifications.md) for continuous monitoring with ntfy or Teams
 - [Configuration](configuration.md) for every setting
 - [How it works](architecture.md) and the [API reference](api/index.md)
   if you want to extend it

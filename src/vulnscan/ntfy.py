@@ -1,35 +1,16 @@
-"""Push notifications for new findings to an `ntfy <https://ntfy.sh>`_ topic, and the
-continuous watch loop behind ``vulnscan --ntfy``.
+"""ntfy channel: plain-text push notifications to an `ntfy <https://ntfy.sh>`_ topic.
 
-Each (dependency, advisory) pair has a stable id (the same one used for feed entries).
-Ids are recorded in a state file only after a notification was accepted by the server,
-so nothing is lost when a push fails: it is simply retried on the next cycle.
+The watch loop and sent-state bookkeeping live in :mod:`vulnscan.notify`.
 """
 
 from __future__ import annotations
 
-import json
-import logging
-import os
-import signal
-import threading
-from collections.abc import Callable, Collection
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from pathlib import Path
 
 import httpx
 
-from vulnscan.config import Settings
-from vulnscan.feeds import entry_guid
-from vulnscan.models import Finding, ScanResult, Vulnerability, normalize_severity, severity_rank
-from vulnscan.osv import OSVError
-from vulnscan.scanner import scan
-from vulnscan.wordfence import WordfenceError
-
-log = logging.getLogger("vulnscan.ntfy")
-
-SCAN_ERRORS = (OSVError, WordfenceError)
+from vulnscan.models import normalize_severity
+from vulnscan.notify import AdvisoryNote, Notification, NotificationError, registry_name
 
 _PRIORITY = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "UNKNOWN": 3}
 _EMOJI = {
@@ -41,13 +22,9 @@ _EMOJI = {
 }
 
 
-class NtfyError(Exception):
-    """Raised when a notification cannot be published."""
-
-
 @dataclass(frozen=True)
 class NtfyMessage:
-    """One notification, covering the advisories identified by ``guids``."""
+    """One notification as ntfy sees it, covering the advisories identified by ``guids``."""
 
     title: str
     body: str
@@ -57,18 +34,8 @@ class NtfyMessage:
     guids: tuple[str, ...]
 
 
-@dataclass(frozen=True)
-class NotifyReport:
-    """What one :func:`notify` call did."""
-
-    messages_sent: int
-    guids_sent: tuple[str, ...]
-    messages_failed: int
-    errors: tuple[str, ...]
-
-
 class NtfyClient:
-    """Publish messages to one topic on an ntfy server using the JSON publishing API.
+    """Notification channel publishing to one topic on an ntfy server via its JSON API.
 
     Authentication is a bearer ``token`` or a ``user``/``password`` pair; the token wins
     if both are given. ``transport`` is for tests.
@@ -100,8 +67,14 @@ class NtfyClient:
             transport=transport,
         )
 
+    name = "ntfy"
+
+    def send(self, notification: Notification) -> None:
+        """Render the notification as text and publish it."""
+        self.publish(render_ntfy(notification))
+
     def publish(self, message: NtfyMessage) -> None:
-        """POST the message; raise :class:`NtfyError` unless the server answers 2xx."""
+        """POST the message; raise :class:`NotificationError` unless the server answers 2xx."""
         payload: dict[str, object] = {
             "topic": self.topic,
             "title": message.title,
@@ -114,9 +87,9 @@ class NtfyClient:
         try:
             response = self._client.post("/", json=payload)
         except httpx.HTTPError as exc:
-            raise NtfyError(f"could not reach {self.server}: {exc}") from exc
+            raise NotificationError(f"could not reach {self.server}: {exc}") from exc
         if response.status_code >= 300:
-            raise NtfyError(
+            raise NotificationError(
                 f"{self.server} answered {response.status_code} for topic {self.topic!r}: "
                 f"{response.text[:200]}"
             )
@@ -131,208 +104,58 @@ def _plural(count: int, singular: str, plural: str) -> str:
     return f"{count} {singular if count == 1 else plural}"
 
 
-def _advisory_lines(vuln: Vulnerability) -> list[str]:
-    head = vuln.id
-    if vuln.cve_ids and vuln.id not in vuln.cve_ids:
-        head += f" ({', '.join(vuln.cve_ids)})"
-    head += f" [{normalize_severity(vuln.severity)}]"
-    if vuln.summary:
-        head += f": {vuln.summary}"
-    lines = [head]
-    lines.append(f"  fixed in: {', '.join(vuln.fixed_versions) or 'no fix listed'}")
-    return lines
+def _fix_text(note: AdvisoryNote, registry: str) -> str:
+    if note.lowest_fix is None:
+        return (
+            "no fix listed"
+            if not note.fixed_versions
+            else ("fixed only in " + ", ".join(note.fixed_versions))
+        )
+    if note.fix_available is True:
+        return f"{note.lowest_fix} (available on {registry})"
+    if note.fix_available is False:
+        return f"{note.lowest_fix} (not yet available on {registry})"
+    return note.lowest_fix
 
 
-def _message_for(
-    project: str, finding: Finding, new: list[tuple[str, Vulnerability]]
-) -> NtfyMessage:
-    dep = finding.dependency
-    vulns = [v for _, v in new]
-    worst = min((normalize_severity(v.severity) for v in vulns), key=severity_rank)
-    title = (
-        f"{dep.name} {dep.version or '(unknown version)'}: "
-        f"{_plural(len(vulns), 'new advisory', 'new advisories')}"
-    )
-    body_lines = [f"Project: {project}", f"Severity: {worst}", ""]
-    for vuln in vulns:
-        body_lines.extend(_advisory_lines(vuln))
-    body_lines += ["", f"Declared in: {', '.join(dep.source_files)}"]
+def _upgrade_text(notification: Notification, registry: str) -> str:
+    if not notification.versions_checked:
+        return f"Upgrade to: unknown (could not check {registry} for available versions)"
+    if notification.nearest_safe:
+        return f"Upgrade to: {notification.nearest_safe} (available on {registry}, clears all)"
+    if notification.latest:
+        return (
+            f"Upgrade to: no safe version available yet on {registry} "
+            f"(latest {notification.latest} is still affected)"
+        )
+    return f"Upgrade to: no newer version found on {registry}"
+
+
+def render_ntfy(notification: Notification) -> NtfyMessage:
+    """Turn a notification into an ntfy title, body, priority, tags and click URL."""
+    registry = registry_name(notification.ecosystem)
+    count = _plural(len(notification.advisories), "new advisory", "new advisories")
+    title = f"{notification.package} {notification.version or '(unknown version)'}: {count}"
+    lines = [
+        f"Project: {notification.project}",
+        f"Severity: {notification.severity}",
+        _upgrade_text(notification, registry),
+        "",
+    ]
+    for note in notification.advisories:
+        head = note.id
+        if note.cve_ids and note.id not in note.cve_ids:
+            head += f" ({', '.join(note.cve_ids)})"
+        head += f" [{note.severity}]"
+        if note.summary:
+            head += f": {note.summary}"
+        lines += [head, f"  fixed in: {_fix_text(note, registry)}"]
+    lines += ["", f"Declared in: {', '.join(notification.source_files)}"]
     return NtfyMessage(
         title=title,
-        body="\n".join(body_lines),
-        priority=severity_priority(worst),
-        tags=(_EMOJI[worst], worst.lower()),
-        click=vulns[0].url,
-        guids=tuple(guid for guid, _ in new),
+        body="\n".join(lines),
+        priority=severity_priority(notification.severity),
+        tags=(_EMOJI[notification.severity], notification.severity.lower()),
+        click=notification.advisories[0].url if notification.advisories else None,
+        guids=notification.guids,
     )
-
-
-def build_messages(result: ScanResult, already_sent: Collection[str]) -> list[NtfyMessage]:
-    """One message per dependency that has at least one advisory not in ``already_sent``."""
-    project = result.project_path.name or "project"
-    messages: list[NtfyMessage] = []
-    for finding in result.findings:
-        new = [
-            (guid, vuln)
-            for vuln in finding.vulnerabilities
-            if (guid := entry_guid(project, finding.dependency, vuln)) not in already_sent
-        ]
-        if new:
-            messages.append(_message_for(project, finding, new))
-    return messages
-
-
-def load_sent(path: Path) -> dict[str, str]:
-    """Read the sent-state file: guid -> ISO timestamp. Missing or corrupt files are empty."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
-
-
-def save_sent(path: Path, sent: dict[str, str]) -> None:
-    """Atomically write the sent-state file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(sent, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def notify(
-    result: ScanResult,
-    settings: Settings,
-    client: NtfyClient,
-    resend: bool = False,
-    now: datetime | None = None,
-) -> NotifyReport:
-    """Push every finding not yet sent for this project (all of them when ``resend``).
-
-    The state file is updated after each successful publish, so a failure part-way
-    through loses nothing.
-    """
-    now = now or datetime.now(UTC)
-    sent = load_sent(settings.ntfy_state_path)
-    messages = build_messages(result, set() if resend else set(sent))
-    delivered: list[str] = []
-    errors: list[str] = []
-    for message in messages:
-        try:
-            client.publish(message)
-        except NtfyError as exc:
-            errors.append(f"{message.title}: {exc}")
-            continue
-        stamp = now.isoformat()
-        for guid in message.guids:
-            sent.setdefault(guid, stamp)
-        delivered.extend(message.guids)
-    if delivered or resend:
-        save_sent(settings.ntfy_state_path, sent)
-    return NotifyReport(
-        messages_sent=len(messages) - len(errors),
-        guids_sent=tuple(delivered),
-        messages_failed=len(errors),
-        errors=tuple(errors),
-    )
-
-
-class WatchControl:
-    """Thread- and signal-safe flags that steer :func:`run_watch`."""
-
-    def __init__(self) -> None:
-        self._wake = threading.Event()
-        self._stop = False
-        self._resend = False
-
-    @property
-    def stop_requested(self) -> bool:
-        """Whether :meth:`request_stop` has been called."""
-        return self._stop
-
-    def request_stop(self) -> None:
-        """Ask the loop to exit, waking it if it is sleeping."""
-        self._stop = True
-        self._wake.set()
-
-    def request_resend(self) -> None:
-        """Ask the loop to re-send every current finding on its next cycle, waking it."""
-        self._resend = True
-        self._wake.set()
-
-    def take_resend(self) -> bool:
-        """Return whether a resend was requested, clearing the request."""
-        requested, self._resend = self._resend, False
-        return requested
-
-    def wait(self, seconds: float) -> None:
-        """Sleep for ``seconds`` unless a stop or resend request arrives first."""
-        if self._stop:
-            return
-        self._wake.wait(timeout=seconds)
-        self._wake.clear()
-
-
-def install_signal_handlers(control: WatchControl) -> None:
-    """SIGUSR1 re-sends everything; SIGINT and SIGTERM stop the loop cleanly."""
-
-    def stop(signum, _frame) -> None:
-        log.info("received %s, stopping", signal.Signals(signum).name)
-        control.request_stop()
-
-    def resend(_signum, _frame) -> None:
-        log.info("received SIGUSR1, re-sending every current finding")
-        control.request_resend()
-
-    signal.signal(signal.SIGINT, stop)
-    signal.signal(signal.SIGTERM, stop)
-    if hasattr(signal, "SIGUSR1"):
-        signal.signal(signal.SIGUSR1, resend)
-
-
-def run_watch(
-    settings: Settings,
-    control: WatchControl,
-    client: NtfyClient,
-    scan_fn: Callable[[Settings], ScanResult] | None = None,
-    resend_first: bool = False,
-    once: bool = False,
-) -> int:
-    """Scan, notify, sleep, repeat until ``control`` asks to stop.
-
-    Scan and publish failures are logged and the loop carries on. With ``once`` a single
-    cycle runs and the exit code reflects whether that cycle's scan succeeded.
-    """
-    scan_fn = scan_fn or scan
-    interval = max(settings.ntfy_interval_minutes, 0.0) * 60
-    resend = resend_first
-    while True:
-        log.info("scanning %s", settings.project_path)
-        try:
-            result = scan_fn(settings)
-        except SCAN_ERRORS as exc:
-            log.error("scan failed: %s", exc)
-            if once:
-                return 1
-        else:
-            for warning in result.warnings:
-                log.warning("%s", warning)
-            report = notify(result, settings, client, resend=resend)
-            for error in report.errors:
-                log.error("could not publish: %s", error)
-            log.info(
-                "%d vulnerable of %d dependencies; sent %d notification(s), %d failed",
-                len(result.findings),
-                len(result.dependencies),
-                report.messages_sent,
-                report.messages_failed,
-            )
-        if once:
-            return 0
-        resend = False
-        control.wait(interval)
-        if control.stop_requested:
-            return 0
-        if control.take_resend():
-            resend = True

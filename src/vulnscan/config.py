@@ -42,8 +42,10 @@ _ENV_MAP: dict[str, tuple[str, Any]] = {
     "ntfy_token": ("NTFY_TOKEN", ""),
     "ntfy_user": ("NTFY_USER", ""),
     "ntfy_password": ("NTFY_PASSWORD", ""),
-    "ntfy_interval_minutes": ("NTFY_INTERVAL_MINUTES", "60"),
     "ntfy_state_filename": ("NTFY_STATE_FILE", "ntfy-state.json"),
+    "msteams_webhook_url": ("MSTEAMS_WEBHOOK_URL", ""),
+    "msteams_state_filename": ("MSTEAMS_STATE_FILE", "msteams-state.json"),
+    "interval_minutes": ("INTERVAL_MINUTES", "60"),
 }
 
 _TRUE = {"1", "true", "yes", "on", "y"}
@@ -95,13 +97,20 @@ class Settings:
     ntfy_token: str = ""
     ntfy_user: str = ""
     ntfy_password: str = ""
-    ntfy_interval_minutes: float = 60.0
     ntfy_state_filename: str = "ntfy-state.json"
+    msteams_webhook_url: str = ""
+    msteams_state_filename: str = "msteams-state.json"
+    interval_minutes: float = 60.0
 
     @property
     def ntfy_state_path(self) -> Path:
         """Path of the file recording which ntfy notifications were already sent."""
         return self.feed_dir / self.ntfy_state_filename
+
+    @property
+    def msteams_state_path(self) -> Path:
+        """Path of the file recording which Microsoft Teams notifications were already sent."""
+        return self.feed_dir / self.msteams_state_filename
 
     @property
     def markdown_path(self) -> Path:
@@ -148,7 +157,7 @@ _COERCERS = {
     "cache_dir": lambda v: Path(v).expanduser().absolute(),
     "ignore_dirs": _to_tuple,
     "ntfy_server": lambda v: str(v).rstrip("/"),
-    "ntfy_interval_minutes": float,
+    "interval_minutes": float,
 }
 
 

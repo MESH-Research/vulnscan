@@ -20,7 +20,7 @@ for finding in result.findings:
 
 Then, for example, `vulnscan.feeds.write_feeds(result, settings)`,
 `vulnscan.reports.render_markdown(result)`,
-`vulnscan.ntfy.notify(result, settings, client)` or
+`vulnscan.notify.notify(result, target)` or
 `vulnscan.remediate.apply_remediation(settings.project_path, dep, "1.3.1")`.
 
 | Module | Role |
@@ -35,7 +35,9 @@ Then, for example, `vulnscan.feeds.write_feeds(result, settings)`,
 | [`vulnscan.remediate`](remediate.md) | Upgrade planning and manifest rewriting |
 | [`vulnscan.feeds`](feeds.md) | RSS and Atom |
 | [`vulnscan.reports`](reports.md) | Markdown and plain text |
-| [`vulnscan.ntfy`](ntfy.md) | ntfy notifications and the watch loop |
+| [`vulnscan.notify`](notify.md) | Notification building, per-channel sent state, the watch loop |
+| [`vulnscan.ntfy`](ntfy.md) | ntfy channel |
+| [`vulnscan.msteams`](msteams.md) | Microsoft Teams channel (Adaptive Cards) |
 | [`vulnscan.cli`](cli.md) | Command line entry point |
 | [`vulnscan.tui`](tui.md) | Textual application |
 | [`vulnscan.versioncmp`](versioncmp.md) | Ecosystem-aware version comparison |

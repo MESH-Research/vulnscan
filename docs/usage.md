@@ -63,9 +63,11 @@ See [Upgrading dependencies](remediation.md).
 
 ```
 uv run vulnscan --ntfy --path /path/to/project
+uv run vulnscan --msteams --path /path/to/project
+uv run vulnscan --ntfy --msteams --path /path/to/project
 ```
 
-See [Notifications with ntfy](notifications.md).
+See [Notifications](notifications.md).
 
 ## Skipping directories
 
@@ -93,4 +95,4 @@ another) they stay separate, because they may have different advisories.
 |------|---------|
 | 0 | Success |
 | 1 | The scan failed (advisory source unreachable), the package to remediate was not found, or no suitable version exists |
-| 2 | Invalid configuration, such as ntfy mode without a topic |
+| 2 | Invalid configuration, such as `--ntfy` without a topic or `--msteams` without a webhook URL |

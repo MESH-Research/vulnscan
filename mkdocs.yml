@@ -50,7 +50,7 @@ nav:
       - Interactive and command line: usage.md
       - Ignoring directories: ignoring.md
       - Upgrading dependencies: remediation.md
-      - Notifications with ntfy: notifications.md
+      - Notifications (ntfy, Teams): notifications.md
       - Feeds and reports: feeds.md
   - Configuration: configuration.md
   - How it works: architecture.md
@@ -66,7 +66,9 @@ nav:
       - remediate: api/remediate.md
       - feeds: api/feeds.md
       - reports: api/reports.md
+      - notify: api/notify.md
       - ntfy: api/ntfy.md
+      - msteams: api/msteams.md
       - cli: api/cli.md
       - tui: api/tui.md
       - versioncmp: api/versioncmp.md

@@ -305,25 +305,35 @@ def test_ignore_dirs_come_from_environment_without_the_flag(tmp_path: Path, monk
     assert seen["settings"].ignore_dirs == ("from-env",)
 
 
-# --- ntfy mode --------------------------------------------------------------------------------
+# --- notification modes ----------------------------------------------------------------------
 
 
-class RecordingNtfy:
-    def __init__(self):
-        self.published = []
+class RecordingChannel:
+    def __init__(self, name="fake"):
+        self.name = name
+        self.sent = []
 
-    def publish(self, message):
-        self.published.append(message)
+    def send(self, notification):
+        self.sent.append(notification)
 
 
-def test_parser_ntfy_flags():
-    args = cli.build_parser().parse_args(["--ntfy", "--once", "--resend", "--interval", "5"])
+@pytest.fixture
+def no_registry(monkeypatch):
+    monkeypatch.setattr(cli, "fetch_versions", lambda settings, dep: ["2.30.0", "2.32.4"])
+
+
+def test_parser_notification_flags():
+    args = cli.build_parser().parse_args(
+        ["--ntfy", "--msteams", "--once", "--resend", "--interval", "5"]
+    )
     assert args.ntfy is True
+    assert args.msteams is True
     assert args.once is True
     assert args.resend is True
     assert args.interval == 5.0
     defaults = cli.build_parser().parse_args([])
-    assert defaults.ntfy is False and defaults.once is False and defaults.resend is False
+    assert defaults.ntfy is False and defaults.msteams is False
+    assert defaults.once is False and defaults.resend is False
     assert defaults.interval is None
 
 
@@ -334,47 +344,97 @@ def test_ntfy_mode_requires_a_topic(tmp_path: Path, monkeypatch, capsys):
     assert "VULNSCAN_NTFY_TOPIC" in capsys.readouterr().err
 
 
-def test_ntfy_once_scans_and_publishes(tmp_path: Path, monkeypatch, capsys):
-    recorder = RecordingNtfy()
+def test_msteams_mode_requires_a_webhook(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.delenv("VULNSCAN_MSTEAMS_WEBHOOK_URL", raising=False)
+    code = cli.main(["--msteams", "--once", "--path", str(tmp_path), "--env-file", "/nonexistent"])
+    assert code == 2
+    assert "VULNSCAN_MSTEAMS_WEBHOOK_URL" in capsys.readouterr().err
+
+
+def test_ntfy_once_scans_and_publishes(tmp_path: Path, monkeypatch, no_registry):
+    recorder = RecordingChannel("ntfy")
     monkeypatch.setattr(cli, "scan", lambda settings: multi_file_result(settings.project_path))
     monkeypatch.setattr(cli, "build_ntfy_client", lambda settings: recorder)
     monkeypatch.setenv("VULNSCAN_NTFY_TOPIC", "alerts")
     feed_dir = tmp_path / "feeds"
     code = cli.main(["--ntfy", "--once", "--path", str(tmp_path), "--feed-dir", str(feed_dir)])
     assert code == 0
-    assert len(recorder.published) == 1
-    assert "requests" in recorder.published[0].title
+    assert len(recorder.sent) == 1
+    assert recorder.sent[0].package == "requests"
+    assert recorder.sent[0].nearest_safe == "2.32.4"
     assert (feed_dir / "ntfy-state.json").is_file()
     # A second run finds nothing new.
     assert cli.main(["--ntfy", "--once", "--path", str(tmp_path), "--feed-dir", str(feed_dir)]) == 0
-    assert len(recorder.published) == 1
+    assert len(recorder.sent) == 1
     # Unless a resend is requested.
     code = cli.main(
         ["--ntfy", "--once", "--resend", "--path", str(tmp_path), "--feed-dir", str(feed_dir)]
     )
     assert code == 0
-    assert len(recorder.published) == 2
+    assert len(recorder.sent) == 2
 
 
-def test_ntfy_interval_flag_overrides_setting(tmp_path: Path, monkeypatch):
+def test_msteams_once_scans_and_posts(tmp_path: Path, monkeypatch, no_registry):
+    recorder = RecordingChannel("msteams")
+    monkeypatch.setattr(cli, "scan", lambda settings: multi_file_result(settings.project_path))
+    monkeypatch.setattr(cli, "build_msteams_client", lambda settings: recorder)
+    monkeypatch.setenv("VULNSCAN_MSTEAMS_WEBHOOK_URL", "https://hook.test/x")
+    feed_dir = tmp_path / "feeds"
+    code = cli.main(["--msteams", "--once", "--path", str(tmp_path), "--feed-dir", str(feed_dir)])
+    assert code == 0
+    assert [n.package for n in recorder.sent] == ["requests"]
+    assert (feed_dir / "msteams-state.json").is_file()
+    assert not (feed_dir / "ntfy-state.json").exists()
+
+
+def test_both_modes_notify_both_services(tmp_path: Path, monkeypatch, no_registry):
+    ntfy, teams = RecordingChannel("ntfy"), RecordingChannel("msteams")
+    monkeypatch.setattr(cli, "scan", lambda settings: multi_file_result(settings.project_path))
+    monkeypatch.setattr(cli, "build_ntfy_client", lambda settings: ntfy)
+    monkeypatch.setattr(cli, "build_msteams_client", lambda settings: teams)
+    monkeypatch.setenv("VULNSCAN_NTFY_TOPIC", "alerts")
+    monkeypatch.setenv("VULNSCAN_MSTEAMS_WEBHOOK_URL", "https://hook.test/x")
+    feed_dir = tmp_path / "feeds"
+    args = ["--ntfy", "--msteams", "--once", "--path", str(tmp_path), "--feed-dir", str(feed_dir)]
+    assert cli.main(args) == 0
+    assert len(ntfy.sent) == 1 and len(teams.sent) == 1
+    assert (feed_dir / "ntfy-state.json").is_file()
+    assert (feed_dir / "msteams-state.json").is_file()
+    # Adding Teams later: ntfy has nothing new, Teams gets everything.
+    teams2 = RecordingChannel("msteams")
+    monkeypatch.setattr(cli, "build_msteams_client", lambda settings: teams2)
+    (feed_dir / "msteams-state.json").unlink()
+    assert cli.main(args) == 0
+    assert len(ntfy.sent) == 1 and len(teams2.sent) == 1
+
+
+def test_interval_flag_overrides_setting(tmp_path: Path, monkeypatch):
     seen = {}
 
-    def fake_run_watch(settings, control, client, scan_fn=None, resend_first=False, once=False):
+    def fake_run_watch(settings, control, targets, **kwargs):
         seen["settings"] = settings
+        seen["targets"] = targets
         return 0
 
     monkeypatch.setattr(cli, "run_watch", fake_run_watch)
-    monkeypatch.setattr(cli, "build_ntfy_client", lambda settings: RecordingNtfy())
+    monkeypatch.setattr(cli, "build_ntfy_client", lambda settings: RecordingChannel("ntfy"))
+    monkeypatch.setattr(cli, "build_msteams_client", lambda settings: RecordingChannel("msteams"))
     monkeypatch.setenv("VULNSCAN_NTFY_TOPIC", "alerts")
-    monkeypatch.setenv("VULNSCAN_NTFY_INTERVAL_MINUTES", "60")
-    assert cli.main(["--ntfy", "--interval", "7", "--path", str(tmp_path)]) == 0
-    assert seen["settings"].ntfy_interval_minutes == 7.0
+    monkeypatch.setenv("VULNSCAN_MSTEAMS_WEBHOOK_URL", "https://hook.test/x")
+    monkeypatch.setenv("VULNSCAN_INTERVAL_MINUTES", "60")
+    assert cli.main(["--ntfy", "--msteams", "--interval", "7", "--path", str(tmp_path)]) == 0
+    assert seen["settings"].interval_minutes == 7.0
+    assert [t.channel.name for t in seen["targets"]] == ["ntfy", "msteams"]
+    assert [t.state_path.name for t in seen["targets"]] == ["ntfy-state.json", "msteams-state.json"]
 
 
-def test_build_ntfy_client_uses_settings(tmp_path: Path, monkeypatch):
+def test_build_clients_use_settings(tmp_path: Path, monkeypatch):
+    from vulnscan.msteams import TeamsClient
     from vulnscan.ntfy import NtfyClient
 
     monkeypatch.setenv("VULNSCAN_NTFY_TOPIC", "alerts")
     monkeypatch.setenv("VULNSCAN_NTFY_TOKEN", "tk_x")
+    monkeypatch.setenv("VULNSCAN_MSTEAMS_WEBHOOK_URL", "https://hook.test/x")
     settings = cli.load_settings(dotenv_path=tmp_path / "none.env")
     assert isinstance(cli.build_ntfy_client(settings), NtfyClient)
+    assert isinstance(cli.build_msteams_client(settings), TeamsClient)
