@@ -59,6 +59,7 @@ def _plural(count: int, noun: str) -> str:
 
 
 def vulnerability_markdown(finding: Finding, vuln: Vulnerability) -> str:
+    """Markdown shown in the detail pane for one advisory of a finding."""
     dep = finding.dependency
     lines = [f"# {vuln.id}", ""]
     if vuln.summary:
@@ -113,6 +114,7 @@ class RemediateScreen(ModalScreen[str | None]):
         self.plan = plan
 
     def compose(self) -> ComposeResult:
+        """Build the dialog: a description, the two upgrade options and a key hint."""
         dep = self.finding.dependency
         with Vertical(id="remediate-box"):
             yield Label(
@@ -140,6 +142,7 @@ class RemediateScreen(ModalScreen[str | None]):
             )
 
     def on_mount(self) -> None:
+        """Focus the option list and highlight the first enabled option."""
         options = self.query_one("#remediate-options", OptionList)
         options.focus()
         for index in range(options.option_count):
@@ -148,13 +151,23 @@ class RemediateScreen(ModalScreen[str | None]):
                 break
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Dismiss with the chosen option id, ``'nearest'`` or ``'latest'``."""
         self.dismiss(event.option.id)
 
     def action_cancel(self) -> None:
+        """Dismiss with ``None`` (Esc)."""
         self.dismiss(None)
 
 
 class VulnScanApp(App[None]):
+    """Interactive browser for scan results.
+
+    Scans run in a worker thread so the interface stays responsive. Keys: ``r`` rescan,
+    ``f`` write feeds, ``e`` export reports, ``u`` upgrade the selected dependency,
+    ``o`` open the selected advisory in a browser, ``q`` quit. ``scan_fn`` and
+    ``versions_fn`` replace the real scanner and registry lookups in tests.
+    """
+
     TITLE = "vulnscan"
     CSS = """
     #deps { width: 3fr; height: 1fr; }
@@ -192,10 +205,12 @@ class VulnScanApp(App[None]):
 
     @property
     def status_text(self) -> str:
+        """Text currently shown in the status bar."""
         return self._status
 
     @property
     def current_vulnerability(self) -> Vulnerability | None:
+        """The advisory shown in the detail pane, if any."""
         return self._current_vuln
 
     @property
@@ -204,6 +219,7 @@ class VulnScanApp(App[None]):
         return dict(self._remediated)
 
     def compose(self) -> ComposeResult:
+        """Lay out the dependency table, advisory table, detail pane and status bar."""
         yield Header()
         with Horizontal():
             yield DataTable(id="deps", cursor_type="row", zebra_stripes=True)
@@ -215,6 +231,7 @@ class VulnScanApp(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        """Add the table columns and start the first scan."""
         self.sub_title = str(self.settings.project_path)
         self._dep_column_keys = self.query_one("#deps", DataTable).add_columns(*DEP_COLUMNS)
         self.query_one("#vulns", DataTable).add_columns(*VULN_COLUMNS)
@@ -337,6 +354,7 @@ class VulnScanApp(App[None]):
         self.query_one("#detail", Markdown).update(vulnerability_markdown(finding, vuln))
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """Show the highlighted dependency's advisories, or the highlighted advisory's details."""
         if event.data_table.id == "deps":
             self._show_finding(event.cursor_row)
         elif event.data_table.id == "vulns":
@@ -345,9 +363,11 @@ class VulnScanApp(App[None]):
     # -- actions ------------------------------------------------------------------
 
     def action_rescan(self) -> None:
+        """Scan the project again (``r``)."""
         self._start_scan()
 
     def action_write_feeds(self) -> None:
+        """Write the RSS and Atom feeds for the last result (``f``); warns if no scan completed."""
         if self.result is None:
             self.notify("Nothing to write: no completed scan.", severity="warning")
             return
@@ -360,6 +380,7 @@ class VulnScanApp(App[None]):
         self.notify("Feeds written")
 
     def action_export_reports(self) -> None:
+        """Write the Markdown and text reports for the last result (``e``)."""
         if self.result is None:
             self.notify("Nothing to export: no completed scan.", severity="warning")
             return
@@ -379,6 +400,7 @@ class VulnScanApp(App[None]):
         return RegistryClient(timeout=self.settings.request_timeout).available_versions(dep)
 
     def action_remediate(self) -> None:
+        """Look up versions for the selected dependency in a worker and offer an upgrade (``u``)."""
         finding = self._current_finding
         if finding is None:
             self.notify("Select a vulnerable dependency first.", severity="warning")
@@ -434,6 +456,7 @@ class VulnScanApp(App[None]):
         self.notify(f"{dep.name} -> {outcome.new_constraint}")
 
     def action_open_advisory(self) -> None:
+        """Open the selected advisory in the default web browser (``o``)."""
         if self._current_vuln is None:
             self.notify("No advisory selected.", severity="warning")
             return

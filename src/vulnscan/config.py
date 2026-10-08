@@ -63,6 +63,13 @@ def _to_bool(value: Any) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
+    """Runtime configuration for one run of vulnscan.
+
+    Built by :func:`load_settings` from ``VULNSCAN_*`` environment variables, a
+    ``.env`` file and command line overrides. Paths are absolute; ``feed_dir`` is the
+    base for every generated file.
+    """
+
     project_path: Path
     feed_dir: Path
     rss_filename: str
@@ -93,26 +100,32 @@ class Settings:
 
     @property
     def ntfy_state_path(self) -> Path:
+        """Path of the file recording which ntfy notifications were already sent."""
         return self.feed_dir / self.ntfy_state_filename
 
     @property
     def markdown_path(self) -> Path:
+        """Default path of the Markdown report."""
         return self.feed_dir / self.markdown_filename
 
     @property
     def text_path(self) -> Path:
+        """Default path of the plain-text report."""
         return self.feed_dir / self.text_filename
 
     @property
     def rss_path(self) -> Path:
+        """Path of the RSS feed."""
         return self.feed_dir / self.rss_filename
 
     @property
     def atom_path(self) -> Path:
+        """Path of the Atom feed."""
         return self.feed_dir / self.atom_filename
 
     @property
     def state_path(self) -> Path:
+        """Path of the file recording when each feed entry was first seen."""
         return self.feed_dir / self.state_filename
 
 

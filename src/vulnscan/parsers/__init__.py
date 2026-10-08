@@ -139,10 +139,22 @@ def matches_ignore(rel_path: str, patterns: tuple[str, ...]) -> bool:
 
 
 def is_manifest(path: Path) -> bool:
+    """Whether ``path`` is a manifest vulnscan can parse, judged by its file name.
+
+    Recognised: ``composer.json``, ``pyproject.toml``, ``Pipfile``, ``setup.cfg`` and
+    requirements files (see :func:`is_requirements_file`).
+    """
     return _parser_for(path) is not None
 
 
 def discover_manifests(root: Path, ignore_dirs: tuple[str, ...] = ()) -> list[Path]:
+    """Find every manifest under ``root``, walking directories and file names in sorted order.
+
+    Skipped: VCS, virtualenv, build and vendor directories, hidden directories,
+    WordPress core, directories Composer installs into, and any directory matching
+    ``ignore_dirs`` or ``<root>/.vulnscanignore``. A file ``root`` yields ``[root]`` when
+    it is itself a manifest, otherwise an empty list.
+    """
     if root.is_file():
         return [root] if is_manifest(root) else []
     ignored_names = IGNORED_DIRS | WP_CORE_DIRS
@@ -174,6 +186,10 @@ def discover_manifests(root: Path, ignore_dirs: tuple[str, ...] = ()) -> list[Pa
 
 
 def parse_manifest(path: Path, root: Path) -> list[Dependency]:
+    """Parse one manifest with the parser for its file name; unrecognised files give ``[]``.
+
+    Versions are not resolved here; see :func:`parse_project`.
+    """
     parser = _parser_for(path)
     if parser is None:
         return []

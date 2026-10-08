@@ -24,6 +24,7 @@ SCAN_ERRORS = (OSVError, WordfenceError)
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the ``vulnscan`` command."""
     parser = argparse.ArgumentParser(
         prog="vulnscan",
         description=(
@@ -107,10 +108,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def fetch_versions(settings: Settings, dep) -> list[str]:
+    """Look up the versions of ``dep`` on its registry, honouring the configured timeout."""
     return RegistryClient(timeout=settings.request_timeout).available_versions(dep)
 
 
 def find_finding(result: ScanResult, wanted: str) -> Finding | None:
+    """Return the finding whose dependency matches ``wanted``, or None.
+
+    The match is case-insensitive against the declared name, the canonical name and,
+    for WordPress packages, the wordpress.org slug.
+    """
     needle = wanted.strip().lower()
     for finding in result.findings:
         dep = finding.dependency
@@ -121,6 +128,12 @@ def find_finding(result: ScanResult, wanted: str) -> Finding | None:
 
 
 def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
+    """Scan, then rewrite the constraint of ``--remediate PACKAGE`` in every manifest.
+
+    Returns:
+        0 on success; 1 when the scan fails, the package is not among the vulnerable
+        dependencies, no suitable version exists, or a manifest cannot be edited.
+    """
     try:
         result = scan(settings)
     except SCAN_ERRORS as exc:
@@ -165,6 +178,7 @@ def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def build_ntfy_client(settings: Settings) -> NtfyClient:
+    """Create an :class:`NtfyClient` from the ``ntfy_*`` settings."""
     return NtfyClient(
         server=settings.ntfy_server,
         topic=settings.ntfy_topic,
@@ -176,12 +190,18 @@ def build_ntfy_client(settings: Settings) -> NtfyClient:
 
 
 def run_ntfy(settings: Settings, args: argparse.Namespace) -> int:
+    """Run ``--ntfy`` mode: scan and push new findings, once or on an interval.
+
+    Signal handlers are installed only for the continuous loop. Returns 2 when no
+    topic is configured, otherwise the exit code of :func:`vulnscan.ntfy.run_watch`.
+    """
     if not settings.ntfy_topic:
         print("error: ntfy mode needs VULNSCAN_NTFY_TOPIC (and usually a token)", file=sys.stderr)
         return 2
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     control = WatchControl()
     if not args.once:
         install_signal_handlers(control)
@@ -196,6 +216,7 @@ def run_ntfy(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def run_tui(settings: Settings) -> None:
+    """Start the interactive Textual interface (imported lazily to keep CLI start-up light)."""
     from vulnscan.tui import VulnScanApp
 
     VulnScanApp(settings).run()
@@ -231,6 +252,11 @@ def _export(content: str, target: str, default: Path) -> Path | None:
 
 
 def run_non_interactive(settings: Settings, args: argparse.Namespace) -> int:
+    """Scan once, then write feeds and/or reports as the flags request.
+
+    A ``-`` target sends a report to stdout and suppresses the printed summary.
+    Returns 1 (writing nothing) when the scan fails, otherwise 0.
+    """
     try:
         result = scan(settings)
     except SCAN_ERRORS as exc:
@@ -258,6 +284,12 @@ def run_non_interactive(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Entry point: parse ``argv``, load settings and dispatch to the requested mode.
+
+    Returns:
+        2 for invalid configuration, 1 for a missing project path, otherwise the
+        exit code of the mode that ran (the TUI always yields 0).
+    """
     args = build_parser().parse_args(argv)
     try:
         settings = load_settings(

@@ -23,6 +23,8 @@ GENERATOR = "vulnscan"
 
 @dataclass
 class FeedEntry:
+    """One feed item: a (dependency, advisory) pair rendered for both RSS and Atom."""
+
     guid: str
     title: str
     link: str
@@ -43,6 +45,11 @@ def entry_guid(project_name: str, dep: Dependency, vuln: Vulnerability) -> str:
 
 
 def load_state(path: Path) -> dict[str, str]:
+    """Read the first-seen state file (entry guid -> ISO timestamp).
+
+    A missing, unreadable or malformed file yields an empty dict; entries whose
+    value is not a string are dropped.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -60,6 +67,7 @@ def _write_atomic(path: Path, data: bytes) -> None:
 
 
 def save_state(path: Path, state: dict[str, str]) -> None:
+    """Atomically write the first-seen state file as sorted, indented JSON."""
     _write_atomic(path, json.dumps(state, indent=2, sort_keys=True).encode("utf-8"))
 
 
@@ -132,6 +140,11 @@ def _channel_link(settings: Settings) -> str:
 
 
 def render_rss(entries: list[FeedEntry], settings: Settings, now: datetime) -> bytes:
+    """Render the entries as an RSS 2.0 document.
+
+    The channel links to ``feed_link`` (or osv.dev) and carries an ``atom:link``
+    self reference only when ``feed_link`` is set.
+    """
     rss = ET.Element("rss", version="2.0", attrib={"xmlns:atom": ATOM_NS})
     channel = ET.SubElement(rss, "channel")
     ET.SubElement(channel, "title").text = settings.feed_title
@@ -160,6 +173,11 @@ def render_rss(entries: list[FeedEntry], settings: Settings, now: datetime) -> b
 
 
 def render_atom(entries: list[FeedEntry], settings: Settings, now: datetime) -> bytes:
+    """Render the entries as an Atom 1.0 document.
+
+    The feed id is its self link when ``feed_link`` is set, otherwise a ``urn:vulnscan``
+    identifier derived from the project directory name.
+    """
     ET.register_namespace("", ATOM_NS)
     feed = ET.Element(f"{{{ATOM_NS}}}feed")
 

@@ -26,6 +26,11 @@ def normalize_name(name: str, ecosystem: str) -> str:
 
 
 def normalize_severity(label: str | None) -> str:
+    """Map a severity label onto :data:`SEVERITY_ORDER`.
+
+    Matching is case-insensitive; ``MODERATE`` becomes ``MEDIUM`` and ``IMPORTANT``
+    becomes ``HIGH``. ``None`` and unrecognised labels become ``UNKNOWN``.
+    """
     upper = (label or "UNKNOWN").strip().upper()
     upper = _SEVERITY_ALIASES.get(upper, upper)
     return upper if upper in SEVERITY_ORDER else "UNKNOWN"
@@ -63,6 +68,7 @@ class Dependency:
 
     @property
     def key(self) -> tuple[str, str]:
+        """Identity used for comparisons and lookups: ``(ecosystem, canonical name)``."""
         return (self.ecosystem, normalize_name(self.name, self.ecosystem))
 
     @property
@@ -118,6 +124,7 @@ class VersionRange:
     upper_inclusive: bool = False
 
     def contains(self, version: str, ecosystem: str) -> bool:
+        """Whether ``version`` lies within this range, compared with the ecosystem's rules."""
         if self.lower is not None:
             cmp = compare_versions(version, self.lower, ecosystem)
             if cmp < 0 or (cmp == 0 and not self.lower_inclusive):
@@ -156,10 +163,12 @@ class Vulnerability:
 
     @property
     def cve_ids(self) -> list[str]:
+        """The advisory id and aliases that are CVE identifiers, id first."""
         return [i for i in [self.id, *self.aliases] if i.upper().startswith("CVE-")]
 
     @property
     def url(self) -> str:
+        """The advisory's own link if the source gave one, otherwise its OSV page."""
         return self.link or f"https://osv.dev/vulnerability/{self.id}"
 
 
@@ -172,6 +181,7 @@ class Finding:
 
     @property
     def worst_severity(self) -> str:
+        """Most severe normalised label among the advisories; ``UNKNOWN`` when there are none."""
         if not self.vulnerabilities:
             return "UNKNOWN"
         return min(
@@ -180,12 +190,14 @@ class Finding:
 
     @property
     def fixed_versions(self) -> list[str]:
+        """Distinct fixed versions across every advisory, in version order."""
         return sorted(
             {fv for v in self.vulnerabilities for fv in v.fixed_versions}, key=version_sort_key
         )
 
 
 def version_sort_key(version: str) -> tuple:
+    """Sort key: valid PEP 440 versions first in version order, then other strings as text."""
     from packaging.version import InvalidVersion, Version
 
     try:
@@ -196,6 +208,8 @@ def version_sort_key(version: str) -> tuple:
 
 @dataclass
 class ScanResult:
+    """Everything one scan produced: dependencies, findings, warnings and when it ran."""
+
     project_path: Path
     dependencies: list[Dependency]
     findings: list[Finding]

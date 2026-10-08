@@ -40,6 +40,11 @@ def composer_lock_packages(path: Path) -> dict[str, dict]:
 
 
 def parse_composer_lock(path: Path) -> dict[str, str]:
+    """Canonical name -> version for every package in a composer.lock.
+
+    Raises ``ValueError`` or ``OSError`` on corrupt or unreadable input; a document
+    that is not a JSON object gives ``{}``.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))  # raise on corrupt input
     if not isinstance(data, dict):
         return {}
@@ -57,14 +62,17 @@ def _toml_packages(path: Path) -> dict[str, str]:
 
 
 def parse_uv_lock(path: Path) -> dict[str, str]:
+    """Canonical name -> version from the ``[[package]]`` tables of a uv.lock."""
     return _toml_packages(path)
 
 
 def parse_poetry_lock(path: Path) -> dict[str, str]:
+    """Canonical name -> version from the ``[[package]]`` tables of a poetry.lock."""
     return _toml_packages(path)
 
 
 def parse_pipfile_lock(path: Path) -> dict[str, str]:
+    """Canonical name -> version from the ``default`` and ``develop`` sections of a Pipfile.lock."""
     data = json.loads(path.read_text(encoding="utf-8"))
     versions: dict[str, str] = {}
     for section in ("default", "develop"):

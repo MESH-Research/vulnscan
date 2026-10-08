@@ -248,13 +248,16 @@ class WatchControl:
 
     @property
     def stop_requested(self) -> bool:
+        """Whether :meth:`request_stop` has been called."""
         return self._stop
 
     def request_stop(self) -> None:
+        """Ask the loop to exit, waking it if it is sleeping."""
         self._stop = True
         self._wake.set()
 
     def request_resend(self) -> None:
+        """Ask the loop to re-send every current finding on its next cycle, waking it."""
         self._resend = True
         self._wake.set()
 

@@ -23,6 +23,11 @@ class RegistryError(Exception):
 
 
 class RegistryClient:
+    """Query PyPI, Packagist or wordpress.org for the versions of a dependency.
+
+    ``transport`` is for tests. Every failure surfaces as :class:`RegistryError`.
+    """
+
     def __init__(self, timeout: float = 30.0, transport: httpx.BaseTransport | None = None) -> None:
         self.timeout = timeout
         self._transport = transport

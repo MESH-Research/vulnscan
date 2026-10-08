@@ -25,6 +25,10 @@ def _parse_specifiers(specifier: str) -> SpecifierSet | None:
 
 
 def exact_version_from_pep508(specifier: str) -> str | None:
+    """The pinned version when the specifier is a single ``==``/``===`` without a wildcard.
+
+    Anything else, including invalid specifiers, gives ``None``.
+    """
     specs = _parse_specifiers(specifier)
     if specs is None or len(specs) != 1:
         return None
@@ -42,6 +46,12 @@ def _pep440_key(version: str) -> Version | None:
 
 
 def minimum_version_from_pep508(specifier: str) -> str | None:
+    """The lowest version a PEP 508 specifier can resolve to, or ``None``.
+
+    Taken from the highest lower bound among ``==``, ``===``, ``>=``, ``>`` and ``~=``
+    clauses; a wildcard such as ``1.2.*`` reads as ``1.2.0``. ``None`` when the
+    specifier is invalid or has no lower bound.
+    """
     specs = _parse_specifiers(specifier)
     if specs is None:
         return None
@@ -66,6 +76,7 @@ _COMPOSER_LOWER = re.compile(r"^(?:\^|~|>=|>)?\s*v?(\d+(?:\.\d+)*)(?P<wild>(?:\.
 
 
 def exact_version_from_composer(constraint: str) -> str | None:
+    """The version when a Composer constraint is a bare, optionally ``v``-prefixed, version."""
     text = constraint.strip()
     match = _COMPOSER_EXACT.match(text)
     if not match:
@@ -74,6 +85,12 @@ def exact_version_from_composer(constraint: str) -> str | None:
 
 
 def minimum_version_from_composer(constraint: str) -> str | None:
+    """The lower bound of a Composer constraint, or ``None``.
+
+    Alternatives (``||``) are tried in order and the first ``^``, ``~``, ``>=``, ``>``
+    or bare version wins; ``<``/``!=`` parts are ignored, ``1.2.*`` reads as ``1.2.0``
+    and a stability flag (``@dev``) is dropped.
+    """
     text = constraint.split("@", 1)[0].strip()
     # Alternatives: take the first branch that yields a lower bound.
     for branch in re.split(r"\|\|?", text):

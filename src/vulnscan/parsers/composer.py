@@ -31,6 +31,11 @@ _TRUSTED_SOURCES = ("packagist.org", "wp-packages.org", "wpackagist.org", "wordp
 
 
 def is_platform_package(name: str) -> bool:
+    """Whether a Composer requirement names the platform rather than a package.
+
+    True for ``php``, ``hhvm``, ``composer*``, ``ext-*``, ``lib-*`` and any name without
+    a ``vendor/`` prefix.
+    """
     lowered = name.lower()
     return (
         lowered in _PLATFORM_NAMES or lowered.startswith(_PLATFORM_PREFIXES) or "/" not in lowered
@@ -69,6 +74,13 @@ def _is_custom_source(meta: dict | None) -> bool:
 
 
 def parse_composer_json(path: Path, root: Path) -> list[Dependency]:
+    """Read ``require`` and ``require-dev`` from a composer.json.
+
+    Platform packages and non-string constraints are skipped. An adjacent
+    ``composer.lock``, when present, classifies WordPress plugins, themes and core and
+    flags packages served from somewhere other than Packagist or wordpress.org.
+    Returns ``[]`` when the file is missing, unreadable or not a JSON object.
+    """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):

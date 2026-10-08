@@ -41,6 +41,7 @@ _SLIM_DROP = ("copyrights", "researchers")
 
 
 def wordfence_attribution() -> str:
+    """The notice the Wordfence terms require alongside any copy of their advisory data."""
     return (
         f"WordPress vulnerability data provided by Wordfence Intelligence. {WORDFENCE_COPYRIGHT} "
         f"{WORDFENCE_LICENSE} License: {WORDFENCE_LICENSE_URL}"
@@ -150,6 +151,14 @@ def software_matches(software: dict, kind: str, slug: str, version: str | None) 
 
 
 class WordfenceClient:
+    """Download, cache and search the Wordfence vulnerability feed.
+
+    A cached feed younger than ``ttl_hours`` is used as is. Otherwise a conditional
+    download is attempted, but never more often than ``min_interval_minutes``; when it
+    fails and a stale cache exists, that cache is used and a note is appended to
+    ``warnings``. ``transport`` is for tests.
+    """
+
     def __init__(
         self,
         api_key: str,

@@ -47,6 +47,10 @@ def _dep_facts(finding: Finding) -> list[tuple[str, str]]:
 
 
 def render_markdown(result: ScanResult) -> str:
+    """Render a Markdown report: summary table, per-advisory details, warnings, attribution.
+
+    The attribution section appears only when a Wordfence advisory is present.
+    """
     lines = [f"# Vulnerability report: {result.project_path.name or result.project_path}", ""]
     lines += [_header_line(result), ""]
     if not result.findings:
@@ -93,6 +97,7 @@ def render_markdown(result: ScanResult) -> str:
 
 
 def render_text(result: ScanResult) -> str:
+    """Render the same report as :func:`render_markdown` in plain text."""
     title = f"Vulnerability report: {result.project_path.name or result.project_path}"
     lines = [title, "=" * len(title), "", _header_line(result), ""]
     if not result.findings:

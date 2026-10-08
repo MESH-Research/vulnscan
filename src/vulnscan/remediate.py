@@ -25,6 +25,13 @@ class RemediationError(Exception):
 
 @dataclass(frozen=True)
 class RemediationPlan:
+    """Upgrade options for one finding.
+
+    ``current`` is the version in use (``None`` if unknown), ``nearest_safe`` the smallest
+    newer version no advisory affects, ``latest`` the newest release and
+    ``latest_is_safe`` whether that release is clear of advisories.
+    """
+
     current: str | None
     nearest_safe: str | None
     latest: str | None
@@ -50,14 +57,17 @@ class RemediationResult:
 
     @property
     def path(self) -> Path:
+        """Path of the primary manifest edited."""
         return self.changes[0].path
 
     @property
     def old_constraint(self) -> str:
+        """Constraint the primary manifest had before the edit."""
         return self.changes[0].old_constraint
 
     @property
     def new_constraint(self) -> str:
+        """Constraint written to the primary manifest."""
         return self.changes[0].new_constraint
 
 
@@ -311,4 +321,5 @@ def apply_remediation(project_root: Path, dep: Dependency, new_version: str) -> 
 
 
 def display_name(dep: Dependency) -> str:
+    """Canonical package name used when referring to a dependency in messages."""
     return normalize_name(dep.name, dep.ecosystem)

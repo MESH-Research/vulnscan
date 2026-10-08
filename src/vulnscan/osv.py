@@ -174,6 +174,12 @@ def dedupe_vulnerabilities(vulns: list[Vulnerability]) -> list[Vulnerability]:
 
 
 class OSVClient:
+    """HTTP client for the OSV.dev API.
+
+    Advisory records fetched by id are cached for the lifetime of the client.
+    ``transport`` is for tests.
+    """
+
     def __init__(
         self,
         base_url: str = "https://api.osv.dev",
@@ -233,6 +239,11 @@ class OSVClient:
         return results
 
     def get_vulnerability(self, vuln_id: str, package_name: str, ecosystem: str) -> Vulnerability:
+        """Fetch one advisory by id (cached) and parse it scoped to the given package.
+
+        Raises:
+            OSVError: if the record cannot be retrieved.
+        """
         if vuln_id not in self._raw_cache:
             self._raw_cache[vuln_id] = self._request("GET", f"/v1/vulns/{vuln_id}")
         return parse_osv_vulnerability(self._raw_cache[vuln_id], package_name, ecosystem)

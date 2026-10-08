@@ -32,6 +32,7 @@ _PRERELEASE_WORDS = re.compile(
 
 
 def normalize_version(version: str) -> str:
+    """Strip surrounding whitespace and a leading ``v``/``V`` that precedes a digit."""
     text = version.strip()
     if text[:1] in ("v", "V") and text[1:2].isdigit():
         text = text[1:]
@@ -73,10 +74,17 @@ def compare_versions(a: str, b: str, ecosystem: str | None = None) -> int:
 
 
 def sort_versions(versions: list[str], ecosystem: str | None = None) -> list[str]:
+    """Sort versions ascending using :func:`compare_versions` for the ecosystem."""
     return sorted(versions, key=cmp_to_key(lambda x, y: compare_versions(x, y, ecosystem)))
 
 
 def is_prerelease(version: str, ecosystem: str | None = None) -> bool:
+    """Whether a version is a pre-release or development build.
+
+    ``dev-`` prefixes and ``-dev`` suffixes always count. PyPI versions use PEP 440
+    when they parse; otherwise the string is searched for markers such as ``alpha``,
+    ``beta``, ``rc`` or ``snapshot``.
+    """
     text = normalize_version(version)
     if text.startswith("dev-") or text.endswith("-dev"):
         return True
@@ -95,6 +103,7 @@ def version_in_range(
     to_inclusive: bool,
     ecosystem: str | None = None,
 ) -> bool:
+    """Whether ``version`` lies between the bounds; an empty or ``*`` bound is open."""
     if from_version and from_version != "*":
         cmp = compare_versions(version, from_version, ecosystem)
         if cmp < 0 or (cmp == 0 and not from_inclusive):

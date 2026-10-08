@@ -59,6 +59,14 @@ def _strip_comment(line: str) -> str:
 def parse_requirements_txt(
     path: Path, root: Path, _seen: set[Path] | None = None
 ) -> list[Dependency]:
+    """Parse a pip requirements file, following ``-r``/``--requirement`` includes.
+
+    Includes are resolved relative to the including file and each file is read once,
+    so cycles are safe. Other option lines (``-e``, ``--index-url`` ...), comments and
+    URL requirements are skipped. Dependencies are marked dev when the file name or
+    directory looks like a dev/test/lint/doc/ci requirements file. A missing file gives
+    ``[]``.
+    """
     seen = _seen if _seen is not None else set()
     resolved = path.resolve()
     if resolved in seen or not path.is_file():
@@ -123,6 +131,13 @@ def _poetry_dependencies(table: dict, source_file: str, dev: bool) -> list[Depen
 
 
 def parse_pyproject(path: Path, root: Path) -> list[Dependency]:
+    """Collect dependencies from PEP 621, PEP 735 and Poetry tables in a pyproject.toml.
+
+    ``project.dependencies`` and Poetry's main ``dependencies`` are runtime; optional
+    dependencies, ``dependency-groups``, Poetry ``dev-dependencies`` and groups are
+    marked dev. Path, git and URL dependencies and the ``python`` entry are skipped.
+    Returns ``[]`` when the file is unreadable or not valid TOML.
+    """
     data = _load_toml(path)
     if not data:
         return []
@@ -165,6 +180,10 @@ def parse_pyproject(path: Path, root: Path) -> list[Dependency]:
 
 
 def parse_pipfile(path: Path, root: Path) -> list[Dependency]:
+    """Parse ``packages`` (runtime) and ``dev-packages`` (dev) from a Pipfile.
+
+    Returns ``[]`` when the file is unreadable or not valid TOML.
+    """
     data = _load_toml(path)
     if not data:
         return []
@@ -179,6 +198,10 @@ def parse_pipfile(path: Path, root: Path) -> list[Dependency]:
 
 
 def parse_setup_cfg(path: Path, root: Path) -> list[Dependency]:
+    """Parse ``install_requires`` (runtime) and ``extras_require`` (dev) from a setup.cfg.
+
+    Returns ``[]`` when the file is unreadable or malformed.
+    """
     parser = configparser.ConfigParser(interpolation=None)
     try:
         parser.read_string(path.read_text(encoding="utf-8"))
