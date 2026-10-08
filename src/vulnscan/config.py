@@ -37,6 +37,13 @@ _ENV_MAP: dict[str, tuple[str, Any]] = {
     "ignore_dirs": ("IGNORE_DIRS", ""),
     "markdown_filename": ("MARKDOWN_FILE", "vulns.md"),
     "text_filename": ("TEXT_FILE", "vulns.txt"),
+    "ntfy_server": ("NTFY_SERVER", "https://ntfy.sh"),
+    "ntfy_topic": ("NTFY_TOPIC", ""),
+    "ntfy_token": ("NTFY_TOKEN", ""),
+    "ntfy_user": ("NTFY_USER", ""),
+    "ntfy_password": ("NTFY_PASSWORD", ""),
+    "ntfy_interval_minutes": ("NTFY_INTERVAL_MINUTES", "60"),
+    "ntfy_state_filename": ("NTFY_STATE_FILE", "ntfy-state.json"),
 }
 
 _TRUE = {"1", "true", "yes", "on", "y"}
@@ -76,6 +83,17 @@ class Settings:
     ignore_dirs: tuple[str, ...] = ()
     markdown_filename: str = "vulns.md"
     text_filename: str = "vulns.txt"
+    ntfy_server: str = "https://ntfy.sh"
+    ntfy_topic: str = ""
+    ntfy_token: str = ""
+    ntfy_user: str = ""
+    ntfy_password: str = ""
+    ntfy_interval_minutes: float = 60.0
+    ntfy_state_filename: str = "ntfy-state.json"
+
+    @property
+    def ntfy_state_path(self) -> Path:
+        return self.feed_dir / self.ntfy_state_filename
 
     @property
     def markdown_path(self) -> Path:
@@ -116,6 +134,8 @@ _COERCERS = {
     "wordfence_min_interval_minutes": float,
     "cache_dir": lambda v: Path(v).expanduser().absolute(),
     "ignore_dirs": _to_tuple,
+    "ntfy_server": lambda v: str(v).rstrip("/"),
+    "ntfy_interval_minutes": float,
 }
 
 

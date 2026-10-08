@@ -181,3 +181,33 @@ def test_ignore_dirs_accepts_names_and_paths(tmp_path: Path):
     env = {"VULNSCAN_IGNORE_DIRS": "legacy, web/app/plugins/graveyard ,*-old"}
     settings = load_settings(env=env, dotenv_path=tmp_path / "missing.env")
     assert settings.ignore_dirs == ("legacy", "web/app/plugins/graveyard", "*-old")
+
+
+def test_ntfy_defaults(tmp_path: Path):
+    settings = load_settings(env={}, dotenv_path=tmp_path / "missing.env")
+    assert settings.ntfy_server == "https://ntfy.sh"
+    assert settings.ntfy_topic == ""
+    assert settings.ntfy_token == ""
+    assert settings.ntfy_user == ""
+    assert settings.ntfy_password == ""
+    assert settings.ntfy_interval_minutes == 60.0
+    assert settings.ntfy_state_path == settings.feed_dir / "ntfy-state.json"
+
+
+def test_ntfy_values_from_environment(tmp_path: Path):
+    env = {
+        "VULNSCAN_NTFY_SERVER": "https://ntfy.example.org/",
+        "VULNSCAN_NTFY_TOPIC": "vulns",
+        "VULNSCAN_NTFY_TOKEN": "tk_abc",
+        "VULNSCAN_NTFY_USER": "me",
+        "VULNSCAN_NTFY_PASSWORD": "pw",
+        "VULNSCAN_NTFY_INTERVAL_MINUTES": "15",
+        "VULNSCAN_NTFY_STATE_FILE": "sent.json",
+    }
+    settings = load_settings(env=env, dotenv_path=tmp_path / "missing.env")
+    assert settings.ntfy_server == "https://ntfy.example.org"
+    assert settings.ntfy_topic == "vulns"
+    assert settings.ntfy_token == "tk_abc"
+    assert (settings.ntfy_user, settings.ntfy_password) == ("me", "pw")
+    assert settings.ntfy_interval_minutes == 15.0
+    assert settings.ntfy_state_path == settings.feed_dir / "sent.json"

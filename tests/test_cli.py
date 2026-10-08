@@ -303,3 +303,78 @@ def test_ignore_dirs_come_from_environment_without_the_flag(tmp_path: Path, monk
     monkeypatch.setenv("VULNSCAN_IGNORE_DIRS", "from-env")
     assert cli.main(["--text", "-", "--path", str(tmp_path)]) == 0
     assert seen["settings"].ignore_dirs == ("from-env",)
+
+
+# --- ntfy mode --------------------------------------------------------------------------------
+
+
+class RecordingNtfy:
+    def __init__(self):
+        self.published = []
+
+    def publish(self, message):
+        self.published.append(message)
+
+
+def test_parser_ntfy_flags():
+    args = cli.build_parser().parse_args(["--ntfy", "--once", "--resend", "--interval", "5"])
+    assert args.ntfy is True
+    assert args.once is True
+    assert args.resend is True
+    assert args.interval == 5.0
+    defaults = cli.build_parser().parse_args([])
+    assert defaults.ntfy is False and defaults.once is False and defaults.resend is False
+    assert defaults.interval is None
+
+
+def test_ntfy_mode_requires_a_topic(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.delenv("VULNSCAN_NTFY_TOPIC", raising=False)
+    code = cli.main(["--ntfy", "--once", "--path", str(tmp_path), "--env-file", "/nonexistent"])
+    assert code == 2
+    assert "VULNSCAN_NTFY_TOPIC" in capsys.readouterr().err
+
+
+def test_ntfy_once_scans_and_publishes(tmp_path: Path, monkeypatch, capsys):
+    recorder = RecordingNtfy()
+    monkeypatch.setattr(cli, "scan", lambda settings: multi_file_result(settings.project_path))
+    monkeypatch.setattr(cli, "build_ntfy_client", lambda settings: recorder)
+    monkeypatch.setenv("VULNSCAN_NTFY_TOPIC", "alerts")
+    feed_dir = tmp_path / "feeds"
+    code = cli.main(["--ntfy", "--once", "--path", str(tmp_path), "--feed-dir", str(feed_dir)])
+    assert code == 0
+    assert len(recorder.published) == 1
+    assert "requests" in recorder.published[0].title
+    assert (feed_dir / "ntfy-state.json").is_file()
+    # A second run finds nothing new.
+    assert cli.main(["--ntfy", "--once", "--path", str(tmp_path), "--feed-dir", str(feed_dir)]) == 0
+    assert len(recorder.published) == 1
+    # Unless a resend is requested.
+    code = cli.main(
+        ["--ntfy", "--once", "--resend", "--path", str(tmp_path), "--feed-dir", str(feed_dir)]
+    )
+    assert code == 0
+    assert len(recorder.published) == 2
+
+
+def test_ntfy_interval_flag_overrides_setting(tmp_path: Path, monkeypatch):
+    seen = {}
+
+    def fake_run_watch(settings, control, client, scan_fn=None, resend_first=False, once=False):
+        seen["settings"] = settings
+        return 0
+
+    monkeypatch.setattr(cli, "run_watch", fake_run_watch)
+    monkeypatch.setattr(cli, "build_ntfy_client", lambda settings: RecordingNtfy())
+    monkeypatch.setenv("VULNSCAN_NTFY_TOPIC", "alerts")
+    monkeypatch.setenv("VULNSCAN_NTFY_INTERVAL_MINUTES", "60")
+    assert cli.main(["--ntfy", "--interval", "7", "--path", str(tmp_path)]) == 0
+    assert seen["settings"].ntfy_interval_minutes == 7.0
+
+
+def test_build_ntfy_client_uses_settings(tmp_path: Path, monkeypatch):
+    from vulnscan.ntfy import NtfyClient
+
+    monkeypatch.setenv("VULNSCAN_NTFY_TOPIC", "alerts")
+    monkeypatch.setenv("VULNSCAN_NTFY_TOKEN", "tk_x")
+    settings = cli.load_settings(dotenv_path=tmp_path / "none.env")
+    assert isinstance(cli.build_ntfy_client(settings), NtfyClient)

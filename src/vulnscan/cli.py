@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -11,6 +12,7 @@ from vulnscan import __version__
 from vulnscan.config import Settings, load_settings
 from vulnscan.feeds import write_feeds
 from vulnscan.models import Finding, ScanResult, normalize_name
+from vulnscan.ntfy import NtfyClient, WatchControl, install_signal_handlers, run_watch
 from vulnscan.osv import OSVError
 from vulnscan.registry import RegistryClient, RegistryError
 from vulnscan.remediate import RemediationError, apply_remediation, plan_remediation
@@ -70,6 +72,26 @@ def build_parser() -> argparse.ArgumentParser:
         default="nearest",
         help="with --remediate: 'nearest' = smallest upgrade clearing all advisories "
         "(default), 'latest' = newest release",
+    )
+    parser.add_argument(
+        "--ntfy",
+        action="store_true",
+        help="non-interactive: rescan every VULNSCAN_NTFY_INTERVAL_MINUTES and push new "
+        "findings to an ntfy topic; SIGUSR1 re-sends everything, SIGINT/SIGTERM stop",
+    )
+    parser.add_argument(
+        "--once", action="store_true", help="with --ntfy: run a single cycle and exit"
+    )
+    parser.add_argument(
+        "--resend",
+        action="store_true",
+        help="with --ntfy: push every current finding at start, not only unsent ones",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        metavar="MINUTES",
+        help="with --ntfy: minutes between scans (VULNSCAN_NTFY_INTERVAL_MINUTES)",
     )
     parser.add_argument(
         "--ignore",
@@ -140,6 +162,37 @@ def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
         )
     print(outcome.hint)
     return 0
+
+
+def build_ntfy_client(settings: Settings) -> NtfyClient:
+    return NtfyClient(
+        server=settings.ntfy_server,
+        topic=settings.ntfy_topic,
+        token=settings.ntfy_token,
+        user=settings.ntfy_user,
+        password=settings.ntfy_password,
+        timeout=settings.request_timeout,
+    )
+
+
+def run_ntfy(settings: Settings, args: argparse.Namespace) -> int:
+    if not settings.ntfy_topic:
+        print("error: ntfy mode needs VULNSCAN_NTFY_TOPIC (and usually a token)", file=sys.stderr)
+        return 2
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr
+    )
+    control = WatchControl()
+    if not args.once:
+        install_signal_handlers(control)
+    return run_watch(
+        settings,
+        control,
+        build_ntfy_client(settings),
+        scan_fn=scan,
+        resend_first=args.resend,
+        once=args.once,
+    )
 
 
 def run_tui(settings: Settings) -> None:
@@ -213,6 +266,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "project_path": args.path,
                 "feed_dir": args.feed_dir,
                 "ignore_dirs": ",".join(args.ignore) if args.ignore else None,
+                "ntfy_interval_minutes": args.interval,
             },
         )
     except ValueError as exc:
@@ -221,6 +275,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not settings.project_path.exists():
         print(f"error: project path does not exist: {settings.project_path}", file=sys.stderr)
         return 1
+    if args.ntfy:
+        return run_ntfy(settings, args)
     if args.remediate:
         return run_remediate(settings, args)
     if args.update_feeds or args.markdown is not None or args.text is not None:
