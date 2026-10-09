@@ -21,9 +21,16 @@ def test_is_manifest_recognises_known_files(tmp_path: Path):
         "dev-requirements.txt",
         "Pipfile",
         "setup.cfg",
+        "package.json",
     ]:
         assert is_manifest(tmp_path / name), name
-    for name in ["composer.lock", "package.json", "README.md", "requirements.in", "Pipfile.lock"]:
+    for name in [
+        "composer.lock",
+        "package-lock.json",
+        "README.md",
+        "requirements.in",
+        "Pipfile.lock",
+    ]:
         assert not is_manifest(tmp_path / name), name
 
 
@@ -291,3 +298,26 @@ def test_vulnscanignore_combines_with_explicit_patterns(tmp_path: Path):
 
 def test_load_ignore_file_is_empty_without_a_file(tmp_path: Path):
     assert load_ignore_file(tmp_path) == ()
+
+
+def test_parse_project_resolves_npm_versions_from_package_lock(tmp_path: Path):
+    from vulnscan.models import NPM
+
+    (tmp_path / "package.json").write_text(
+        json.dumps({"dependencies": {"express": "^4.18.2"}, "devDependencies": {"jest": "^29"}})
+    )
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps(
+            {"lockfileVersion": 3, "packages": {"node_modules/express": {"version": "4.19.2"}}}
+        )
+    )
+    (tmp_path / "node_modules" / "express").mkdir(parents=True)
+    (tmp_path / "node_modules" / "express" / "package.json").write_text(
+        json.dumps({"dependencies": {"debug": "2.6.9"}})
+    )
+    deps, warnings = parse_project(tmp_path)
+    assert [(d.name, d.ecosystem, d.version, d.version_source, d.dev) for d in deps] == [
+        ("express", NPM, "4.19.2", "lock", False),
+        ("jest", NPM, "29.0.0", "constraint", True),
+    ]
+    assert warnings == []

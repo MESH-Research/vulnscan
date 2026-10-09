@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from vulnscan.config import Settings
-from vulnscan.models import PYPI, Dependency, Vulnerability
+from vulnscan.models import NPM, PYPI, Dependency, Vulnerability
 from vulnscan.osv import OSVError
 from vulnscan.scanner import scan
 
@@ -292,3 +292,13 @@ def test_scan_passes_ignore_dirs(tmp_path: Path):
     (tmp_path / "requirements.txt").write_text("new==1.0\n")
     result = scan(settings_for(tmp_path, ignore_dirs=("legacy",)), client=FakeClient({}))
     assert [d.name for d in result.dependencies] == ["new"]
+
+
+def test_scan_queries_npm_dependencies_through_osv(tmp_path: Path):
+    (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"lodash": "4.17.20"}}))
+    client = FakeClient({("lodash", "4.17.20"): [vuln("GHSA-L", "HIGH")]})
+    result = scan(settings_for(tmp_path), client=client)
+    assert [(f.dependency.name, f.dependency.ecosystem) for f in result.findings] == [
+        ("lodash", NPM)
+    ]
+    assert [d.ecosystem for d in client.seen] == [NPM]

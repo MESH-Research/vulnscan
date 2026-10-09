@@ -460,3 +460,10 @@ def test_signal_handlers_drive_the_control():
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+
+
+def test_registry_name_knows_npm():
+    from vulnscan.models import NPM
+    from vulnscan.notify import registry_name
+
+    assert registry_name(NPM) == "npm"

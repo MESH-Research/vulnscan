@@ -9,7 +9,7 @@ from dataclasses import replace
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
-from vulnscan.models import PACKAGIST, WORDPRESS, Dependency, normalize_name
+from vulnscan.models import NPM, PACKAGIST, WORDPRESS, Dependency, normalize_name
 from vulnscan.versioncmp import (  # noqa: F401  (re-exported for callers)
     compare_versions,
     normalize_version,
@@ -108,6 +108,51 @@ def minimum_version_from_composer(constraint: str) -> str | None:
     return None
 
 
+_NPM_EXACT = re.compile(r"^=?\s*v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\+[0-9A-Za-z.-]+)?$")
+_NPM_LOWER = re.compile(
+    r"^(?:\^|~>?|>=|>|=)?\s*v?(?P<major>\d+)(?:\.(?P<minor>\d+|[xX*]))?(?:\.(?P<patch>\d+|[xX*]))?"
+    r"(?:-(?P<pre>[0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$"
+)
+
+
+def exact_version_from_npm(constraint: str) -> str | None:
+    """The version when an npm range is one full version: ``1.2.3``, ``=1.2.3`` or ``v1.2.3``."""
+    match = _NPM_EXACT.match(constraint.strip())
+    return match.group(1) if match else None
+
+
+def minimum_version_from_npm(constraint: str) -> str | None:
+    """The lower bound of an npm semver range, or ``None``.
+
+    ``||`` alternatives are tried in order; within one, the first ``^``, ``~``, ``>=``,
+    ``>``, ``=`` or bare version wins and ``<``/``!`` parts are ignored. A hyphen range
+    ``a - b`` reads as ``a``; ``x``/``*`` components read as ``0``. ``*``, ``latest``,
+    ``x`` and an empty range have no lower bound.
+    """
+    text = constraint.strip()
+    if not text or text.lower() in ("*", "x", "latest"):
+        return None
+    for branch in text.split("||"):
+        branch = branch.strip()
+        if " - " in branch:
+            branch = branch.split(" - ", 1)[0].strip()
+        for part in branch.split():
+            if part.startswith(("<", "!")):
+                continue
+            match = _NPM_LOWER.match(part)
+            if not match:
+                continue
+            numbers = [match.group("major")]
+            for name in ("minor", "patch"):
+                value = match.group(name)
+                numbers.append(value if value and value.isdigit() else "0")
+            version = ".".join(numbers)
+            if match.group("pre"):
+                version += "-" + match.group("pre")
+            return version
+    return None
+
+
 def resolve_dependency(dep: Dependency, lock_versions: Mapping[tuple[str, str], str]) -> Dependency:
     """Fill in an exact version from a lock file, a pin, or the constraint's lower bound."""
     locked = lock_versions.get(dep.key)
@@ -119,6 +164,9 @@ def resolve_dependency(dep: Dependency, lock_versions: Mapping[tuple[str, str], 
     if dep.ecosystem in (PACKAGIST, WORDPRESS):
         exact = exact_version_from_composer(dep.constraint)
         minimum = minimum_version_from_composer(dep.constraint)
+    elif dep.ecosystem == NPM:
+        exact = exact_version_from_npm(dep.constraint)
+        minimum = minimum_version_from_npm(dep.constraint)
     else:
         exact = exact_version_from_pep508(dep.constraint)
         minimum = minimum_version_from_pep508(dep.constraint)

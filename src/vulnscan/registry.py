@@ -1,14 +1,16 @@
-"""Look up the versions available for a package on PyPI, Packagist or wordpress.org.
+"""Look up the versions available for a package on PyPI, Packagist, wordpress.org or npm.
 
 Only stable, non-yanked releases are returned, sorted ascending.
 """
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 import httpx
 
 from vulnscan import __version__
-from vulnscan.models import PACKAGIST, PYPI, WORDPRESS, Dependency, normalize_name
+from vulnscan.models import NPM, PACKAGIST, PYPI, WORDPRESS, Dependency, normalize_name
 from vulnscan.versioncmp import is_prerelease, normalize_version, sort_versions
 
 PYPI_URL = "https://pypi.org/pypi/{name}/json"
@@ -16,6 +18,7 @@ PACKAGIST_URL = "https://repo.packagist.org/p2/{name}.json"
 WP_PLUGIN_URL = "https://api.wordpress.org/plugins/info/1.2/"
 WP_THEME_URL = "https://api.wordpress.org/themes/info/1.2/"
 WP_CORE_URL = "https://api.wordpress.org/core/version-check/1.7/"
+NPM_URL = "https://registry.npmjs.org/{name}"
 
 
 class RegistryError(Exception):
@@ -101,6 +104,14 @@ class RegistryClient:
             raise RegistryError(f"wordpress.org lists no versions for {dep.kind} {dep.slug}")
         return list(versions)
 
+    def _npm(self, dep: Dependency) -> list[str]:
+        name = normalize_name(dep.name, NPM)
+        data = self._get_json(NPM_URL.format(name=quote(name, safe="@")))
+        versions = data.get("versions")
+        if not isinstance(versions, dict) or not versions:
+            raise RegistryError(f"npm lists no versions for {name}")
+        return [str(v) for v in versions]
+
     def available_versions(self, dep: Dependency) -> list[str]:
         """Stable, installable versions of the package, oldest first."""
         if dep.ecosystem == PYPI:
@@ -109,6 +120,8 @@ class RegistryClient:
             raw = self._packagist(dep)
         elif dep.ecosystem == WORDPRESS:
             raw = self._wordpress(dep)
+        elif dep.ecosystem == NPM:
+            raw = self._npm(dep)
         else:
             raise RegistryError(f"No registry known for ecosystem {dep.ecosystem!r}")
         stable = {v for v in raw if v and not is_prerelease(v, dep.ecosystem)}

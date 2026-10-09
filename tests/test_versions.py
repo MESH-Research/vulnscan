@@ -1,7 +1,10 @@
+from dataclasses import replace
+
 import pytest
 
-from vulnscan.models import PACKAGIST, PYPI, Dependency
+from vulnscan.models import NPM, PACKAGIST, PYPI, Dependency
 from vulnscan.parsers.versions import (
+    compare_versions,
     exact_version_from_composer,
     exact_version_from_pep508,
     minimum_version_from_composer,
@@ -153,7 +156,7 @@ def test_resolve_keeps_other_fields():
 
 
 from vulnscan.models import WORDPRESS  # noqa: E402
-from vulnscan.parsers.versions import compare_versions, version_in_range  # noqa: E402
+from vulnscan.parsers.versions import version_in_range  # noqa: E402
 
 
 @pytest.mark.parametrize(
@@ -242,3 +245,93 @@ def test_resolve_wordpress_dependency_uses_composer_style_constraints():
         resolve_dependency(caret, {}).version,
         resolve_dependency(caret, {}).version_source,
     ) == ("4.1", "constraint")
+
+
+# --- npm ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "constraint, expected",
+    [
+        ("4.18.2", "4.18.2"),
+        ("=4.18.2", "4.18.2"),
+        ("v4.18.2", "4.18.2"),
+        ("4.18.2-beta.1", "4.18.2-beta.1"),
+        ("^4.18.2", None),
+        ("~4.18", None),
+        ("4.x", None),
+        ("*", None),
+        ("latest", None),
+        ("", None),
+    ],
+)
+def test_exact_version_from_npm(constraint, expected):
+    from vulnscan.parsers.versions import exact_version_from_npm
+
+    assert exact_version_from_npm(constraint) == expected
+
+
+@pytest.mark.parametrize(
+    "constraint, expected",
+    [
+        ("^4.18.2", "4.18.2"),
+        ("~4.18.2", "4.18.2"),
+        (">=4.18.2", "4.18.2"),
+        (">4.18.2", "4.18.2"),
+        ("4.18.2", "4.18.2"),
+        ("^4.18", "4.18.0"),
+        ("4.18.x", "4.18.0"),
+        ("4.x", "4.0.0"),
+        ("4", "4.0.0"),
+        ("4.18.*", "4.18.0"),
+        (">=4.18.2 <5", "4.18.2"),
+        ("4.18.2 - 5.0.0", "4.18.2"),
+        ("^4.18.2 || ^5.0.0", "4.18.2"),
+        ("<5", None),
+        ("*", None),
+        ("x", None),
+        ("latest", None),
+        ("", None),
+        ("^4.18.2-beta.1", "4.18.2-beta.1"),
+    ],
+)
+def test_minimum_version_from_npm(constraint, expected):
+    from vulnscan.parsers.versions import minimum_version_from_npm
+
+    assert minimum_version_from_npm(constraint) == expected
+
+
+def test_resolve_npm_dependency_from_constraint_and_lock():
+    from vulnscan.parsers.versions import resolve_dependency
+
+    dep = Dependency("express", NPM, "^4.18.2", None, "unknown", "package.json")
+    assert resolve_dependency(dep, {}).version == "4.18.2"
+    assert resolve_dependency(dep, {}).version_source == "constraint"
+    locked = resolve_dependency(dep, {(NPM, "express"): "4.19.0"})
+    assert (locked.version, locked.version_source) == ("4.19.0", "lock")
+    exact = resolve_dependency(replace(dep, constraint="4.18.2"), {})
+    assert (exact.version, exact.version_source) == ("4.18.2", "pinned")
+
+
+@pytest.mark.parametrize(
+    "a, b, expected",
+    [
+        ("1.0.0-beta.1", "1.0.0", -1),
+        ("1.0.0-next.3", "1.0.0", -1),
+        ("1.0.0-alpha", "1.0.0-beta", -1),
+        ("1.10.0", "1.9.0", 1),
+        ("2.0.0", "2.0.0", 0),
+    ],
+)
+def test_compare_npm_versions(a, b, expected):
+    assert compare_versions(a, b, NPM) == expected
+
+
+@pytest.mark.parametrize(
+    "version, expected",
+    [("1.0.0-next.3", True), ("1.0.0-rc.1", True), ("1.0.0", False), ("1.0.0+build.5", False)],
+)
+def test_is_prerelease_npm_treats_any_hyphenated_suffix_as_prerelease(version, expected):
+    from vulnscan.versioncmp import is_prerelease
+
+    assert is_prerelease(version, NPM) is expected

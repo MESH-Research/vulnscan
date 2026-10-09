@@ -11,6 +11,7 @@ from pathlib import Path
 from vulnscan.models import Dependency
 from vulnscan.parsers.composer import parse_composer_json
 from vulnscan.parsers.lockfiles import load_lock_versions
+from vulnscan.parsers.node import parse_package_json
 from vulnscan.parsers.python import (
     parse_pipfile,
     parse_pyproject,
@@ -70,6 +71,7 @@ def composer_ignored_dirs(composer_json: Path) -> set[Path]:
 
 _EXACT_NAMES: dict[str, Parser] = {
     "composer.json": parse_composer_json,
+    "package.json": parse_package_json,
     "pyproject.toml": parse_pyproject,
     "pipfile": parse_pipfile,
     "setup.cfg": parse_setup_cfg,
@@ -141,8 +143,8 @@ def matches_ignore(rel_path: str, patterns: tuple[str, ...]) -> bool:
 def is_manifest(path: Path) -> bool:
     """Whether ``path`` is a manifest vulnscan can parse, judged by its file name.
 
-    Recognised: ``composer.json``, ``pyproject.toml``, ``Pipfile``, ``setup.cfg`` and
-    requirements files (see :func:`is_requirements_file`).
+    Recognised: ``composer.json``, ``package.json``, ``pyproject.toml``, ``Pipfile``,
+    ``setup.cfg`` and requirements files (see :func:`is_requirements_file`).
     """
     return _parser_for(path) is not None
 

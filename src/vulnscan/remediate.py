@@ -14,7 +14,7 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 
-from vulnscan.models import PACKAGIST, PYPI, WORDPRESS, Dependency, Finding, normalize_name
+from vulnscan.models import NPM, PACKAGIST, PYPI, WORDPRESS, Dependency, Finding, normalize_name
 from vulnscan.parsers import is_requirements_file
 from vulnscan.versioncmp import compare_versions, sort_versions
 
@@ -122,6 +122,25 @@ def rewrite_composer_constraint(old: str, new_version: str) -> str:
     return "^" + new_version
 
 
+_NPM_EXACT = re.compile(r"^v?\d+\.\d+\.\d+(?:[-+][\w.\-]+)?$")
+_NPM_SINGLE_OP = re.compile(r"^(\^|~|>=|=)\s*v?\d[\w.\-+]*$")
+
+
+def rewrite_npm_range(old: str, new_version: str) -> str:
+    """Keep the operator style (exact, ``=``, ``^``, ``~``, ``>=``) and swap the version.
+
+    Anything more complex (``x`` ranges, ``*``, hyphen ranges, alternatives) becomes a
+    caret range.
+    """
+    text = old.strip()
+    if _NPM_EXACT.match(text):
+        return new_version
+    single = _NPM_SINGLE_OP.match(text)
+    if single:
+        return single.group(1) + new_version
+    return "^" + new_version
+
+
 def rewrite_pep508_specifier(old: str, new_version: str) -> str:
     """Raise the lower bound to new_version, keeping compatible upper bounds and exclusions."""
     try:
@@ -178,16 +197,28 @@ def _name_pattern(name: str) -> str:
     return "".join("[-_.]" if ch in "-_." else re.escape(ch) for ch in name)
 
 
-def _edit_composer(
-    text: str, dep: Dependency, new_version: str, source_file: str
+def _edit_json_constraint(
+    text: str, dep: Dependency, new_version: str, source_file: str, rewrite
 ) -> tuple[str, str, str]:
     pattern = re.compile(r'("' + re.escape(dep.name) + r'"\s*:\s*")([^"]*)(")', re.IGNORECASE)
     match = pattern.search(text)
     if not match:
         raise RemediationError(f"{dep.name} not found in {source_file}")
     old = match.group(2)
-    new = rewrite_composer_constraint(old, new_version)
+    new = rewrite(old, new_version)
     return text[: match.start(2)] + new + text[match.end(2) :], old, new
+
+
+def _edit_composer(
+    text: str, dep: Dependency, new_version: str, source_file: str
+) -> tuple[str, str, str]:
+    return _edit_json_constraint(text, dep, new_version, source_file, rewrite_composer_constraint)
+
+
+def _edit_package_json(
+    text: str, dep: Dependency, new_version: str, source_file: str
+) -> tuple[str, str, str]:
+    return _edit_json_constraint(text, dep, new_version, source_file, rewrite_npm_range)
 
 
 def _edit_requirement_lines(
@@ -267,6 +298,13 @@ def follow_up_hint(project_root: Path, dep: Dependency, source_file: str | None 
     name = manifest.name.lower()
     if name == "composer.json":
         command = f"composer update {dep.name} --with-dependencies"
+    elif name == "package.json":
+        if (directory / "pnpm-lock.yaml").is_file():
+            command = "pnpm install"
+        elif (directory / "yarn.lock").is_file():
+            command = "yarn install"
+        else:
+            command = "npm install"
     elif name == "pyproject.toml":
         if (directory / "poetry.lock").is_file():
             command = "poetry lock && poetry install"
@@ -287,6 +325,8 @@ def _editor_for(path: Path, dep: Dependency, source_file: str):
     name = path.name.lower()
     if name == "composer.json" and dep.ecosystem in (PACKAGIST, WORDPRESS):
         return _edit_composer
+    if name == "package.json" and dep.ecosystem == NPM:
+        return _edit_package_json
     if name == "pyproject.toml":
         return _edit_pyproject
     if name == "pipfile":

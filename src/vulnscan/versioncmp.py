@@ -1,8 +1,9 @@
 """Ecosystem-aware version comparison with no other vulnscan imports.
 
 PyPI versions follow PEP 440 and are compared with `packaging` when possible. Everything else
-(Composer, WordPress) uses a loose, PHP `version_compare`-style tokenisation that also serves
-as the fallback for strings `packaging` rejects.
+(Composer, WordPress, npm) uses a loose, PHP `version_compare`-style tokenisation that also
+serves as the fallback for strings `packaging` rejects. For npm, semver build metadata
+(``+build.5``) is ignored and any hyphenated suffix counts as a pre-release.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from functools import cmp_to_key
 from packaging.version import InvalidVersion, Version
 
 PYPI_ECOSYSTEM = "PyPI"
+NPM_ECOSYSTEM = "npm"
 
 _PRERELEASE_RANK = {
     "dev": 0,
@@ -64,8 +66,14 @@ def _pep440(version: str) -> Version | None:
         return None
 
 
+def _strip_build_metadata(version: str) -> str:
+    return version.split("+", 1)[0]
+
+
 def compare_versions(a: str, b: str, ecosystem: str | None = None) -> int:
     """Return -1, 0 or 1 comparing a to b."""
+    if ecosystem == NPM_ECOSYSTEM:
+        return _loose_compare(_strip_build_metadata(a), _strip_build_metadata(b))
     if ecosystem == PYPI_ECOSYSTEM:
         left, right = _pep440(a), _pep440(b)
         if left is not None and right is not None:
@@ -88,6 +96,8 @@ def is_prerelease(version: str, ecosystem: str | None = None) -> bool:
     text = normalize_version(version)
     if text.startswith("dev-") or text.endswith("-dev"):
         return True
+    if ecosystem == NPM_ECOSYSTEM:
+        return "-" in _strip_build_metadata(text)
     if ecosystem == PYPI_ECOSYSTEM:
         parsed = _pep440(text)
         if parsed is not None:

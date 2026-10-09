@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from vulnscan.models import PACKAGIST, PYPI, WORDPRESS, Dependency
+from vulnscan.models import NPM, PACKAGIST, PYPI, WORDPRESS, Dependency
 from vulnscan.registry import RegistryClient, RegistryError
 
 
@@ -197,3 +197,51 @@ def test_unknown_ecosystem_raises():
     dep = Dependency("x", "Cargo", "", "1", "pinned", "Cargo.toml")
     with pytest.raises(RegistryError):
         make_client(lambda r: httpx.Response(500)).available_versions(dep)
+
+
+# --- npm ----------------------------------------------------------------------------------
+
+
+def npm_handler(request: httpx.Request) -> httpx.Response:
+    assert request.url.host == "registry.npmjs.org"
+    if request.url.path == "/express":
+        return httpx.Response(
+            200,
+            json={
+                "name": "express",
+                "dist-tags": {"latest": "4.19.2", "next": "5.0.0-beta.3"},
+                "versions": {
+                    "4.18.2": {"version": "4.18.2"},
+                    "4.19.0": {"version": "4.19.0", "deprecated": "use 4.19.2"},
+                    "4.19.2": {"version": "4.19.2"},
+                    "5.0.0-beta.3": {"version": "5.0.0-beta.3"},
+                    "4.9.0": {"version": "4.9.0"},
+                },
+            },
+        )
+    if request.url.path in ("/@babel%2Fcore", "/@babel/core"):
+        return httpx.Response(
+            200, json={"name": "@babel/core", "versions": {"7.23.0": {}, "7.23.5": {}}}
+        )
+    return httpx.Response(404, json={"error": "Not found"})
+
+
+def test_npm_versions_sorted_stable():
+    dep = Dependency("express", NPM, "^4.18.2", "4.18.2", "constraint", "package.json")
+    assert make_client(npm_handler).available_versions(dep) == [
+        "4.9.0",
+        "4.18.2",
+        "4.19.0",
+        "4.19.2",
+    ]
+
+
+def test_npm_scoped_package_is_url_encoded():
+    dep = Dependency("@babel/core", NPM, "^7.23.0", "7.23.0", "constraint", "package.json")
+    assert make_client(npm_handler).available_versions(dep) == ["7.23.0", "7.23.5"]
+
+
+def test_npm_missing_package_raises():
+    dep = Dependency("nope", NPM, "", None, "unknown", "package.json")
+    with pytest.raises(RegistryError):
+        make_client(npm_handler).available_versions(dep)

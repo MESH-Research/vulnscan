@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from vulnscan.models import (
+    NPM,
     PACKAGIST,
     PYPI,
     WORDPRESS,
@@ -390,3 +391,65 @@ def test_apply_remediation_edits_txt_inside_requirements_directory(tmp_path: Pat
     assert (tmp_path / "requirements" / "base.txt").read_text() == "authlib==1.3.1\n"
     assert "pip install -r base.txt" in result.hint
     assert "(in requirements)" in result.hint
+
+
+# --- package.json ---------------------------------------------------------------------------
+
+
+def test_apply_to_package_json_preserves_formatting(tmp_path: Path):
+    original = (
+        "{\n"
+        '  "name": "express",\n'
+        '  "version": "1.0.0",\n'
+        '  "dependencies": {\n'
+        '    "express": "^4.18.2",\n'
+        '    "@babel/core": "7.23.0"\n'
+        "  },\n"
+        '  "devDependencies": {\n'
+        '    "jest": "~29.7.0"\n'
+        "  }\n"
+        "}\n"
+    )
+    (tmp_path / "package.json").write_text(original)
+    result = apply_remediation(tmp_path, dep("express", NPM, "^4.18.2", "package.json"), "4.19.2")
+    text = (tmp_path / "package.json").read_text()
+    assert text == original.replace('"express": "^4.18.2"', '"express": "^4.19.2"')
+    assert json.loads(text)["name"] == "express"
+    assert (result.old_constraint, result.new_constraint) == ("^4.18.2", "^4.19.2")
+    assert "npm install" in result.hint
+
+    apply_remediation(tmp_path, dep("@babel/core", NPM, "7.23.0", "package.json"), "7.23.5")
+    apply_remediation(tmp_path, dep("jest", NPM, "~29.7.0", "package.json", dev=True), "29.8.0")
+    data = json.loads((tmp_path / "package.json").read_text())
+    assert data["dependencies"]["@babel/core"] == "7.23.5"
+    assert data["devDependencies"]["jest"] == "~29.8.0"
+
+
+@pytest.mark.parametrize(
+    "old, new, expected",
+    [
+        ("^4.18.2", "4.19.2", "^4.19.2"),
+        ("~4.18.2", "4.19.2", "~4.19.2"),
+        (">=4.18.2", "4.19.2", ">=4.19.2"),
+        ("4.18.2", "4.19.2", "4.19.2"),
+        ("=4.18.2", "4.19.2", "=4.19.2"),
+        ("4.18.x", "4.19.2", "^4.19.2"),
+        ("4.x", "4.19.2", "^4.19.2"),
+        ("*", "4.19.2", "^4.19.2"),
+        (">=4.18.2 <5", "4.19.2", "^4.19.2"),
+    ],
+)
+def test_rewrite_npm_range(old, new, expected):
+    from vulnscan.remediate import rewrite_npm_range
+
+    assert rewrite_npm_range(old, new) == expected
+
+
+def test_follow_up_hint_for_node_manifests(tmp_path: Path):
+    d = dep("express", NPM, "^4.18.2", "package.json")
+    assert "npm install" in follow_up_hint(tmp_path, d)
+    (tmp_path / "yarn.lock").write_text("")
+    assert "yarn install" in follow_up_hint(tmp_path, d)
+    (tmp_path / "yarn.lock").unlink()
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    assert "pnpm install" in follow_up_hint(tmp_path, d)

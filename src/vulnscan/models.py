@@ -13,6 +13,7 @@ from vulnscan.versioncmp import compare_versions
 PYPI = "PyPI"
 PACKAGIST = "Packagist"
 WORDPRESS = "WordPress"
+NPM = "npm"
 
 SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
 _SEVERITY_ALIASES = {"MODERATE": "MEDIUM", "IMPORTANT": "HIGH"}
