@@ -10,11 +10,13 @@ throttle.
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 
 import httpx
 
+from vulnscan.models import severity_rank
 from vulnscan.notify import AdvisoryNote, Notification, NotificationError, registry_name
 
 MAX_PAYLOAD_BYTES = 28 * 1024
@@ -22,8 +24,9 @@ SCHEMA = "http://adaptivecards.io/schemas/adaptive-card.json"
 CARD_CONTENT_TYPE = "application/vnd.microsoft.card.adaptive"
 NVD_URL = "https://nvd.nist.gov/vuln/detail/{cve}"
 MIN_SECONDS_BETWEEN_POSTS = 0.3
-MAX_ACTIONS = 6
-DETAILS_CHARS = 700
+MAX_ACTIONS = 3
+MAX_LISTED = 6
+SUMMARY_CHARS = 140
 
 _COLOUR = {
     "CRITICAL": "Attention",
@@ -32,11 +35,26 @@ _COLOUR = {
     "LOW": "Good",
     "UNKNOWN": "Default",
 }
-_EMOJI = {"CRITICAL": "🚨", "HIGH": "⚠️", "MEDIUM": "⚠️", "LOW": "ℹ️", "UNKNOWN": "❔"}
+_MARKDOWN_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_MARKDOWN_NOISE = re.compile(r"[#*_`~\[\]()<>|\\]+")
+_WHITESPACE = re.compile(r"\s+")
 
 
 def _plural(count: int, singular: str, plural: str) -> str:
     return f"{count} {singular if count == 1 else plural}"
+
+
+def _plain(text: str, limit: int = SUMMARY_CHARS) -> str:
+    """One line of plain text: Markdown control characters stripped, whitespace collapsed.
+
+    Teams renders Markdown inside text blocks, so a summary containing ``###`` or
+    backticks would otherwise change size or become code.
+    """
+    cleaned = _MARKDOWN_NOISE.sub("", _MARKDOWN_LINK.sub(r"\1", text))
+    cleaned = _WHITESPACE.sub(" ", cleaned).strip()
+    if len(cleaned) > limit:
+        cleaned = cleaned[: limit - 1].rstrip() + "…"
+    return cleaned
 
 
 def _text(text: str, **attrs: object) -> dict:
@@ -49,12 +67,12 @@ def _facts(pairs: list[tuple[str, str]]) -> dict:
 
 def _upgrade_fact(notification: Notification, registry: str) -> str:
     if not notification.versions_checked:
-        return f"Unknown: could not check {registry} for available versions"
+        return f"unknown ({registry} could not be checked)"
     if notification.nearest_safe:
         return f"{notification.nearest_safe} (available on {registry}; clears every advisory)"
     if notification.latest:
-        return f"No safe version is available on {registry} yet"
-    return f"No newer version found on {registry}"
+        return f"no safe version on {registry} yet"
+    return f"no newer version found on {registry}"
 
 
 def _latest_fact(notification: Notification) -> str:
@@ -64,78 +82,68 @@ def _latest_fact(notification: Notification) -> str:
     return f"{notification.latest} ({state})"
 
 
-def _fix_fact(note: AdvisoryNote, registry: str) -> str:
+def _fix_text(note: AdvisoryNote) -> str:
     if note.lowest_fix is None:
-        if note.fixed_versions:
-            return "No fix above the installed version; fixed only in " + ", ".join(
-                note.fixed_versions
-            )
-        return "No fix listed"
-    if note.fix_available is True:
-        return f"{note.lowest_fix} (available on {registry})"
+        return "no fix listed"
     if note.fix_available is False:
-        return f"{note.lowest_fix} (not yet available on {registry})"
-    return note.lowest_fix
+        return f"fixed in {note.lowest_fix} (not yet published)"
+    return f"fixed in {note.lowest_fix}"
 
 
-def _advisory_section(note: AdvisoryNote, registry: str, details_chars: int) -> dict:
-    heading = f"[{note.id}]({note.url})"
-    if note.summary:
-        heading += f": {note.summary}"
-    severity = note.severity + (f" ({note.cvss})" if note.cvss else "")
-    cves = ", ".join(f"[{cve}]({NVD_URL.format(cve=cve)})" for cve in note.cve_ids) or "none"
-    facts = [("Severity", severity), ("CVE", cves), ("Fixed in", _fix_fact(note, registry))]
-    if note.published:
-        facts.append(("Published", f"{note.published:%Y-%m-%d}"))
-    items = [_text(heading, weight="Bolder"), _facts(facts)]
-    details = " ".join(note.details.split())
-    if details and details_chars > 0:
-        if len(details) > details_chars:
-            details = details[: details_chars - 1].rstrip() + "…"
-        items.append(_text(details, isSubtle=True, spacing="Small"))
-    return {"type": "Container", "separator": True, "spacing": "Medium", "items": items}
+def _advisory_line(note: AdvisoryNote) -> dict:
+    """``**HIGH** [GHSA-x](url) · [CVE-y](url): summary · fixed in 1.2.3``, one line."""
+    parts = [f"**{note.severity}**", f"[{note.id}]({note.url})"]
+    parts += [f"[{cve}]({NVD_URL.format(cve=cve)})" for cve in note.cve_ids[:2]]
+    line = " · ".join(parts)
+    summary = _plain(note.summary)
+    if summary:
+        line += f": {summary}"
+    line += f" · {_fix_text(note)}"
+    return _text(line, spacing="Small")
 
 
-def _card(notification: Notification, limit: int, details_chars: int) -> dict:
+def _card(notification: Notification, listed: int) -> dict:
     registry = registry_name(notification.ecosystem)
-    package = notification.package
-    if notification.kind:
-        package += f" ({notification.ecosystem} {notification.kind})"
-    else:
-        package += f" ({notification.ecosystem})"
     count = _plural(len(notification.advisories), "new advisory", "new advisories")
+    version = notification.version or "(unknown version)"
+    headline = (
+        f"New vulnerability on {notification.project}: {notification.package} {version}: {count}"
+    )
+    kind = (
+        f"{notification.ecosystem} {notification.kind}"
+        if notification.kind
+        else notification.ecosystem
+    )
+    files = ", ".join(notification.source_files)
     installed = notification.version or "unknown"
     if notification.version:
         installed += f" (from {notification.version_source})"
-    body = [
+    body: list[dict] = [
+        _text(headline, size="Large", weight="Bolder", color=_COLOUR[notification.severity]),
         _text(
-            f"{_EMOJI[notification.severity]} {notification.package} "
-            f"{notification.version or '(unknown version)'}: {count}",
-            size="Large",
-            weight="Bolder",
-            color=_COLOUR[notification.severity],
+            f"{notification.severity} severity · {kind} · declared in {files}",
+            isSubtle=True,
+            spacing="None",
         ),
         _facts(
             [
-                ("Severity", f"{notification.severity} (worst of the new advisories)"),
-                ("Project", notification.project),
-                ("Package", package),
                 ("Installed", installed),
                 ("Upgrade to", _upgrade_fact(notification, registry)),
                 ("Latest release", _latest_fact(notification)),
-                ("Declared in", notification.declared_in_text),
             ]
         ),
     ]
-    shown = notification.advisories[:limit]
-    body += [_advisory_section(note, registry, details_chars) for note in shown]
+    ordered = sorted(notification.advisories, key=lambda n: severity_rank(n.severity))
+    shown = ordered[:listed]
+    body.append(_text("Advisories", weight="Bolder", spacing="Medium", separator=True))
+    body += [_advisory_line(note) for note in shown]
     left_out = len(notification.advisories) - len(shown)
     if left_out:
         body.append(
             _text(
-                f"…and {_plural(left_out, 'more advisory', 'more advisories')} not shown here; "
-                "see the full report or feed.",
+                f"…and {left_out} more. See the full report or feed for the complete list.",
                 isSubtle=True,
+                spacing="Small",
             )
         )
     actions = [
@@ -164,23 +172,19 @@ def _size(payload: dict) -> int:
 
 
 def render_card(notification: Notification) -> dict:
-    """Build the Adaptive Card for a notification, trimmed to fit the Teams size limit.
+    """Build the Adaptive Card announcing a notification.
 
-    Details are shortened first, then dropped, then advisories are cut from the end
-    (with a line saying how many were left out) until the message fits.
+    The card is deliberately short: a headline, three facts and one line per advisory
+    (at most :data:`MAX_LISTED`, each with links to the advisory and its CVE). Advisory
+    descriptions are never included. If the card still exceeds the Teams size limit, fewer
+    advisories are listed.
     """
-    total = len(notification.advisories)
-    for details_chars in (DETAILS_CHARS, 250, 0):
-        card = _card(notification, total, details_chars)
-        if _size(_envelope(card)) <= MAX_PAYLOAD_BYTES:
+    listed = min(len(notification.advisories), MAX_LISTED)
+    while True:
+        card = _card(notification, listed)
+        if _size(_envelope(card)) <= MAX_PAYLOAD_BYTES or listed <= 1:
             return card
-    limit = total
-    while limit > 1:
-        limit = max(1, limit // 2)
-        card = _card(notification, limit, 0)
-        if _size(_envelope(card)) <= MAX_PAYLOAD_BYTES:
-            return card
-    return card
+        listed = max(1, listed // 2)
 
 
 def render_payload(notification: Notification) -> dict:

@@ -1,11 +1,18 @@
 import json
+import re
 from datetime import UTC, datetime
 
 import httpx
 import pytest
 
 from vulnscan.models import PYPI, WORDPRESS, Declaration
-from vulnscan.msteams import MAX_PAYLOAD_BYTES, TeamsClient, render_card, render_payload
+from vulnscan.msteams import (
+    MAX_LISTED,
+    MAX_PAYLOAD_BYTES,
+    TeamsClient,
+    render_card,
+    render_payload,
+)
 from vulnscan.notify import AdvisoryNote, Notification, NotificationError
 
 CARD_TYPE = "application/vnd.microsoft.card.adaptive"
@@ -75,6 +82,23 @@ def _facts(card) -> dict[str, str]:
     return facts
 
 
+def _text_blocks(card) -> list[dict]:
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "TextBlock":
+                found.append(node)
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(card["body"])
+    return found
+
+
 def test_payload_is_a_teams_message_with_one_adaptive_card_attachment():
     payload = render_payload(_notification())
     assert payload["type"] == "message"
@@ -89,34 +113,43 @@ def test_payload_is_a_teams_message_with_one_adaptive_card_attachment():
     assert isinstance(card["body"], list) and card["body"]
 
 
-def test_card_headline_names_package_version_count_and_severity():
+def test_headline_names_project_package_version_and_count():
     card = render_card(_notification())
-    headline = card["body"][0]
-    assert headline["type"] == "TextBlock"
-    assert "authlib" in headline["text"] and "1.2.0" in headline["text"]
-    assert "2 new advisories" in headline["text"]
+    headline = _text_blocks(card)[0]
+    assert headline["text"] == "New vulnerability on mysite: authlib 1.2.0: 2 new advisories"
     assert headline["weight"] == "Bolder"
+    assert headline["size"] == "Large"
     assert headline["color"] == "Attention"
-    facts = _facts(card)
-    assert facts["Severity"].startswith("CRITICAL")
-    assert "mysite" in facts["Project"]
-    assert "1.2.0" in facts["Installed"] and "lock" in facts["Installed"]
-    assert "requirements/base.txt" in facts["Declared in"]
-    assert "requirements/production.txt" in facts["Declared in"]
+    single = render_card(_notification(advisories=(_note(),)))
+    assert _text_blocks(single)[0]["text"].endswith("authlib 1.2.0: 1 new advisory")
 
 
-def test_card_colour_follows_severity():
-    assert render_card(_notification(severity="HIGH"))["body"][0]["color"] == "Attention"
-    assert render_card(_notification(severity="MEDIUM"))["body"][0]["color"] == "Warning"
-    assert render_card(_notification(severity="LOW"))["body"][0]["color"] == "Good"
-    assert render_card(_notification(severity="UNKNOWN"))["body"][0]["color"] == "Default"
+def test_headline_colour_follows_severity():
+    for severity, colour in (
+        ("CRITICAL", "Attention"),
+        ("HIGH", "Attention"),
+        ("MEDIUM", "Warning"),
+        ("LOW", "Good"),
+        ("UNKNOWN", "Default"),
+    ):
+        assert _text_blocks(render_card(_notification(severity=severity)))[0]["color"] == colour
 
 
-def test_card_states_the_upgrade_that_fixes_everything_and_its_availability():
+def test_card_summarises_severity_ecosystem_and_declaring_files():
+    text = "\n".join(_texts(render_card(_notification())))
+    assert "CRITICAL" in text
+    assert "PyPI" in text
+    assert "requirements/base.txt" in text
+    assert "requirements/production.txt" in text
+
+
+def test_card_states_installed_upgrade_and_latest():
     facts = _facts(render_card(_notification()))
+    assert facts["Installed"].startswith("1.2.0")
     assert facts["Upgrade to"].startswith("1.4.0")
     assert "available" in facts["Upgrade to"].lower()
     assert "1.6.12" in facts["Latest release"]
+    assert set(facts) == {"Installed", "Upgrade to", "Latest release"}
 
     none_yet = _facts(
         render_card(_notification(nearest_safe=None, latest="1.2.1", latest_is_safe=False))
@@ -132,40 +165,41 @@ def test_card_states_the_upgrade_that_fixes_everything_and_its_availability():
             )
         )
     )
-    assert (
-        "could not" in unchecked["Upgrade to"].lower()
-        or "unknown" in unchecked["Upgrade to"].lower()
-    )
+    assert "unknown" in unchecked["Upgrade to"].lower()
 
 
-def test_card_describes_each_advisory_with_links_fix_and_severity():
+def test_each_advisory_is_one_line_with_links_severity_and_fix():
     card = render_card(_notification())
+    lines = [b["text"] for b in _text_blocks(card) if "GHSA-A" in b["text"]]
+    assert len(lines) == 2
+    second, first = lines  # CRITICAL GHSA-A2 sorts above HIGH GHSA-A1
+    assert "[GHSA-A1](https://osv.dev/vulnerability/GHSA-A1)" in first
+    assert "[CVE-2025-1](https://nvd.nist.gov/vuln/detail/CVE-2025-1)" in first
+    assert "HIGH" in first
+    assert "JWT confusion" in first
+    assert "1.3.1" in first
+    assert "CRITICAL" in second and "Second" in second
+    # No descriptions, CVSS vectors or dates: this is an announcement.
     text = "\n".join(_texts(card))
-    assert "[GHSA-A1](https://osv.dev/vulnerability/GHSA-A1)" in text
-    assert "JWT confusion" in text
-    assert "Long description of the problem." in text
-    assert "[CVE-2025-1](https://nvd.nist.gov/vuln/detail/CVE-2025-1)" in text
-    assert "CVSS:3.1/AV:N" in text
-    assert "2025-03-01" in text
-    assert "GHSA-A2" in text and "Second" in text
-    sections = [e for e in card["body"] if e.get("type") == "Container"]
-    assert len(sections) == 2
-    first_facts = {
-        f["title"]: f["value"]
-        for e in sections[0]["items"]
-        if e.get("type") == "FactSet"
-        for f in e["facts"]
-    }
-    assert first_facts["Severity"].startswith("HIGH")
-    assert first_facts["Fixed in"].startswith("1.3.1")
-    assert "available" in first_facts["Fixed in"].lower()
-    actions = card["actions"]
-    assert [a["type"] for a in actions] == ["Action.OpenUrl", "Action.OpenUrl"]
-    assert actions[0]["url"] == "https://osv.dev/vulnerability/GHSA-A1"
-    assert "GHSA-A1" in actions[0]["title"]
+    assert "Long description" not in text
+    assert "CVSS:" not in text
+    assert "2025-03-01" not in text
 
 
-def test_card_explains_missing_and_unavailable_fixes():
+def test_advisory_lines_have_consistent_size_and_no_markdown_from_sources():
+    noisy = _note(summary="### Details `script` **bold** [x](y) stolen")
+    card = render_card(_notification(advisories=(noisy,)))
+    blocks = _text_blocks(card)
+    assert all(b.get("size", "Default") in ("Default", "Small") for b in blocks[1:])
+    line = next(b["text"] for b in blocks if "stolen" in b["text"])
+    assert "###" not in line
+    assert "`" not in line
+    assert "**bold**" not in line
+    assert "[x](y)" not in line
+    assert "Details script bold x stolen" in line
+
+
+def test_advisory_line_explains_missing_and_unavailable_fixes():
     card = render_card(
         _notification(
             advisories=(
@@ -175,18 +209,14 @@ def test_card_explains_missing_and_unavailable_fixes():
             )
         )
     )
-    values = [
-        f["value"]
-        for e in card["body"]
-        if e.get("type") == "Container"
-        for i in e["items"]
-        if i.get("type") == "FactSet"
-        for f in i["facts"]
-        if f["title"] == "Fixed in"
-    ]
-    assert "no fix" in values[0].lower()
-    assert "not" in values[1].lower() and "available" in values[1].lower()
-    assert "1.3.1" in values[2] and "available" not in values[2].lower()
+    lines = {
+        re.search(r"\[(GHSA-A\d)\]", b["text"]).group(1): b["text"]
+        for b in _text_blocks(card)
+        if "GHSA-A" in b["text"]
+    }
+    assert "no fix" in lines["GHSA-A1"].lower()
+    assert "not yet" in lines["GHSA-A2"].lower()
+    assert "1.3.1" in lines["GHSA-A3"]
 
 
 def test_card_for_wordpress_plugin_mentions_kind():
@@ -196,17 +226,28 @@ def test_card_for_wordpress_plugin_mentions_kind():
     assert "plugin" in "\n".join(_texts(card)).lower()
 
 
-def test_card_stays_under_the_teams_size_limit():
+def test_card_lists_at_most_a_few_advisories_and_says_how_many_more():
     many = tuple(
         _note(guid=f"g{i}", id=f"GHSA-{i:04d}", details="x" * 3000, summary=f"Issue {i}")
         for i in range(60)
     )
     payload = render_payload(_notification(advisories=many))
-    encoded = json.dumps(payload).encode("utf-8")
-    assert len(encoded) <= MAX_PAYLOAD_BYTES
-    text = "\n".join(_texts(payload))
+    assert len(json.dumps(payload).encode("utf-8")) <= MAX_PAYLOAD_BYTES
+    card = payload["attachments"][0]["content"]
+    listed = [b for b in _text_blocks(card) if "GHSA-" in b["text"]]
+    assert 1 < len(listed) <= MAX_LISTED
+    text = "\n".join(_texts(card))
     assert "GHSA-0000" in text
-    assert "more" in text.lower()  # tells the reader some advisories were left out
+    assert f"{60 - len(listed)} more" in text
+
+
+def test_actions_open_the_first_advisories():
+    actions = render_card(_notification())["actions"]
+    assert [a["type"] for a in actions] == ["Action.OpenUrl", "Action.OpenUrl"]
+    assert {a["url"] for a in actions} == {"https://osv.dev/vulnerability/GHSA-A1"}
+    assert [a["title"] for a in actions] == ["Open GHSA-A2", "Open GHSA-A1"]
+    many = tuple(_note(guid=f"g{i}", id=f"GHSA-{i}") for i in range(10))
+    assert len(render_card(_notification(advisories=many))["actions"]) <= 3
 
 
 # --- client ---------------------------------------------------------------------------------
@@ -268,3 +309,20 @@ def test_client_spaces_out_consecutive_sends():
     client.send(_notification())
     assert len(pauses) >= 2
     assert all(p >= 0.25 for p in pauses)
+
+
+def test_advisories_are_listed_most_severe_first():
+    notes = (
+        _note(guid="g1", id="GHSA-LOW", severity="LOW"),
+        _note(guid="g2", id="GHSA-CRIT", severity="CRITICAL"),
+        _note(guid="g3", id="GHSA-MED", severity="MEDIUM"),
+        _note(guid="g4", id="GHSA-HIGH", severity="HIGH"),
+    )
+    card = render_card(_notification(advisories=notes))
+    ids = [
+        re.search(r"\[(GHSA-\w+)\]", b["text"]).group(1)
+        for b in _text_blocks(card)
+        if "[GHSA-" in b["text"]
+    ]
+    assert ids == ["GHSA-CRIT", "GHSA-HIGH", "GHSA-MED", "GHSA-LOW"]
+    assert card["actions"][0]["title"] == "Open GHSA-CRIT"

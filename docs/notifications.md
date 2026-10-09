@@ -138,22 +138,25 @@ Anyone with the URL can post to the channel, so keep it out of version
 control. Legacy Microsoft 365 connector URLs (`*.webhook.office.com`) are
 accepted too while they still work.
 
-Each notification is one message carrying one Adaptive Card:
+Each notification is one message carrying one Adaptive Card, kept short
+enough to take in at a glance:
 
-- a colour-coded headline (red for critical and high, amber for medium,
-  green for low) with the package, version and number of new advisories;
-- a fact table: severity, project, package, installed version, the upgrade
-  that clears every advisory and whether it is available, the latest
-  release, and every declaring manifest;
-- a section per advisory with the linked id and summary, severity and CVSS
-  vector, linked CVE, lowest available fix, publication date and the
-  description;
-- buttons that open the first six advisories.
+- a bold headline, coloured by severity (red for critical and high, amber
+  for medium, green for low): `New vulnerability on mysite: authlib 1.2.0:
+  2 new advisories`;
+- a subtle line with the severity, ecosystem and the manifests that declare
+  the package;
+- three facts: the installed version, the upgrade that clears every
+  advisory and whether it is available, and the latest release;
+- one line per advisory, most severe first, with the severity, the advisory
+  id linked to its full record, the CVE ids linked to NVD, a one-line
+  summary and the lowest fixed version. Advisory descriptions are never
+  included and any Markdown in summaries is stripped, so the text stays one
+  size;
+- buttons that open the first three advisories.
 
-Teams rejects messages over 28 KB, so descriptions are shortened and, if
-need be, trailing advisories are dropped with a line saying how many were
-left out. Posts are spaced to stay under the webhook's four-per-second
-limit.
+At most six advisories are listed; a final line says how many more there
+are. Posts are spaced to stay under the webhook's four-per-second limit.
 
 ## Running as a service
 
