@@ -1,6 +1,6 @@
 [project]
 name = "vulnscan"
-version = "1.1.0"
+dynamic = ["version"]
 description = "Scan Python, PHP, WordPress and Node.js project dependencies for known vulnerabilities, with feeds, reports, upgrades and notifications"
 readme = "README.md"
 license = "MIT"
@@ -34,6 +34,9 @@ vulnscan = "vulnscan.cli:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+path = "src/vulnscan/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/vulnscan"]
 
@@ -65,6 +68,6 @@ select = ["E", "F", "I", "UP", "B"]
 version = "1.1.0"
 version_files = [
     "__version__.py",
-    "pyproject.toml:version"
+    "src/vulnscan/__init__.py:__version__"
 ]
 update_changelog_on_bump = true
