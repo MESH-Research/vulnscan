@@ -1,3 +1,9 @@
+## 1.3.0 (2026-10-09)
+
+### Feat
+
+- **msteams**: redesign the Teams card as a short, consistent announcement
+
 ## 1.2.0 (2026-10-09)
 
 ### Feat
