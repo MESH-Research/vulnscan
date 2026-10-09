@@ -1,3 +1,13 @@
+## 1.2.0 (2026-10-09)
+
+### Feat
+
+- **parsers**: scan npm dependencies from package.json
+
+### Fix
+
+- **remediate**: only rewrite dependencies inside dependency tables of pyproject.toml and Pipfile
+
 ## 1.1.0 (2026-10-08)
 
 ### Feat
