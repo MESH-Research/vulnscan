@@ -237,13 +237,85 @@ def _edit_requirement_lines(
 
 
 _TOML_STRING = re.compile(r'"([^"\\]*)"|\'([^\']*)\'')
+_TOML_HEADER = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(?:#.*)?$")
+_TOML_KEY = re.compile(r"^\s*((?:\"[^\"]*\"|'[^']*'|[A-Za-z0-9_.\-])+)\s*=")
+
+# PEP 508 requirement strings live only under these (table, key) pairs; a key of "*" means
+# any key in the table.
+_REQUIREMENT_CONTEXTS = {
+    ("project", "dependencies"),
+    ("project", "optional-dependencies"),
+    ("project.optional-dependencies", "*"),
+    ("dependency-groups", "*"),
+    ("build-system", "requires"),
+    ("tool.uv", "dev-dependencies"),
+    ("tool.uv", "constraint-dependencies"),
+    ("tool.uv", "override-dependencies"),
+}
+
+
+def _toml_line_contexts(text: str) -> list[tuple[int, str, str]]:
+    """(line start offset, table, key) for every line of a TOML document.
+
+    Tracks bracket depth outside strings so that lines inside multi-line arrays keep the
+    key that opened them, and table headers are only recognised at depth zero.
+    """
+    contexts: list[tuple[int, str, str]] = []
+    table = key = ""
+    depth = offset = 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if depth == 0 and not stripped.startswith("#"):
+            header = _TOML_HEADER.match(line)
+            if header:
+                table, key = header.group(1).strip().strip("\"'"), ""
+            else:
+                match = _TOML_KEY.match(line)
+                if match:
+                    key = match.group(1).strip("\"'")
+        contexts.append((offset, table, key))
+        bare = _TOML_STRING.sub('""', line).split("#", 1)[0]
+        depth += bare.count("[") + bare.count("{") - bare.count("]") - bare.count("}")
+        depth = max(depth, 0)
+        offset += len(line)
+    return contexts
+
+
+def _context_at(contexts: list[tuple[int, str, str]], offset: int) -> tuple[str, str]:
+    table = key = ""
+    for start, table_here, key_here in contexts:
+        if start > offset:
+            break
+        table, key = table_here, key_here
+    return table, key
+
+
+def _holds_requirements(table: str, key: str) -> bool:
+    return (table, key) in _REQUIREMENT_CONTEXTS or (table, "*") in _REQUIREMENT_CONTEXTS
+
+
+def _is_poetry_dependency_table(table: str) -> bool:
+    return table.startswith("tool.poetry") and table.endswith("dependencies")
 
 
 def _edit_pyproject(
     text: str, dep: Dependency, new_version: str, source_file: str
 ) -> tuple[str, str, str]:
+    """Rewrite the dependency in the tables that declare dependencies, and nowhere else.
+
+    Strings elsewhere (``[tool.djlint] profile = "django"``) may well parse as a
+    requirement, so only PEP 621 / PEP 735 / uv arrays and Poetry dependency tables are
+    considered.
+    """
+    contexts = _toml_line_contexts(text)
     # PEP 621 / dependency-group style: a quoted PEP 508 requirement string.
     for match in _TOML_STRING.finditer(text):
+        table, key = _context_at(contexts, match.start())
+        if not _holds_requirements(table, key):
+            continue
+        line_before = text[text.rfind("\n", 0, match.start()) + 1 : match.start()]
+        if re.search(r"include-group\s*=\s*$", line_before):
+            continue
         literal = match.group(1) if match.group(1) is not None else match.group(2)
         rewritten = _rewrite_requirement_text(literal, dep.name, new_version)
         if rewritten is not None:
@@ -258,8 +330,10 @@ def _edit_pyproject(
             re.IGNORECASE | re.MULTILINE,
         ),
     ):
-        match = pattern.search(text)
-        if match:
+        for match in pattern.finditer(text):
+            table, _key = _context_at(contexts, match.start())
+            if not _is_poetry_dependency_table(table):
+                continue
             old = match.group(2)
             new = (
                 rewrite_composer_constraint(old, new_version)
@@ -270,9 +344,14 @@ def _edit_pyproject(
     raise RemediationError(f"{dep.name} not found in {source_file}")
 
 
+_PIPFILE_TABLES = {"packages", "dev-packages"}
+
+
 def _edit_pipfile(
     text: str, dep: Dependency, new_version: str, source_file: str
 ) -> tuple[str, str, str]:
+    """Rewrite the dependency under ``[packages]`` or ``[dev-packages]`` only."""
+    contexts = _toml_line_contexts(text)
     name = _name_pattern(dep.name)
     for pattern in (
         re.compile(r'^(\s*"?' + name + r'"?\s*=\s*")([^"]*)(")', re.IGNORECASE | re.MULTILINE),
@@ -281,8 +360,10 @@ def _edit_pipfile(
             re.IGNORECASE | re.MULTILINE,
         ),
     ):
-        match = pattern.search(text)
-        if match:
+        for match in pattern.finditer(text):
+            table, _key = _context_at(contexts, match.start())
+            if table not in _PIPFILE_TABLES:
+                continue
             old = match.group(2)
             new = rewrite_pep508_specifier("" if old.strip() == "*" else old, new_version)
             return text[: match.start(2)] + new + text[match.end(2) :], old, new

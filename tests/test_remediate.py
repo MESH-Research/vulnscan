@@ -453,3 +453,97 @@ def test_follow_up_hint_for_node_manifests(tmp_path: Path):
     (tmp_path / "yarn.lock").unlink()
     (tmp_path / "pnpm-lock.yaml").write_text("")
     assert "pnpm install" in follow_up_hint(tmp_path, d)
+
+
+# --- pyproject.toml: only dependency tables are edited ----------------------------------------
+
+
+def test_pyproject_config_value_that_looks_like_a_package_is_left_alone_poetry(tmp_path: Path):
+    """A `profile = "django"` setting must not be mistaken for a bare django requirement."""
+    original = (
+        "[tool.djlint]\n"
+        'profile = "django"\n'
+        "\n"
+        "[tool.poetry.dependencies]\n"
+        'python = "^3.12"\n'
+        'django = "6.0.7"\n'
+    )
+    (tmp_path / "pyproject.toml").write_text(original)
+    result = apply_remediation(tmp_path, dep("django", PYPI, "6.0.7", "pyproject.toml"), "6.1.2")
+    assert (tmp_path / "pyproject.toml").read_text() == original.replace(
+        'django = "6.0.7"', 'django = "6.1.2"'
+    )
+    assert (result.old_constraint, result.new_constraint) == ("6.0.7", "6.1.2")
+
+
+def test_pyproject_config_value_that_looks_like_a_package_is_left_alone_pep621(tmp_path: Path):
+    original = (
+        "[tool.djlint]\n"
+        'profile = "django"\n'
+        "\n"
+        "[project]\n"
+        'name = "demo"\n'
+        'dependencies = ["django==6.0.7"]\n'
+    )
+    (tmp_path / "pyproject.toml").write_text(original)
+    apply_remediation(tmp_path, dep("django", PYPI, "==6.0.7", "pyproject.toml"), "6.1.2")
+    assert (tmp_path / "pyproject.toml").read_text() == original.replace(
+        '"django==6.0.7"', '"django==6.1.2"'
+    )
+
+
+def test_pyproject_bare_requirement_is_edited_not_the_lookalike_setting(tmp_path: Path):
+    original = (
+        "[tool.djlint]\n"
+        'profile = "django"\n'
+        "\n"
+        "[project]\n"
+        'dependencies = ["django"]\n'
+        "\n"
+        "[dependency-groups]\n"
+        'django = [{include-group = "django"}, "pytest-django"]\n'
+    )
+    (tmp_path / "pyproject.toml").write_text(original)
+    apply_remediation(tmp_path, dep("django", PYPI, "", "pyproject.toml"), "6.1.2")
+    assert (tmp_path / "pyproject.toml").read_text() == original.replace(
+        'dependencies = ["django"]', 'dependencies = ["django>=6.1.2"]'
+    )
+
+
+def test_pyproject_key_named_like_a_package_outside_poetry_tables_is_left_alone(tmp_path: Path):
+    original = (
+        "[tool.custom]\n"
+        'django = "legacy"\n'
+        "\n"
+        "[tool.poetry.group.dev.dependencies]\n"
+        'django = {version = "^6.0", extras = ["argon2"]}\n'
+    )
+    (tmp_path / "pyproject.toml").write_text(original)
+    apply_remediation(tmp_path, dep("django", PYPI, "^6.0", "pyproject.toml", dev=True), "6.1.2")
+    assert (tmp_path / "pyproject.toml").read_text() == original.replace(
+        'version = "^6.0"', 'version = "^6.1.2"'
+    )
+
+
+def test_pyproject_requirement_outside_dependency_tables_is_not_found(tmp_path: Path):
+    (tmp_path / "pyproject.toml").write_text('[tool.djlint]\nprofile = "django"\n')
+    with pytest.raises(RemediationError, match="django"):
+        apply_remediation(tmp_path, dep("django", PYPI, "", "pyproject.toml"), "6.1.2")
+
+
+def test_pipfile_script_named_like_a_package_is_left_alone(tmp_path: Path):
+    original = (
+        "[scripts]\n"
+        'django = "python manage.py runserver"\n'
+        "\n"
+        "[packages]\n"
+        'django = "==6.0.7"\n'
+        "\n"
+        "[requires]\n"
+        'python_version = "3.12"\n'
+    )
+    (tmp_path / "Pipfile").write_text(original)
+    apply_remediation(tmp_path, dep("django", PYPI, "==6.0.7", "Pipfile"), "6.1.2")
+    assert (tmp_path / "Pipfile").read_text() == original.replace(
+        'django = "==6.0.7"', 'django = "==6.1.2"'
+    )
