@@ -30,8 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vulnscan",
         description=(
-            "Scan a Python or PHP project's direct dependencies for known security "
-            "advisories. Without flags, opens the interactive TUI."
+            "Scan a Python, PHP, WordPress or Node.js project's direct dependencies for "
+            "known security advisories. Without flags, opens the interactive TUI."
         ),
         epilog=(
             "Settings come from VULNSCAN_* environment variables or a .env file. "
