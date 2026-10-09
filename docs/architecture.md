@@ -10,7 +10,7 @@ discover manifests ──> parse ──> resolve versions ──> merge declarat
    .vulnscanignore,                              ┌───────────┴───────────┐
    VULNSCAN_IGNORE_DIRS,                         ▼                       ▼
    composer install paths                   OSV.dev (PyPI,       Wordfence (WordPress
-                                            Packagist)           core/plugins/themes)
+                                            Packagist, npm)      core/plugins/themes)
                                                  └───────────┬───────────┘
                                                              ▼
                                                     Finding per dependency
@@ -30,9 +30,13 @@ in `parsers/__init__.py`; parsers return `Dependency` records with the
 constraint as written and no version yet.
 
 `resolve_dependency` then fills in the version from, in order of
-preference, a lock file in the same directory (`composer.lock`, `uv.lock`,
-`poetry.lock`, `Pipfile.lock`), an exact pin in the manifest, or the lower
-bound of the constraint. A dependency with no determinable version is
+preference, a lock file in the same directory (`composer.lock`,
+`package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`,
+`uv.lock`, `poetry.lock`, `Pipfile.lock`), an exact pin in the manifest, or
+the lower bound of the constraint. Constraint syntax is handled per
+ecosystem: PEP 440 specifiers, Composer constraints and npm semver ranges.
+`yarn.lock` and `pnpm-lock.yaml` are read with small line-based parsers
+rather than a YAML library. A dependency with no determinable version is
 reported as a warning and not queried unless
 `VULNSCAN_QUERY_UNKNOWN_VERSIONS` is on.
 

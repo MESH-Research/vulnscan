@@ -59,6 +59,11 @@ scanner, to feeds, CLI and TUI. Each task starts with failing tests.
 - [x] Task 23: `msteams.py` Adaptive Card renderer and webhook client, `--msteams`, `VULNSCAN_INTERVAL_MINUTES` rename
 - [x] Task 24: Docs for both channels
 
+### Phase 7: Node.js
+- [x] Task 25: `package.json` parser, npm semver resolution, npm comparison rules (`parsers/node.py`, `parsers/versions.py`, `versioncmp.py`)
+- [x] Task 26: `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` readers (`parsers/lockfiles.py`)
+- [x] Task 27: npm registry versions and `package.json` rewriting (`registry.py`, `remediate.py`), docs
+
 ### Checkpoint: Phase 5
 - [x] `uv run pytest` and `uv run ruff check .` clean, `mkdocs build --strict` clean
 

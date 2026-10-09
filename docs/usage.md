@@ -78,6 +78,19 @@ uv run vulnscan --ignore web/app/plugins/graveyard --ignore "*-old" --path /path
 Or list patterns in a `.vulnscanignore` file in the project root. See
 [Ignoring directories](ignoring.md).
 
+## Supported manifests
+
+| Ecosystem | Manifests | Lock files used for versions |
+|-----------|-----------|------------------------------|
+| Python (PyPI) | `pyproject.toml` (PEP 621, PEP 735 dependency groups, Poetry), `requirements*.txt` and `requirements/*.txt` with `-r` includes, `Pipfile`, `setup.cfg` | `uv.lock`, `poetry.lock`, `Pipfile.lock` |
+| PHP (Packagist) | `composer.json` | `composer.lock` |
+| WordPress | `composer.json` entries for `wp-plugin/*`, `wp-theme/*`, `wpackagist-plugin/*`, `wpackagist-theme/*`, `roots/wordpress`, `johnpbloch/wordpress`, and any package the lock file types as `wordpress-plugin`, `wordpress-muplugin`, `wordpress-theme` or `wordpress-core` | `composer.lock` |
+| Node.js (npm) | `package.json` (`dependencies`, `optionalDependencies`, `devDependencies`; `npm:` aliases followed; git, path, tarball and workspace specs skipped; `peerDependencies` ignored) | `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock` (classic and Berry), `pnpm-lock.yaml` (root importer) |
+
+Only the versions of direct dependencies are read from lock files; for
+`yarn.lock`, a package that appears at several versions is taken at the
+first one listed.
+
 ## A package declared in several files
 
 Projects often declare the same package more than once: a

@@ -27,7 +27,7 @@ vulnscan --help
 
 ## Wordfence API key (WordPress only)
 
-PyPI and Packagist lookups need no credentials. WordPress packages are
+PyPI, Packagist and npm lookups need no credentials. WordPress packages are
 matched against the Wordfence Intelligence feed, which requires a free API
 key: create an account at wordfence.com, open **Wordfence Intelligence** in
 the dashboard, generate a key under **Integrations**, and put it in `.env`:

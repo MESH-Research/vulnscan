@@ -2,7 +2,7 @@
 
 ## Objective
 
-A terminal application that scans a Python, PHP or WordPress project's
+A terminal application that scans a Python, PHP, WordPress or Node.js project's
 dependency manifests, looks up known security vulnerabilities for each
 *direct* dependency, shows them in a TUI, publishes them as RSS 2.0 and
 Atom 1.0 feeds or Markdown and plain-text reports, rewrites manifests to
@@ -60,8 +60,10 @@ src/vulnscan/
   parsers/
     __init__.py     manifest discovery and project parsing
     composer.py     composer.json
+    node.py         package.json
     python.py       pyproject.toml, requirements*.txt, Pipfile, setup.cfg
-    lockfiles.py    composer.lock, uv.lock, poetry.lock, Pipfile.lock
+    lockfiles.py    composer.lock, package-lock.json, yarn.lock, pnpm-lock.yaml,
+                    uv.lock, poetry.lock, Pipfile.lock
     versions.py     constraint -> exact / minimum version resolution
   osv.py            OSV.dev client and response parsing
   wordfence.py      Wordfence Intelligence client (WordPress core/plugins/themes)
@@ -86,7 +88,7 @@ class Dependency:
     """A direct dependency declared in a manifest."""
 
     name: str
-    ecosystem: str  # "PyPI", "Packagist" or "WordPress"
+    ecosystem: str  # "PyPI", "Packagist", "WordPress" or "npm"
     constraint: str  # constraint as written, "" if none
     version: str | None  # resolved exact version, if known
     version_source: str  # "lock" | "pinned" | "constraint" | "unknown"
@@ -122,15 +124,19 @@ class Dependency:
 
 1. Configuration from environment variables, with a `.env` file as a
    fallback. CLI flags override both. Keys are prefixed `VULNSCAN_`.
-2. Manifests recognised: `composer.json`, `pyproject.toml`
-   (PEP 621 `project.dependencies`, optional dependencies, PEP 735
-   dependency groups, Poetry sections), `requirements*.txt` (with `-r`
+2. Manifests recognised: `composer.json`, `package.json` (`dependencies`,
+   `optionalDependencies`, `devDependencies`; `npm:` aliases followed; git,
+   path, tarball and workspace specs skipped), `pyproject.toml` (PEP 621
+   `project.dependencies`, optional dependencies, PEP 735 dependency groups,
+   Poetry sections), `requirements*.txt` and `requirements/*.txt` (with `-r`
    includes), `Pipfile`, `setup.cfg`.
 3. Exact versions resolved, in priority order, from: a lock file in the same
-   directory, an exact pin in the manifest, the lower bound of the
-   constraint. Dependencies with no determinable version are reported as
+   directory (`composer.lock`, `package-lock.json`, `npm-shrinkwrap.json`,
+   `yarn.lock`, `pnpm-lock.yaml`, `uv.lock`, `poetry.lock`, `Pipfile.lock`),
+   an exact pin in the manifest, the lower bound of the constraint (PEP 440,
+   Composer or npm semver syntax). Dependencies with no determinable version are reported as
    warnings and not queried (configurable).
-4. Vulnerabilities for PyPI and Packagist packages fetched from OSV.dev by
+4. Vulnerabilities for PyPI, Packagist and npm packages fetched from OSV.dev by
    package, ecosystem and version; for WordPress core, plugins and themes
    from the Wordfence Intelligence feed, cached locally and refreshed
    conditionally no more often than a configurable interval. Each is

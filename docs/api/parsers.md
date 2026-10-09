@@ -10,6 +10,10 @@
 
 ::: vulnscan.parsers.composer
 
+## vulnscan.parsers.node
+
+::: vulnscan.parsers.node
+
 ## vulnscan.parsers.lockfiles
 
 ::: vulnscan.parsers.lockfiles

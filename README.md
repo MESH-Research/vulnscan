@@ -1,20 +1,23 @@
 # vulnscan
 
-Point vulnscan at a Python, PHP or WordPress project and it tells you which
+Point vulnscan at a Python, PHP, WordPress or Node.js project and it tells you which
 of your direct dependencies have known security advisories, which versions
 fix them, and every manifest in which each one is declared. It can rewrite
 those manifests for you, publish the results as RSS and Atom feeds or as
 Markdown and plain-text reports, and push a notification to your phone or a
 Microsoft Teams channel the first time a new advisory appears.
 
-- **Sources:** [OSV.dev](https://osv.dev) for PyPI and Packagist packages (no
-  key needed) and [Wordfence Intelligence](https://www.wordfence.com/threat-intel/)
-  for WordPress core, plugins and themes installed through Composer (free
-  API key).
-- **Manifests:** `composer.json`; `pyproject.toml` (PEP 621, PEP 735
-  dependency groups, Poetry); `requirements*.txt` and `requirements/*.txt`
-  with `-r` includes; `Pipfile`; `setup.cfg`. Installed versions come from
-  `composer.lock`, `uv.lock`, `poetry.lock` and `Pipfile.lock`.
+- **Sources:** [OSV.dev](https://osv.dev) for PyPI, Packagist and npm
+  packages (no key needed) and
+  [Wordfence Intelligence](https://www.wordfence.com/threat-intel/) for
+  WordPress core, plugins and themes installed through Composer (free API
+  key).
+- **Manifests:** `composer.json`; `package.json`; `pyproject.toml` (PEP 621,
+  PEP 735 dependency groups, Poetry); `requirements*.txt` and
+  `requirements/*.txt` with `-r` includes; `Pipfile`; `setup.cfg`. Installed
+  versions come from `composer.lock`, `package-lock.json`,
+  `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `uv.lock`,
+  `poetry.lock` and `Pipfile.lock`.
 - **Interfaces:** an interactive terminal UI; non-interactive modes for
   cron; a continuous watch mode that notifies [ntfy](https://ntfy.sh) and/or
   Microsoft Teams.
@@ -107,7 +110,7 @@ whether it is still affected, and the manifests that declare the package.
 For each advisory it gives a link to the full record, the linked CVE id,
 severity with CVSS vector, a summary and description, the lowest fixed
 version above the installed one and whether that version is actually
-available on PyPI, Packagist or wordpress.org. On Teams this is an Adaptive
+available on PyPI, Packagist, npm or wordpress.org. On Teams this is an Adaptive
 Card with colour-coded severity and buttons that open the advisories; on
 ntfy it is a plain-text message whose priority follows the severity.
 
@@ -147,10 +150,11 @@ no advisory affects, so `symfony/http-kernel` 5.4.0 goes to 5.4.20, not
 6.x) or the **latest release**, saying if even that is still affected.
 Pre-release and yanked versions are never offered. The constraint is
 rewritten in every manifest that declares the package, keeping the operator
-style (`^12.2` becomes `^16.3`, `Django>=4.2,<5` becomes
-`Django>=4.2.11,<5`) and touching nothing else in the file. All rewrites are
-computed before any file is written. Lock files are not touched; the output
-tells you which `composer update`, `uv lock`, `poetry lock`, `pipenv lock` or
+style (`^12.2` becomes `^16.3`, `~4.18.2` becomes `~4.19.2`, `Django>=4.2,<5`
+becomes `Django>=4.2.11,<5`) and touching nothing else in the file. All
+rewrites are computed before any file is written. Lock files are not
+touched; the output tells you which `composer update`, `npm install`, `yarn
+install`, `pnpm install`, `uv lock`, `poetry lock`, `pipenv lock` or
 `pip install -r` command to run next.
 
 ### Ignoring directories
@@ -244,7 +248,10 @@ lower bound at all are listed as warnings and not queried unless
 `VULNSCAN_QUERY_UNKNOWN_VERSIONS` is enabled. Packages installed from a
 custom source (a VCS or `package` repository rather than Packagist or
 wordpress.org) are still looked up by name but flagged in the warnings,
-because no advisory database can be relied on to cover them.
+because no advisory database can be relied on to cover them. In
+`package.json`, dependencies given as git URLs, local paths, tarballs or
+workspace links are skipped, and `npm:` aliases are looked up under the
+package they alias.
 
 ## Development
 

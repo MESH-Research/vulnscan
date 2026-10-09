@@ -12,9 +12,9 @@ expect an acknowledgement within a week.
 ## What vulnscan does with your data
 
 - Package names and versions from your manifests are sent to OSV.dev
-  (PyPI and Packagist packages). When upgrading, and in notification mode,
-  package names are also sent to PyPI, Packagist or wordpress.org to list
-  the available versions.
+  (PyPI, Packagist and npm packages). When upgrading, and in notification
+  mode, package names are also sent to PyPI, Packagist, the npm registry or
+  wordpress.org to list the available versions.
 - WordPress packages are matched locally against a cached copy of the
   Wordfence Intelligence feed; only the download of that feed (with your API
   key) contacts Wordfence.

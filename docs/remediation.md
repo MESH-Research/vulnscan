@@ -2,8 +2,8 @@
 
 Select a vulnerable dependency in the TUI and press `u`, or run
 `--remediate PACKAGE` from the command line. vulnscan looks up the versions
-published for the package (PyPI, Packagist or wordpress.org) and offers two
-choices:
+published for the package (PyPI, Packagist, npm or wordpress.org) and offers
+two choices:
 
 - **Nearest safe version**: the smallest upgrade above the current version
   that is outside every known advisory's affected range. This keeps you as
@@ -20,17 +20,21 @@ The constraint is rewritten in **every manifest that declares the package**
 at that version, and nothing else in those files changes: ordering, comments
 and indentation are preserved. The operator style is kept:
 
-| Before | After (upgrade to 4.1.4 / 16.3 / 2.32.4 / 4.2.11) |
+| Before | After |
 |--------|------|
 | `3.13.4` | `4.1.4` |
 | `^12.2` | `^16.3` |
+| `~4.18.2` (npm) | `~4.19.2` |
+| `4.x` (npm) | `^4.19.2` |
 | `requests==2.30.0` | `requests==2.32.4` |
 | `Django>=4.2,<5` | `Django>=4.2.11,<5` |
 
-Supported manifests: `composer.json`, `requirements*.txt` and
-`requirements/*.txt`, `pyproject.toml` (PEP 621 strings, PEP 735 groups and
-Poetry tables), `Pipfile` and `setup.cfg`. Constraints that track a
-development branch (`dev-main`) are left for you to change by hand.
+Supported manifests: `composer.json`, `package.json`, `requirements*.txt`
+and `requirements/*.txt`, `pyproject.toml` (PEP 621 strings, PEP 735 groups
+and Poetry tables), `Pipfile` and `setup.cfg`. Composer constraints that
+track a development branch (`dev-main`) are left for you to change by hand.
+npm ranges that are not a single exact, `^`, `~`, `>=` or `=` version
+(`x` ranges, `*`, hyphen ranges, `||` alternatives) become a caret range.
 
 Every rewrite is computed before any file is written. If one of the
 declaring files cannot be edited (it has changed since the scan, or its
@@ -40,10 +44,12 @@ format is unsupported) nothing is written and the error names the file.
 
 Lock files are not touched. The status bar (or the command line output)
 tells you the command to run next for each manifest, such as
-`composer update wp-plugin/elementor --with-dependencies`, `uv lock && uv
-sync`, `poetry lock && poetry install`, `pipenv lock && pipenv sync`,
-`pip install -e .` for a `setup.cfg`, or `pip install -r base.txt` (with
-the directory to run it in when the manifest is not at the project root).
+`composer update wp-plugin/elementor --with-dependencies`, `npm install`
+(or `yarn install` / `pnpm install` when that tool's lock file is present),
+`uv lock && uv sync`, `poetry lock && poetry install`, `pipenv lock &&
+pipenv sync`, `pip install -e .` for a `setup.cfg`, or `pip install -r
+base.txt` (with the directory to run it in when the manifest is not at the
+project root).
 Press `r` afterwards to rescan.
 
 In the TUI the dependency's row and its advisories turn green with a ✔

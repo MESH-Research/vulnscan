@@ -45,7 +45,7 @@ src/vulnscan/
   parsers/        manifest discovery, manifest and lock-file parsers
   osv.py          OSV.dev client
   wordfence.py    Wordfence Intelligence client and cache
-  registry.py     available versions from PyPI, Packagist, wordpress.org
+  registry.py     available versions from PyPI, Packagist, npm, wordpress.org
   scanner.py      parse -> resolve -> query -> findings
   remediate.py    upgrade planning and manifest rewriting
   feeds.py        RSS and Atom
