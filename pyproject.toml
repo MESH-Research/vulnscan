@@ -65,7 +65,7 @@ target-version = "py312"
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.commitizen]
-version = "1.3.0"
+version = "1.4.0"
 version_files = [
     "__version__.py",
     "src/vulnscan/__init__.py:__version__"

@@ -1,3 +1,10 @@
+## 1.4.0 (2026-10-10)
+
+### Feat
+
+- **deploy**: add a container image, compose file and entrypoint loop
+- **notify**: add --test to send one test message to ntfy and Teams
+
 ## 1.3.0 (2026-10-09)
 
 ### Feat
