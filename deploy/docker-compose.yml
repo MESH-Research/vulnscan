@@ -1,0 +1,33 @@
+# vulnscan scanner for Coolify (Docker Compose build pack) or plain `docker compose`.
+# Build context is the repository root. Configuration comes from the environment:
+#
+#   VULNSCAN_PROJECTS            "site-a https://github.com/org/site-a.git main; api-b https://github.com/org/api-b.git"
+#   VULNSCAN_MSTEAMS_WEBHOOK_URL Teams Workflows webhook (or VULNSCAN_NTFY_TOPIC/_TOKEN with VULNSCAN_CHANNELS=--ntfy)
+#   VULNSCAN_WORDFENCE_API_KEY   for WordPress projects
+#   VULNSCAN_RUN_EVERY_MINUTES   gap between runs (default 60)
+#
+# Per-project overrides: mount a file at /etc/vulnscan/<name>.env.
+services:
+  vulnscan:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      VULNSCAN_PROJECTS: ${VULNSCAN_PROJECTS:?set VULNSCAN_PROJECTS to "name url [branch]; name url [branch]"}
+      VULNSCAN_CHANNELS: ${VULNSCAN_CHANNELS:---msteams}
+      VULNSCAN_MSTEAMS_WEBHOOK_URL: ${VULNSCAN_MSTEAMS_WEBHOOK_URL:-}
+      VULNSCAN_NTFY_SERVER: ${VULNSCAN_NTFY_SERVER:-https://ntfy.sh}
+      VULNSCAN_NTFY_TOPIC: ${VULNSCAN_NTFY_TOPIC:-}
+      VULNSCAN_NTFY_TOKEN: ${VULNSCAN_NTFY_TOKEN:-}
+      VULNSCAN_WORDFENCE_API_KEY: ${VULNSCAN_WORDFENCE_API_KEY:-}
+      VULNSCAN_RUN_EVERY_MINUTES: ${VULNSCAN_RUN_EVERY_MINUTES:-60}
+    volumes:
+      - vulnscan-state:/var/lib/vulnscan
+      - vulnscan-cache:/var/cache/vulnscan
+      - vulnscan-projects:/srv/vulnscan/projects
+
+volumes:
+  vulnscan-state:
+  vulnscan-cache:
+  vulnscan-projects:
