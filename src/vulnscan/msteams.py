@@ -16,6 +16,7 @@ from collections.abc import Callable
 
 import httpx
 
+from vulnscan import __version__
 from vulnscan.models import severity_rank
 from vulnscan.notify import AdvisoryNote, Notification, NotificationError, registry_name
 
@@ -192,6 +193,26 @@ def render_payload(notification: Notification) -> dict:
     return _envelope(render_card(notification))
 
 
+def render_test_card(project: str) -> dict:
+    """A small Adaptive Card confirming that vulnscan can post here, for ``--test``."""
+    return {
+        "$schema": SCHEMA,
+        "type": "AdaptiveCard",
+        "version": "1.4",
+        "msteams": {"width": "Full"},
+        "body": [
+            _text(f"vulnscan test message for {project}", size="Large", weight="Bolder"),
+            _text(
+                f"vulnscan {__version__} can post to this channel. Notifications for "
+                f"{project} will arrive here when a new advisory affects one of its "
+                "dependencies. Nothing was scanned and nothing was recorded.",
+                spacing="Small",
+            ),
+        ],
+        "actions": [],
+    }
+
+
 class TeamsClient:
     """Notification channel that posts Adaptive Cards to a Teams incoming webhook.
 
@@ -221,9 +242,15 @@ class TeamsClient:
                 self._sleep(gap)
         self._last_post = time.monotonic()
 
+    def send_test(self, project: str) -> None:
+        """POST a single test card so the webhook can be checked."""
+        self._post(_envelope(render_test_card(project)))
+
     def send(self, notification: Notification) -> None:
         """POST the card; raise :class:`NotificationError` unless the webhook answers 2xx."""
-        payload = render_payload(notification)
+        self._post(render_payload(notification))
+
+    def _post(self, payload: dict) -> None:
         self._pace()
         try:
             response = self._client.post(self.webhook_url, json=payload)

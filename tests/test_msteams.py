@@ -326,3 +326,32 @@ def test_advisories_are_listed_most_severe_first():
     ]
     assert ids == ["GHSA-CRIT", "GHSA-HIGH", "GHSA-MED", "GHSA-LOW"]
     assert card["actions"][0]["title"] == "Open GHSA-CRIT"
+
+
+# --- test card --------------------------------------------------------------------------------
+
+
+def test_render_test_card_is_a_small_adaptive_card_naming_the_project():
+    from vulnscan.msteams import render_test_card
+
+    card = render_test_card("mysite")
+    assert card["type"] == "AdaptiveCard"
+    assert card["body"]
+    assert "mysite" in json.dumps(card)
+    assert len(json.dumps(card).encode()) < MAX_PAYLOAD_BYTES
+
+
+def test_client_send_test_posts_one_card():
+    seen, transport = _capture_transport()
+    TeamsClient("https://hook.test/x", transport=transport).send_test("mysite")
+    assert len(seen) == 1
+    payload = json.loads(seen[0].content)
+    assert payload["type"] == "message"
+    assert payload["attachments"][0]["contentType"] == CARD_TYPE
+    assert payload["attachments"][0]["content"]["type"] == "AdaptiveCard"
+
+
+def test_client_send_test_raises_on_http_error():
+    _seen, transport = _capture_transport(400)
+    with pytest.raises(NotificationError, match="400"):
+        TeamsClient("https://hook.test/x", transport=transport).send_test("mysite")

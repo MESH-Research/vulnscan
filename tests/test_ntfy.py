@@ -189,3 +189,34 @@ def test_client_raises_on_connection_failure():
     client = NtfyClient("https://ntfy.test", "t", transport=httpx.MockTransport(handler))
     with pytest.raises(NotificationError):
         client.publish(_message())
+
+
+# --- test message -----------------------------------------------------------------------------
+
+
+def test_render_test_message_is_a_normal_priority_message_about_the_project():
+    from vulnscan.ntfy import render_test_message
+
+    message = render_test_message("mysite")
+    assert isinstance(message, NtfyMessage)
+    assert message.title and message.body
+    assert "mysite" in message.body or "mysite" in message.title
+    assert 1 <= message.priority <= 5
+    assert message.guids == ()
+
+
+def test_client_send_test_publishes_one_message_to_the_topic():
+    seen, transport = _capture_transport()
+    client = NtfyClient("https://ntfy.test", "alerts", token="tk_x", transport=transport)
+    client.send_test("mysite")
+    assert len(seen) == 1
+    payload = json.loads(seen[0].content)
+    assert payload["topic"] == "alerts"
+    assert payload["title"] and payload["message"]
+    assert seen[0].headers["authorization"] == "Bearer tk_x"
+
+
+def test_client_send_test_raises_on_http_error():
+    _seen, transport = _capture_transport(403)
+    with pytest.raises(NotificationError, match="403"):
+        NtfyClient("https://ntfy.test", "alerts", transport=transport).send_test("mysite")

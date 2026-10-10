@@ -140,6 +140,9 @@ class Channel(Protocol):
     def send(self, notification: Notification) -> None:
         """Deliver it, raising :class:`NotificationError` on failure."""
 
+    def send_test(self, project: str) -> None:
+        """Deliver a short test message, raising :class:`NotificationError` on failure."""
+
 
 @dataclass(frozen=True)
 class Target:

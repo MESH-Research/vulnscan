@@ -117,6 +117,9 @@ ntfy it is a plain-text message whose priority follows the severity.
 - `kill -USR1 <pid>` re-sends every current finding immediately.
 - `--resend` does the same at start-up.
 - `--once` runs a single cycle and exits, for cron.
+- `--test` sends one short test message to each selected channel and exits
+  without scanning or recording anything, so you can check the topic or
+  webhook before scheduling anything: `vulnscan --msteams --test`.
 - `SIGINT` / `SIGTERM` stop cleanly.
 
 Configure the destinations in `.env`:

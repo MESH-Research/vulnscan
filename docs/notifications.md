@@ -75,6 +75,22 @@ kill -USR1 <pid of the vulnscan process>
 To do the same at start-up, add `--resend`. `SIGINT` (Ctrl-C) and `SIGTERM`
 stop the loop cleanly.
 
+### Checking a channel works
+
+```
+uv run vulnscan --ntfy --test
+uv run vulnscan --msteams --test
+uv run vulnscan --ntfy --msteams --test
+```
+
+`--test` sends a single short message to each selected channel, naming the
+project it would report on, and exits. Nothing is scanned and no state file
+is written, so the next real run still delivers every current finding. The
+exit status is 0 if every channel accepted the message and 1 otherwise, with
+the service's answer printed to stderr, which makes it a quick way to
+confirm a topic name, an access token or a Teams webhook URL before
+scheduling anything.
+
 ### One cycle at a time (cron)
 
 ```

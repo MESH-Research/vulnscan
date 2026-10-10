@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from vulnscan import __version__
 from vulnscan.models import normalize_severity
 from vulnscan.notify import AdvisoryNote, Notification, NotificationError, registry_name
 
@@ -72,6 +73,10 @@ class NtfyClient:
     def send(self, notification: Notification) -> None:
         """Render the notification as text and publish it."""
         self.publish(render_ntfy(notification))
+
+    def send_test(self, project: str) -> None:
+        """Publish a single test message so the topic and credentials can be checked."""
+        self.publish(render_test_message(project))
 
     def publish(self, message: NtfyMessage) -> None:
         """POST the message; raise :class:`NotificationError` unless the server answers 2xx."""
@@ -158,4 +163,20 @@ def render_ntfy(notification: Notification) -> NtfyMessage:
         tags=(_EMOJI[notification.severity], notification.severity.lower()),
         click=notification.advisories[0].url if notification.advisories else None,
         guids=notification.guids,
+    )
+
+
+def render_test_message(project: str) -> NtfyMessage:
+    """A short message confirming that vulnscan can reach this topic, for ``--test``."""
+    return NtfyMessage(
+        title=f"vulnscan test message for {project}",
+        body=(
+            f"vulnscan {__version__} can reach this topic. Notifications for {project} "
+            "will arrive here when a new advisory affects one of its dependencies. "
+            "Nothing was scanned and nothing was recorded."
+        ),
+        priority=_PRIORITY["UNKNOWN"],
+        tags=("white_check_mark", "test"),
+        click=None,
+        guids=(),
     )

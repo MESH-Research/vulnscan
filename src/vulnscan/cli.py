@@ -13,7 +13,13 @@ from vulnscan.config import Settings, load_settings
 from vulnscan.feeds import write_feeds
 from vulnscan.models import Finding, ScanResult, normalize_name
 from vulnscan.msteams import TeamsClient
-from vulnscan.notify import Target, WatchControl, install_signal_handlers, run_watch
+from vulnscan.notify import (
+    NotificationError,
+    Target,
+    WatchControl,
+    install_signal_handlers,
+    run_watch,
+)
 from vulnscan.ntfy import NtfyClient
 from vulnscan.osv import OSVError
 from vulnscan.registry import RegistryClient, RegistryError
@@ -98,6 +104,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--resend",
         action="store_true",
         help="with --ntfy/--msteams: push every current finding at start, not only unsent ones",
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="with --ntfy/--msteams: send one test message to each selected channel and "
+        "exit, without scanning or recording anything",
     )
     parser.add_argument(
         "--interval",
@@ -205,12 +217,33 @@ def build_msteams_client(settings: Settings) -> TeamsClient:
     return TeamsClient(settings.msteams_webhook_url, timeout=settings.request_timeout)
 
 
+def run_test_messages(settings: Settings, targets: Sequence[Target]) -> int:
+    """Send one test message to every target channel, without scanning or saving state.
+
+    Returns 0 when every channel accepted its message, otherwise 1.
+    """
+    project = settings.project_path.name or "project"
+    failed = False
+    for target in targets:
+        channel = target.channel
+        try:
+            channel.send_test(project)
+        except NotificationError as exc:
+            print(f"{channel.name}: test message failed: {exc}", file=sys.stderr)
+            failed = True
+        else:
+            print(f"{channel.name}: test message sent for {project}")
+    return 1 if failed else 0
+
+
 def run_notifications(settings: Settings, args: argparse.Namespace) -> int:
     """Run ``--ntfy`` and/or ``--msteams`` mode: scan and push new findings, once or forever.
 
     Each requested channel keeps its own sent-state file. Signal handlers are installed
-    only for the continuous loop. Returns 2 when a requested channel is not configured,
-    otherwise the exit code of :func:`vulnscan.notify.run_watch`.
+    only for the continuous loop. With ``--test`` nothing is scanned: one test message
+    goes to each channel instead. Returns 2 when a requested channel is not configured,
+    otherwise the exit code of :func:`run_test_messages` or
+    :func:`vulnscan.notify.run_watch`.
     """
     targets: list[Target] = []
     if args.ntfy:
@@ -223,6 +256,8 @@ def run_notifications(settings: Settings, args: argparse.Namespace) -> int:
             print("error: --msteams needs VULNSCAN_MSTEAMS_WEBHOOK_URL", file=sys.stderr)
             return 2
         targets.append(Target(build_msteams_client(settings), settings.msteams_state_path))
+    if args.test:
+        return run_test_messages(settings, targets)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr
     )
@@ -335,6 +370,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if args.ntfy or args.msteams:
         return run_notifications(settings, args)
+    if args.test:
+        print("error: --test needs --ntfy and/or --msteams", file=sys.stderr)
+        return 2
     if args.remediate:
         return run_remediate(settings, args)
     if args.update_feeds or args.markdown is not None or args.text is not None:

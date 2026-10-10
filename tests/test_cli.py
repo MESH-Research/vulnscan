@@ -438,3 +438,92 @@ def test_build_clients_use_settings(tmp_path: Path, monkeypatch):
     settings = cli.load_settings(dotenv_path=tmp_path / "none.env")
     assert isinstance(cli.build_ntfy_client(settings), NtfyClient)
     assert isinstance(cli.build_msteams_client(settings), TeamsClient)
+
+
+# --- --test: one message per channel, no scan, no state ---------------------------------------
+
+
+class ProbeChannel(RecordingChannel):
+    def __init__(self, name="fake", fail=False):
+        super().__init__(name)
+        self.tests = []
+        self.fail = fail
+
+    def send_test(self, project):
+        if self.fail:
+            from vulnscan.notify import NotificationError
+
+            raise NotificationError("boom")
+        self.tests.append(project)
+
+
+@pytest.fixture
+def no_scan(monkeypatch):
+    def forbidden(settings):
+        raise AssertionError("--test must not scan")
+
+    monkeypatch.setattr(cli, "scan", forbidden)
+
+
+def test_parser_test_flag():
+    assert cli.build_parser().parse_args(["--ntfy", "--test"]).test is True
+    assert cli.build_parser().parse_args([]).test is False
+
+
+def test_ntfy_test_sends_one_message_and_nothing_else(tmp_path: Path, monkeypatch, no_scan):
+    channel = ProbeChannel("ntfy")
+    monkeypatch.setattr(cli, "build_ntfy_client", lambda settings: channel)
+    monkeypatch.setenv("VULNSCAN_NTFY_TOPIC", "alerts")
+    project = tmp_path / "mysite"
+    project.mkdir()
+    feed_dir = tmp_path / "feeds"
+    code = cli.main(["--ntfy", "--test", "--path", str(project), "--feed-dir", str(feed_dir)])
+    assert code == 0
+    assert channel.tests == ["mysite"]
+    assert channel.sent == []
+    assert not feed_dir.exists()
+
+
+def test_msteams_test_sends_one_card(tmp_path: Path, monkeypatch, no_scan, capsys):
+    channel = ProbeChannel("msteams")
+    monkeypatch.setattr(cli, "build_msteams_client", lambda settings: channel)
+    monkeypatch.setenv("VULNSCAN_MSTEAMS_WEBHOOK_URL", "https://hook.test/x")
+    code = cli.main(["--msteams", "--test", "--path", str(tmp_path)])
+    assert code == 0
+    assert len(channel.tests) == 1
+    assert channel.sent == []
+    assert "msteams" in capsys.readouterr().out
+
+
+def test_test_flag_hits_every_selected_channel(tmp_path: Path, monkeypatch, no_scan):
+    ntfy, teams = ProbeChannel("ntfy"), ProbeChannel("msteams")
+    monkeypatch.setattr(cli, "build_ntfy_client", lambda settings: ntfy)
+    monkeypatch.setattr(cli, "build_msteams_client", lambda settings: teams)
+    monkeypatch.setenv("VULNSCAN_NTFY_TOPIC", "alerts")
+    monkeypatch.setenv("VULNSCAN_MSTEAMS_WEBHOOK_URL", "https://hook.test/x")
+    assert cli.main(["--ntfy", "--msteams", "--test", "--path", str(tmp_path)]) == 0
+    assert len(ntfy.tests) == 1 and len(teams.tests) == 1
+
+
+def test_test_flag_reports_a_failed_channel(tmp_path: Path, monkeypatch, no_scan, capsys):
+    ntfy, teams = ProbeChannel("ntfy", fail=True), ProbeChannel("msteams")
+    monkeypatch.setattr(cli, "build_ntfy_client", lambda settings: ntfy)
+    monkeypatch.setattr(cli, "build_msteams_client", lambda settings: teams)
+    monkeypatch.setenv("VULNSCAN_NTFY_TOPIC", "alerts")
+    monkeypatch.setenv("VULNSCAN_MSTEAMS_WEBHOOK_URL", "https://hook.test/x")
+    assert cli.main(["--ntfy", "--msteams", "--test", "--path", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "ntfy" in err and "boom" in err
+    assert len(teams.tests) == 1  # the other channel is still tried
+
+
+def test_test_flag_still_requires_channel_configuration(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.delenv("VULNSCAN_NTFY_TOPIC", raising=False)
+    code = cli.main(["--ntfy", "--test", "--path", str(tmp_path), "--env-file", "/nonexistent"])
+    assert code == 2
+    assert "VULNSCAN_NTFY_TOPIC" in capsys.readouterr().err
+
+
+def test_test_flag_without_a_channel_is_an_error(tmp_path: Path, capsys):
+    assert cli.main(["--test", "--path", str(tmp_path)]) == 2
+    assert "--ntfy" in capsys.readouterr().err
