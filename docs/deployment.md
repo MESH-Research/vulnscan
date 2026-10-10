@@ -2,10 +2,12 @@
 
 This page sets up vulnscan to run unattended on a server: on a schedule it
 pulls the `main` branch of each project you monitor, scans it, and posts
-anything new to Microsoft Teams (or ntfy). It covers a bare-metal or VM
-host where you have root and cron, and an AWS EC2 instance created from a
-CloudFormation template. Both use the same layout and the same wrapper
-script, [`deploy/vulnscan-run.sh`](https://github.com/MESH-Research/vulnscan/blob/main/deploy/vulnscan-run.sh).
+anything new to Microsoft Teams (or ntfy). It covers three hosts: a
+bare-metal or VM box where you have root and cron, an AWS EC2 instance
+created from a CloudFormation template, and a container on
+[Coolify](https://coolify.io) (or plain Docker). All three use the same
+layout and the same wrapper script,
+[`deploy/vulnscan-run.sh`](https://github.com/MESH-Research/vulnscan/blob/main/deploy/vulnscan-run.sh).
 
 ## How it fits together
 
@@ -38,7 +40,7 @@ a day however many projects you scan.
 | `/etc/vulnscan/<name>.env` | that project's settings and secrets (mode 640, `root:vulnscan`) |
 | `/srv/vulnscan/projects/<name>` | shallow clone of the project |
 | `/var/lib/vulnscan/<name>` | feeds, reports and `msteams-state.json` / `ntfy-state.json` |
-| `/var/lib/vulnscan/.ssh` | deploy keys and `config` with one host alias per project |
+| `/var/lib/vulnscan/.ssh` | deploy keys, private repositories only |
 | `/var/cache/vulnscan` | shared Wordfence feed cache |
 | `/var/log/vulnscan/scan.log` | output of every run, rotated weekly |
 
@@ -49,25 +51,45 @@ you can move any of this without editing the script.
 
 ## Repository access
 
-The scanner needs read access to each project. The recommended way is a
-**deploy key** per repository: a read-only SSH key that never expires and
-grants nothing else. GitHub allows a key to be attached to only one
-repository, so each project gets its own key and its own SSH host alias
-(`github.com-<name>`), and the project's URL in `/etc/vulnscan/projects`
-uses that alias:
+Public repositories need no credential: list them by their `https://` URL
+and every clone and fetch is anonymous.
 
 ```
-# name    git-url                                       branch
-site-a    git@github.com-site-a:your-org/site-a.git     main
-api-b     git@github.com-api-b:your-org/api-b.git       main
+# name    git-url                                   branch
+site-a    https://github.com/your-org/site-a.git    main
+api-b     https://github.com/your-org/api-b.git     main
 ```
 
-A fine-grained personal access token over HTTPS also works (one token, read
-access to Contents on the chosen repositories) if you prefer a single
-credential, at the cost of rotating it when it expires. Public repositories
-need no credential: use their `https://` URL.
+vulnscan itself is public and is cloned the same way.
 
-vulnscan itself is public and is cloned over HTTPS.
+!!! note "Private repositories"
+    For a private repository the cleanest credential is a **deploy key**:
+    a read-only SSH key attached to that one repository, which never
+    expires and grants nothing else. GitHub allows a key on only one
+    repository, so each project gets its own key and its own SSH host
+    alias, and its URL becomes `git@github.com-<name>:your-org/<name>.git`.
+    On the bare-metal host, as the `vulnscan` user:
+
+    ```sh
+    sudo -u vulnscan -H ssh-keygen -t ed25519 -N '' -C 'vulnscan site-a' -f /var/lib/vulnscan/.ssh/site-a
+    sudo cat /var/lib/vulnscan/.ssh/site-a.pub     # add as a read-only deploy key on GitHub
+    sudo -u vulnscan -H tee -a /var/lib/vulnscan/.ssh/config >/dev/null <<'EOT'
+    Host github.com-site-a
+      HostName github.com
+      User git
+      IdentityFile ~/.ssh/site-a
+      IdentitiesOnly yes
+
+    EOT
+    sudo -u vulnscan -H sh -c 'ssh-keyscan -t ed25519 github.com > ~/.ssh/known_hosts'
+    sudo -u vulnscan -H ssh -T git@github.com-site-a      # "Hi your-org/site-a! You've successfully authenticated"
+    ```
+
+    On AWS, store the private key as the SSM parameter
+    `/vulnscan/<name>/deploy-key` and the user-data writes the key and the
+    host alias for you. A fine-grained personal access token over HTTPS
+    (read access to Contents on the chosen repositories) also works if you
+    prefer one credential, at the cost of rotating it when it expires.
 
 ## Bare metal or VM
 
@@ -83,40 +105,15 @@ curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/
 
 sudo useradd --system --create-home --home-dir /var/lib/vulnscan --shell /usr/sbin/nologin vulnscan
 sudo install -d -o vulnscan -g vulnscan -m 750 /opt/vulnscan /srv/vulnscan/projects /var/cache/vulnscan /var/log/vulnscan
-sudo install -d -o vulnscan -g vulnscan -m 700 /var/lib/vulnscan/.ssh
 sudo install -d -o root -g vulnscan -m 750 /etc/vulnscan
 ```
 
-### 2. Deploy keys
-
-For each project (here `site-a`):
-
-```sh
-sudo -u vulnscan -H ssh-keygen -t ed25519 -N '' -C 'vulnscan site-a' -f /var/lib/vulnscan/.ssh/site-a
-sudo cat /var/lib/vulnscan/.ssh/site-a.pub     # add as a read-only deploy key on GitHub
-sudo -u vulnscan -H tee -a /var/lib/vulnscan/.ssh/config >/dev/null <<'EOT'
-Host github.com-site-a
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/site-a
-  IdentitiesOnly yes
-
-EOT
-```
-
-Then record GitHub's host key once and check that the key works:
-
-```sh
-sudo -u vulnscan -H sh -c 'ssh-keyscan -t ed25519 github.com > ~/.ssh/known_hosts'
-sudo -u vulnscan -H ssh -T git@github.com-site-a      # "Hi your-org/site-a! You've successfully authenticated"
-```
-
-### 3. Configuration
+### 2. Configuration
 
 ```sh
 sudo tee /etc/vulnscan/projects >/dev/null <<'EOT'
-site-a    git@github.com-site-a:your-org/site-a.git     main
-api-b     git@github.com-api-b:your-org/api-b.git       main
+site-a    https://github.com/your-org/site-a.git    main
+api-b     https://github.com/your-org/api-b.git     main
 EOT
 sudo chown root:vulnscan /etc/vulnscan/projects && sudo chmod 640 /etc/vulnscan/projects
 ```
@@ -140,7 +137,7 @@ sudo chown root:vulnscan /etc/vulnscan/site-a.env && sudo chmod 640 /etc/vulnsca
 Two projects can post to the same Teams channel or to different ones; each
 card names the project, and the state files are separate either way.
 
-### 4. vulnscan and the wrapper
+### 3. vulnscan and the wrapper
 
 ```sh
 sudo -u vulnscan -H git clone --depth 1 --branch main https://github.com/MESH-Research/vulnscan.git /opt/vulnscan
@@ -177,7 +174,7 @@ sudo -u vulnscan -H env VULNSCAN_CACHE_DIR=/var/cache/vulnscan \
   --path /srv/vulnscan/projects/site-a --feed-dir /var/lib/vulnscan/site-a
 ```
 
-### 5. Cron and log rotation
+### 4. Cron and log rotation
 
 Hourly is a sensible default: OSV queries are cheap, and the Wordfence feed
 is cached for 24 hours regardless of how often you scan. `flock -n` makes an
@@ -207,12 +204,12 @@ topic and token in each project's `.env`.
 
 ### Day-to-day
 
-- **Add a project:** a deploy key, a line in `/etc/vulnscan/projects`, a
-  `.env`. The next run clones and scans it.
+- **Add a project:** a line in `/etc/vulnscan/projects` and a `.env`. The
+  next run clones and scans it.
 - **Upgrade vulnscan:** automatic, since every run tracks `main`. If you
   would rather stay on tagged releases, set `VULNSCAN_APP_BRANCH` in the
   cron file to a tag such as `v1.2.0`. The wrapper copies itself nowhere,
-  so re-run the `install -m 755 ...` line from step 4 after a release that
+  so re-run the `install -m 755 ...` line from step 3 after a release that
   changes `deploy/vulnscan-run.sh`.
 - **Re-send everything** to a channel: delete that project's
   `msteams-state.json` or `ntfy-state.json` under `/var/lib/vulnscan/<name>`
@@ -232,21 +229,19 @@ also adds a 2 GB swap file (see [Sizing](#sizing)).
 
 ### 1. Put the configuration in Parameter Store
 
-Create the deploy keys on your own machine (the same `ssh-keygen` commands
-as above, in any directory), add the public halves to GitHub, then store:
+Write the `projects` file and one `.env` per project locally, then store
+them:
 
 ```sh
 aws ssm put-parameter --name /vulnscan/projects --type String --value "$(cat projects)"
 aws ssm put-parameter --name /vulnscan/site-a/env --type SecureString --value "$(cat site-a.env)"
-aws ssm put-parameter --name /vulnscan/site-a/deploy-key --type SecureString --value "$(cat site-a)"
 aws ssm put-parameter --name /vulnscan/api-b/env --type SecureString --value "$(cat api-b.env)"
-aws ssm put-parameter --name /vulnscan/api-b/deploy-key --type SecureString --value "$(cat api-b)"
 ```
 
-`projects` has the same format as `/etc/vulnscan/projects`; the user-data
-writes one SSH host alias per project for which a `deploy-key` parameter
-exists. Delete the private keys locally once stored. Standard parameters
-hold up to 4 KB, enough for a key and a short `.env`.
+`projects` has the same format as `/etc/vulnscan/projects`. For a private
+repository add `/vulnscan/<name>/deploy-key` holding the private SSH key
+(see [Repository access](#repository-access)); the user-data writes a host
+alias for every project that has one. Standard parameters hold up to 4 KB.
 
 ### 2. Create the stack
 
@@ -286,6 +281,83 @@ If you use Terraform instead, the template maps directly: an
 `aws_instance` with the same `user_data`, an IAM role with
 `AmazonSSMManagedInstanceCore` plus `ssm:GetParameter*` on
 `arn:aws:ssm:*:*:parameter/vulnscan/*`, and an egress-only security group.
+
+## Coolify (or plain Docker)
+
+The repository's [`Dockerfile`](https://github.com/MESH-Research/vulnscan/blob/main/Dockerfile)
+builds an image whose main process is a loop: run the wrapper over every
+project, sleep `VULNSCAN_RUN_EVERY_MINUTES` (default 60), repeat. The
+image already contains vulnscan, so the wrapper's self-update step is off
+and new vulnscan releases arrive by rebuilding the image. Three volumes
+persist what matters between restarts: the "already notified" state, the
+Wordfence cache and the project clones. All configuration is environment
+variables, so there are no files to place.
+[`deploy/docker-compose.yml`](https://github.com/MESH-Research/vulnscan/blob/main/deploy/docker-compose.yml)
+declares the service and the volumes.
+
+| Variable | Purpose |
+|----------|---------|
+| `VULNSCAN_PROJECTS` | the project list, entries separated by `;` (or newlines): `site-a https://github.com/your-org/site-a.git main; api-b https://github.com/your-org/api-b.git` |
+| `VULNSCAN_MSTEAMS_WEBHOOK_URL` | Teams webhook, shared by every project |
+| `VULNSCAN_CHANNELS` | `--msteams` (default), `--ntfy` or `--msteams --ntfy`; ntfy needs `VULNSCAN_NTFY_TOPIC` and usually `VULNSCAN_NTFY_TOKEN` |
+| `VULNSCAN_WORDFENCE_API_KEY` | for WordPress projects |
+| `VULNSCAN_RUN_EVERY_MINUTES` | gap between runs; `0` runs once and exits |
+
+Any other `VULNSCAN_*` setting can be added the same way and applies to
+every project. If two projects need different settings (different Teams
+channels, say), mount a file at `/etc/vulnscan/<name>.env`; the wrapper
+passes it to that project only. In Coolify that is a **File mount** under
+Persistent Storage.
+
+### In Coolify
+
+1. **New resource** in the project and environment of your choice, source
+   **Public Repository**, URL `https://github.com/MESH-Research/vulnscan`,
+   branch `main`. (To track your own fork, or to get automatic redeploys on
+   push, choose the GitHub App source instead; nothing else changes.)
+2. **Build pack: Docker Compose**, base directory `/`, compose file
+   `/deploy/docker-compose.yml`. Coolify reads the volumes from the file and
+   creates them. Alternatively pick the **Dockerfile** build pack with the
+   default Dockerfile location and add the three volumes yourself under
+   Persistent Storage: `/var/lib/vulnscan`, `/var/cache/vulnscan` and
+   `/srv/vulnscan/projects`.
+3. The scanner serves nothing, so leave the domain empty and clear the
+   exposed port if the form pre-fills one; Coolify then runs it as a plain
+   worker without proxying.
+4. **Environment variables:** add `VULNSCAN_PROJECTS`,
+   `VULNSCAN_MSTEAMS_WEBHOOK_URL` and, for WordPress, `VULNSCAN_WORDFENCE_API_KEY`.
+   Mark the webhook and the key as secrets so they are hidden in the UI.
+5. **Deploy.** The first run starts immediately and posts the current
+   findings for each project; the container's log, under **Logs**, shows one
+   header line per project followed by the scanner's own output.
+
+To check a webhook before the first real run, open **Terminal** on the
+resource and send a test message:
+
+```sh
+mkdir -p /srv/vulnscan/projects/site-a
+/opt/vulnscan/.venv/bin/vulnscan --msteams --test --path /srv/vulnscan/projects/site-a
+```
+
+Coolify rebuilds and restarts the container on **Redeploy**, which is how
+you pick up a new vulnscan release; the volumes survive, so nothing is
+re-notified. Memory follows the [Sizing](#sizing) section: give the
+Coolify host, not the container, the headroom.
+
+### Plain Docker
+
+The same compose file works anywhere:
+
+```sh
+git clone https://github.com/MESH-Research/vulnscan.git && cd vulnscan
+cat > deploy/.env <<'EOT'
+VULNSCAN_PROJECTS=site-a https://github.com/your-org/site-a.git main; api-b https://github.com/your-org/api-b.git
+VULNSCAN_MSTEAMS_WEBHOOK_URL=https://...
+VULNSCAN_WORDFENCE_API_KEY=...
+EOT
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+docker compose -f deploy/docker-compose.yml logs -f
+```
 
 ## Sizing
 
