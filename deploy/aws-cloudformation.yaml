@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  vulnscan scheduled scanner: one small Graviton instance that pulls the
+  monitored projects from GitHub on a cron schedule, scans them and notifies
+  Microsoft Teams / ntfy. No inbound ports; administer it with SSM Session
+  Manager. Configuration and secrets come from SSM Parameter Store under
+  /vulnscan/ (see docs/deployment.md).
+
+Parameters:
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet with a route to the internet (a public subnet, or private with NAT).
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  InstanceType:
+    Type: String
+    Default: t4g.micro
+    AllowedValues: [t4g.nano, t4g.micro, t4g.small, t4g.medium]
+  CronSchedule:
+    Type: String
+    Default: "17 * * * *"
+    Description: Cron schedule (UTC) for the scan run.
+  Channels:
+    Type: String
+    Default: "--msteams"
+    Description: Notification flags passed to vulnscan, e.g. "--msteams" or "--msteams --ntfy".
+  ParameterPrefix:
+    Type: String
+    Default: /vulnscan
+    Description: >-
+      SSM Parameter Store prefix. Expected parameters: <prefix>/projects (the
+      /etc/vulnscan/projects file), <prefix>/<name>/env (the project's .env) and
+      <prefix>/<name>/deploy-key (private SSH deploy key) for each project.
+  UbuntuAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id
+    Description: Resolved automatically to the current Ubuntu 24.04 arm64 image.
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: vulnscan scanner - outbound only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: read-vulnscan-parameters
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParameters, ssm:GetParametersByPath]
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ParameterPrefix}/*
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref Role]
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref UbuntuAmi
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref SecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: { VolumeSize: 10, VolumeType: gp3, DeleteOnTermination: true }
+      Tags:
+        - { Key: Name, Value: vulnscan }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          REGION=${AWS::Region}
+          PREFIX=${ParameterPrefix}
+
+          # ---- packages ---------------------------------------------------------
+          apt-get update -q
+          apt-get install -y -q git curl cron unzip
+          curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh
+          curl -sS "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscli.zip
+          unzip -q /tmp/awscli.zip -d /tmp && /tmp/aws/install && rm -rf /tmp/aws /tmp/awscli.zip
+
+          # ---- swap: headroom for the Wordfence feed on a 1 GB instance -----------
+          if ! swapon --show | grep -q swapfile; then
+              fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+              echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          fi
+
+          # ---- user and directories ----------------------------------------------
+          id vulnscan >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/vulnscan --shell /usr/sbin/nologin vulnscan
+          install -d -o vulnscan -g vulnscan -m 750 /opt/vulnscan /srv/vulnscan/projects /var/cache/vulnscan /var/log/vulnscan /var/lib/vulnscan/.ssh
+          install -d -o root -g vulnscan -m 750 /etc/vulnscan
+          chmod 700 /var/lib/vulnscan/.ssh
+
+          # ---- configuration from Parameter Store --------------------------------
+          getp() { aws ssm get-parameter --region "$REGION" --with-decryption --name "$1" --query Parameter.Value --output text; }
+          getp "$PREFIX/projects" > /etc/vulnscan/projects
+          : > /var/lib/vulnscan/.ssh/config
+          while read -r name url _; do
+              case "$name" in ''|'#'*) continue ;; esac
+              getp "$PREFIX/$name/env" > "/etc/vulnscan/$name.env"
+              chmod 640 "/etc/vulnscan/$name.env"; chown root:vulnscan "/etc/vulnscan/$name.env"
+              if getp "$PREFIX/$name/deploy-key" > "/var/lib/vulnscan/.ssh/$name" 2>/dev/null; then
+                  chmod 600 "/var/lib/vulnscan/.ssh/$name"
+                  printf 'Host github.com-%s\n  HostName github.com\n  User git\n  IdentityFile ~/.ssh/%s\n  IdentitiesOnly yes\n\n' "$name" "$name" >> /var/lib/vulnscan/.ssh/config
+              else
+                  rm -f "/var/lib/vulnscan/.ssh/$name"
+              fi
+          done < /etc/vulnscan/projects
+          chown root:vulnscan /etc/vulnscan/projects; chmod 640 /etc/vulnscan/projects
+          ssh-keyscan -t ed25519 github.com > /var/lib/vulnscan/.ssh/known_hosts 2>/dev/null
+          chown -R vulnscan:vulnscan /var/lib/vulnscan/.ssh
+
+          # ---- vulnscan ------------------------------------------------------------
+          sudo -u vulnscan -H git clone --quiet --depth 1 --branch main https://github.com/MESH-Research/vulnscan.git /opt/vulnscan
+          sudo -u vulnscan -H bash -c 'cd /opt/vulnscan && uv sync --quiet --frozen --no-dev'
+          install -m 755 /opt/vulnscan/deploy/vulnscan-run.sh /usr/local/bin/vulnscan-run
+
+          # ---- cron and log rotation -----------------------------------------------
+          cat > /etc/cron.d/vulnscan <<CRON
+          SHELL=/bin/bash
+          VULNSCAN_CHANNELS=${Channels}
+          ${CronSchedule} vulnscan flock -n /var/lib/vulnscan/.lock /usr/local/bin/vulnscan-run >> /var/log/vulnscan/scan.log 2>&1
+          CRON
+          chmod 644 /etc/cron.d/vulnscan
+          cat > /etc/logrotate.d/vulnscan <<ROT
+          /var/log/vulnscan/scan.log {
+              weekly
+              rotate 8
+              compress
+              missingok
+              notifempty
+              su vulnscan vulnscan
+          }
+          ROT
+
+          # ---- first run in the background so the stack creation does not wait on it
+          sudo -u vulnscan -H env VULNSCAN_CHANNELS="${Channels}" nohup flock -n /var/lib/vulnscan/.lock /usr/local/bin/vulnscan-run >> /var/log/vulnscan/scan.log 2>&1 &
+
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+  Connect:
+    Value: !Sub aws ssm start-session --region ${AWS::Region} --target ${Instance}

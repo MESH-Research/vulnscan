@@ -46,6 +46,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Installation: installation.md
+  - Running on a server: deployment.md
   - Usage:
       - Interactive and command line: usage.md
       - Ignoring directories: ignoring.md
