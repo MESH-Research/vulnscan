@@ -1,3 +1,9 @@
+## 1.5.0 (2026-10-11)
+
+### Feat
+
+- **deploy**: add a container health check driven by a run heartbeat
+
 ## 1.4.0 (2026-10-10)
 
 ### Feat
