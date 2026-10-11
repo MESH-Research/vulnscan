@@ -339,6 +339,13 @@ mkdir -p /srv/vulnscan/projects/site-a
 /opt/vulnscan/.venv/bin/vulnscan --msteams --test --path /srv/vulnscan/projects/site-a
 ```
 
+The image carries a health check, so Coolify shows the resource as
+healthy, unhealthy or starting. It turns unhealthy when the last run failed
+(a project could not be fetched, a scan failed, or a channel rejected a
+message) or when no run has completed for two intervals plus ten minutes.
+The container log says which. A run that fails once simply shows unhealthy
+until the next run succeeds; nothing is restarted.
+
 Coolify rebuilds and restarts the container on **Redeploy**, which is how
 you pick up a new vulnscan release; the volumes survive, so nothing is
 re-notified. Memory follows the [Sizing](#sizing) section: give the

@@ -17,7 +17,8 @@ RUN uv sync --frozen --no-dev --compile-bytecode
 USER root
 COPY deploy/vulnscan-run.sh /usr/local/bin/vulnscan-run
 COPY deploy/docker-entrypoint.sh /usr/local/bin/vulnscan-entrypoint
-RUN chmod 755 /usr/local/bin/vulnscan-run /usr/local/bin/vulnscan-entrypoint
+COPY deploy/healthcheck.sh /usr/local/bin/vulnscan-healthcheck
+RUN chmod 755 /usr/local/bin/vulnscan-run /usr/local/bin/vulnscan-entrypoint /usr/local/bin/vulnscan-healthcheck
 USER vulnscan
 
 ENV VULNSCAN_SELF_UPDATE=0 \
@@ -30,4 +31,8 @@ ENV VULNSCAN_SELF_UPDATE=0 \
     PYTHONUNBUFFERED=1
 
 VOLUME ["/var/lib/vulnscan", "/var/cache/vulnscan", "/srv/vulnscan/projects"]
+# Healthy while runs keep completing; the first run may spend minutes on the
+# Wordfence feed, hence the start period. See deploy/healthcheck.sh.
+HEALTHCHECK --interval=5m --timeout=10s --start-period=10m --retries=3 \
+    CMD ["/usr/local/bin/vulnscan-healthcheck"]
 CMD ["/usr/local/bin/vulnscan-entrypoint"]
