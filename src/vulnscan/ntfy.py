@@ -155,7 +155,11 @@ def render_ntfy(notification: Notification) -> NtfyMessage:
         if note.summary:
             head += f": {note.summary}"
         lines += [head, f"  fixed in: {_fix_text(note, registry)}"]
-    lines += ["", f"Declared in: {', '.join(notification.source_files)}"]
+    lines += ["", f"Declared in: {notification.declared_in_text}"]
+    if notification.upstream_constraints_text is not None:
+        lines.append(f"Upstream constraints: {notification.upstream_constraints_text}")
+    if notification.upgrade_limit:
+        lines.append(f"Upgrade limit: {notification.upgrade_limit}")
     return NtfyMessage(
         title=title,
         body="\n".join(lines),

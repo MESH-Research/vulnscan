@@ -115,24 +115,29 @@ def _card(notification: Notification, listed: int) -> dict:
         if notification.kind
         else notification.ecosystem
     )
-    files = ", ".join(notification.source_files)
     installed = notification.version or "unknown"
     if notification.version:
         installed += f" (from {notification.version_source})"
+    facts = [
+        ("Installed", installed),
+        ("Declared in", notification.declared_in_text),
+    ]
+    if notification.upstream_constraints_text is not None:
+        facts.append(("Upstream constraints", notification.upstream_constraints_text))
+    if notification.upgrade_limit:
+        facts.append(("Upgrade limit", notification.upgrade_limit))
+    facts += [
+        ("Upgrade to", _upgrade_fact(notification, registry)),
+        ("Latest release", _latest_fact(notification)),
+    ]
     body: list[dict] = [
         _text(headline, size="Large", weight="Bolder", color=_COLOUR[notification.severity]),
         _text(
-            f"{notification.severity} severity · {kind} · declared in {files}",
+            f"{notification.severity} severity · {kind}",
             isSubtle=True,
             spacing="None",
         ),
-        _facts(
-            [
-                ("Installed", installed),
-                ("Upgrade to", _upgrade_fact(notification, registry)),
-                ("Latest release", _latest_fact(notification)),
-            ]
-        ),
+        _facts(facts),
     ]
     ordered = sorted(notification.advisories, key=lambda n: severity_rank(n.severity))
     shown = ordered[:listed]

@@ -22,6 +22,7 @@ def test_is_manifest_recognises_known_files(tmp_path: Path):
         "Pipfile",
         "setup.cfg",
         "package.json",
+        "webpack.py",
     ]:
         assert is_manifest(tmp_path / name), name
     for name in [

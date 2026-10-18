@@ -146,10 +146,25 @@ def test_card_summarises_severity_ecosystem_and_declaring_files():
 def test_card_states_installed_upgrade_and_latest():
     facts = _facts(render_card(_notification()))
     assert facts["Installed"].startswith("1.2.0")
+    assert "requirements/base.txt" in facts["Declared in"]
     assert facts["Upgrade to"].startswith("1.4.0")
     assert "available" in facts["Upgrade to"].lower()
     assert "1.6.12" in facts["Latest release"]
-    assert set(facts) == {"Installed", "Upgrade to", "Latest release"}
+    assert set(facts) == {"Installed", "Declared in", "Upgrade to", "Latest release"}
+
+    limited = _facts(
+        render_card(
+            _notification(
+                upstream_constraints_text="site-packages/pkg/webpack.py as ^1.7.0",
+                upgrade_limit=(
+                    "pywebpack same-major (major 1); "
+                    "advisory fixes only at 2.x — major bump required"
+                ),
+            )
+        )
+    )
+    assert "webpack.py" in limited["Upstream constraints"]
+    assert "major bump" in limited["Upgrade limit"]
 
     none_yet = _facts(
         render_card(_notification(nearest_safe=None, latest="1.2.1", latest_is_safe=False))

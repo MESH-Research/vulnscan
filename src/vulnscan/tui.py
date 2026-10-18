@@ -10,6 +10,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Header, Label, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
 
@@ -20,6 +21,7 @@ from vulnscan.registry import RegistryClient, RegistryError
 from vulnscan.remediate import (
     RemediationError,
     RemediationPlan,
+    RemediationResult,
     apply_remediation,
     plan_remediation,
 )
@@ -30,6 +32,9 @@ from vulnscan.wordfence import wordfence_attribution
 
 ScanFn = Callable[[Settings], ScanResult]
 VersionsFn = Callable[[Dependency], list[str]]
+
+# Braille spinner frames for the status bar while a worker is running.
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 DEP_COLUMNS = (
     " ",
@@ -60,17 +65,30 @@ def _plural(count: int, noun: str) -> str:
 
 def vulnerability_markdown(finding: Finding, vuln: Vulnerability) -> str:
     """Markdown shown in the detail pane for one advisory of a finding."""
+    from vulnscan.reports import constraint_facts
+
     dep = finding.dependency
     lines = [f"# {vuln.id}", ""]
     if vuln.summary:
         lines += [f"**{vuln.summary}**", ""]
+    declared = "; ".join(
+        (
+            f"{d.source_file} as `{d.constraint}`"
+            if d.constraint
+            else f"{d.source_file}; no version constraint"
+        )
+        for d in dep.declared_in
+    )
+    constraint_lines = [
+        f"- **Declared in:** {declared} (version from {dep.version_source})",
+    ]
+    for key, value in constraint_facts(finding):
+        if key == "Declared in":
+            continue
+        constraint_lines.append(f"- **{key}:** {value}")
     lines += [
         f"- **Package:** {dep.name} {dep.version or '(unknown version)'} ({dep.ecosystem})",
-        "- **Declared in:** "
-        + "; ".join(
-            f"{d.source_file} as `{d.constraint or 'any version'}`" for d in dep.declared_in
-        )
-        + f" (version from {dep.version_source})",
+        *constraint_lines,
         f"- **Severity:** {vuln.severity}" + (f" (`{vuln.cvss}`)" if vuln.cvss else ""),
         f"- **CVE:** {', '.join(vuln.cve_ids) or 'none assigned'}",
         f"- **Aliases:** {', '.join(vuln.aliases) or 'none'}",
@@ -101,8 +119,10 @@ class RemediateScreen(ModalScreen[str | None]):
     DEFAULT_CSS = """
     RemediateScreen { align: center middle; }
     #remediate-box {
-        width: 90; height: auto; padding: 1 2; border: thick $primary; background: $surface;
+        width: 90; height: auto; max-height: 90%; padding: 1 2;
+        border: thick $primary; background: $surface;
     }
+    #remediate-summary { height: auto; margin-bottom: 1; }
     #remediate-options { height: auto; margin-top: 1; }
     #remediate-help { color: $text-muted; margin-top: 1; }
     """
@@ -114,13 +134,18 @@ class RemediateScreen(ModalScreen[str | None]):
         self.plan = plan
 
     def compose(self) -> ComposeResult:
-        """Build the dialog: a description, the two upgrade options and a key hint."""
+        """Build the dialog: a multi-line summary, the two upgrade options and a key hint."""
+        from vulnscan.reports import constraint_facts
+
         dep = self.finding.dependency
+        summary = [
+            f"Upgrade {dep.name} (currently {self.plan.current or 'unknown'})",
+            *[f"{key}: {value}" for key, value in constraint_facts(self.finding)],
+        ]
+        if not self.plan.nearest_safe and not self.finding.upgrade_limit:
+            summary.append("Nearest safe: none available")
         with Vertical(id="remediate-box"):
-            yield Label(
-                f"Upgrade {dep.name} (currently {self.plan.current or 'unknown'}, "
-                f"declared in {dep.declared_in_text})"
-            )
+            yield Static("\n".join(summary), id="remediate-summary")
             if self.plan.nearest_safe:
                 nearest = Option(
                     f"Nearest safe version: {self.plan.nearest_safe}  "
@@ -200,12 +225,15 @@ class VulnScanApp(App[None]):
         self._dep_row_keys: list = []
         self._dep_column_keys: list = []
         self._status = "Starting scan..."
+        self._busy_message: str | None = None
+        self._spinner_index = 0
+        self._spinner_timer: Timer | None = None
         self._current_finding: Finding | None = None
         self._current_vuln: Vulnerability | None = None
 
     @property
     def status_text(self) -> str:
-        """Text currently shown in the status bar."""
+        """Base status text (without the busy spinner frame)."""
         return self._status
 
     @property
@@ -237,14 +265,49 @@ class VulnScanApp(App[None]):
         self.query_one("#vulns", DataTable).add_columns(*VULN_COLUMNS)
         self._start_scan()
 
-    # -- scanning -----------------------------------------------------------------
+    # -- status / busy spinner ----------------------------------------------------
 
     def _set_status(self, text: str) -> None:
+        """Set a finished status line and stop any busy spinner."""
+        self._stop_busy()
         self._status = text
         self.query_one("#status", Static).update(text)
 
+    def _start_busy(self, message: str) -> None:
+        """Show ``message`` with an animating spinner until the next ``_set_status``."""
+        self._stop_busy()
+        self._busy_message = message
+        self._status = message
+        self._spinner_index = 0
+        self._paint_busy()
+        self._spinner_timer = self.set_interval(0.1, self._tick_spinner)
+
+    def _paint_busy(self) -> None:
+        if self._busy_message is None:
+            return
+        frame = _SPINNER_FRAMES[self._spinner_index % len(_SPINNER_FRAMES)]
+        self.query_one("#status", Static).update(f"{frame} {self._busy_message}")
+
+    def _tick_spinner(self) -> None:
+        if self._busy_message is None:
+            return
+        self._spinner_index += 1
+        self._paint_busy()
+
+    def _stop_busy(self) -> None:
+        if self._spinner_timer is not None:
+            self._spinner_timer.stop()
+            self._spinner_timer = None
+        self._busy_message = None
+
+    def on_unmount(self) -> None:
+        """Stop the busy timer if the app is torn down mid-scan."""
+        self._stop_busy()
+
+    # -- scanning -----------------------------------------------------------------
+
     def _start_scan(self) -> None:
-        self._set_status(f"Scanning {self.settings.project_path} ...")
+        self._start_busy(f"Scanning {self.settings.project_path} ...")
         self.run_worker(self._scan_in_thread, thread=True, exclusive=True, exit_on_error=False)
 
     def _scan_in_thread(self) -> None:
@@ -280,7 +343,10 @@ class VulnScanApp(App[None]):
             f"{_plural(len(result.warnings), 'warning')}."
         )
         if result.warnings:
-            summary += f" First: {result.warnings[0]}"
+            first = result.warnings[0]
+            if len(first) > 120:
+                first = first[:117] + "..."
+            summary += f" First: {first}"
             if len(result.warnings) > 1:
                 summary += f" (+{len(result.warnings) - 1} more in the exported report)"
         self._set_status(summary.replace("dependencys", "dependencies"))
@@ -405,7 +471,7 @@ class VulnScanApp(App[None]):
         if finding is None:
             self.notify("Select a vulnerable dependency first.", severity="warning")
             return
-        self._set_status(f"Looking up available versions of {finding.dependency.name} ...")
+        self._start_busy(f"Looking up available versions of {finding.dependency.name} ...")
         self.run_worker(
             lambda: self._lookup_versions(finding),
             thread=True,
@@ -415,7 +481,11 @@ class VulnScanApp(App[None]):
 
     def _lookup_versions(self, finding: Finding) -> None:
         try:
-            plan = plan_remediation(finding, self._available_versions(finding.dependency))
+            plan = plan_remediation(
+                finding,
+                self._available_versions(finding.dependency),
+                webpack_merge=self.result.webpack_merge if self.result else None,
+            )
         except RegistryError as exc:
             self.call_from_thread(self._set_status, f"Could not look up versions: {exc}")
             return
@@ -435,24 +505,42 @@ class VulnScanApp(App[None]):
             if target is None:
                 self._set_status("That option has no version to upgrade to.")
                 return
-            self._apply_remediation(finding, target)
+            self._start_busy(f"Updating {finding.dependency.name} to {target} ...")
+            self.run_worker(
+                lambda: self._apply_remediation_in_thread(finding, target),
+                thread=True,
+                exclusive=False,
+                exit_on_error=False,
+            )
 
         self.push_screen(RemediateScreen(finding, plan), on_choice)
 
-    def _apply_remediation(self, finding: Finding, target: str) -> None:
+    def _apply_remediation_in_thread(self, finding: Finding, target: str) -> None:
         dep = finding.dependency
         try:
-            outcome = apply_remediation(self.settings.project_path, dep, target)
+            outcome = apply_remediation(
+                self.settings.project_path,
+                dep,
+                target,
+                settings=self.settings,
+                webpack_merge=self.result.webpack_merge if self.result else None,
+            )
         except (RemediationError, OSError) as exc:
-            self._set_status(f"Could not update {dep.name}: {exc}")
+            self.call_from_thread(self._set_status, f"Could not update {dep.name}: {exc}")
             return
+        self.call_from_thread(self._finish_remediation, finding, outcome)
+
+    def _finish_remediation(self, finding: Finding, outcome: RemediationResult) -> None:
+        dep = finding.dependency
         self._remediated[dep.key] = outcome.new_constraint
         self._refresh_dep_row(finding)
+        authoritative = outcome.authoritative_changes or outcome.changes
         edits = "; ".join(
             f"{c.source_file}: {c.old_constraint or '(any)'} -> {c.new_constraint}"
-            for c in outcome.changes
+            for c in authoritative
         )
-        self._set_status(f"Updated {edits}. {outcome.hint} Press r to rescan afterwards.")
+        warn = f" ({'; '.join(outcome.warnings)})" if outcome.warnings else ""
+        self._set_status(f"Updated {edits}. {outcome.hint}{warn} Press r to rescan afterwards.")
         self.notify(f"{dep.name} -> {outcome.new_constraint}")
 
     def action_open_advisory(self) -> None:

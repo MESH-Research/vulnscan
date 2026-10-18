@@ -128,6 +128,42 @@ async def test_status_shows_counts_and_warnings(tmp_path: Path):
         assert "1 warning" in status
 
 
+async def test_status_spins_while_scan_is_in_progress(tmp_path: Path):
+    import threading
+
+    from textual.widgets import Static
+
+    from vulnscan.tui import _SPINNER_FRAMES
+
+    settings = settings_for(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_scan(s: Settings) -> ScanResult:
+        started.set()
+        release.wait(timeout=5)
+        return sample_result(s.project_path)
+
+    app = VulnScanApp(settings, scan_fn=slow_scan)
+    async with app.run_test() as pilot:
+        for _ in range(50):
+            if started.is_set():
+                break
+            await pilot.pause(0.05)
+        assert started.is_set()
+        await pilot.pause(0.25)
+        rendered = str(app.query_one("#status", Static).content)
+        assert any(frame in rendered for frame in _SPINNER_FRAMES)
+        assert "Scanning" in rendered
+        assert app.status_text.startswith("Scanning")
+        assert app._busy_message is not None
+        release.set()
+        await settle(app, pilot)
+        assert "vulnerable" in app.status_text
+        assert app._busy_message is None
+        assert not any(frame in app.status_text for frame in _SPINNER_FRAMES)
+
+
 async def test_write_feeds_key_writes_files(tmp_path: Path):
     settings = settings_for(tmp_path)
     app = VulnScanApp(settings, scan_fn=lambda s: sample_result(s.project_path))
@@ -214,6 +250,16 @@ def test_detail_markdown_includes_wordfence_attribution():
     assert WORDFENCE_COPYRIGHT not in vulnerability_markdown(Finding(dep, [osv]), osv)
 
 
+def _monolog_remediate_scan(path: Path) -> ScanResult:
+    result = sample_result(path)
+    from vulnscan.models import VersionRange
+
+    result.findings[0].vulnerabilities[0].affected_ranges = [
+        VersionRange(lower="0", upper="1.0.1")
+    ]
+    return result
+
+
 async def test_remediate_key_offers_options_and_applies_choice(tmp_path: Path):
     settings = settings_for(tmp_path)
     project = settings.project_path
@@ -226,17 +272,11 @@ async def test_remediate_key_offers_options_and_applies_choice(tmp_path: Path):
         assert dep.name == "monolog/monolog"
         return ["1.0.0", "1.0.1", "1.5.0", "2.9.1"]
 
-    def scan_fn(s):
-        result = sample_result(s.project_path)
-        # make monolog's single advisory carry range data so planning can work
-        from vulnscan.models import VersionRange
-
-        result.findings[0].vulnerabilities[0].affected_ranges = [
-            VersionRange(lower="0", upper="1.0.1")
-        ]
-        return result
-
-    app = VulnScanApp(settings, scan_fn=scan_fn, versions_fn=fake_versions)
+    app = VulnScanApp(
+        settings,
+        scan_fn=lambda s: _monolog_remediate_scan(s.project_path),
+        versions_fn=fake_versions,
+    )
     async with app.run_test() as pilot:
         await settle(app, pilot)
         await pilot.press("u")
@@ -256,6 +296,57 @@ async def test_remediate_key_offers_options_and_applies_choice(tmp_path: Path):
         assert app.screen.__class__.__name__ != "RemediateScreen"
         assert '"monolog/monolog": "^1.0.1"' in (project / "composer.json").read_text()
         assert "composer update monolog/monolog" in app.status_text
+
+
+async def test_status_spins_while_remediation_applies(tmp_path: Path, monkeypatch):
+    import threading
+
+    from textual.widgets import Static
+
+    from vulnscan import remediate as remediate_mod
+    from vulnscan.tui import _SPINNER_FRAMES
+
+    settings = settings_for(tmp_path)
+    project = settings.project_path
+    project.mkdir()
+    (project / "composer.json").write_text(
+        '{\n  "require": {\n    "monolog/monolog": "^1.0"\n  }\n}\n'
+    )
+    started = threading.Event()
+    release = threading.Event()
+    real_apply = remediate_mod.apply_remediation
+
+    def slow_apply(*args, **kwargs):
+        started.set()
+        release.wait(timeout=5)
+        return real_apply(*args, **kwargs)
+
+    monkeypatch.setattr("vulnscan.tui.apply_remediation", slow_apply)
+
+    app = VulnScanApp(
+        settings,
+        scan_fn=lambda s: _monolog_remediate_scan(s.project_path),
+        versions_fn=lambda d: ["1.0.0", "1.0.1", "1.5.0", "2.9.1"],
+    )
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        assert app.screen.__class__.__name__ == "RemediateScreen"
+        await pilot.press("enter")
+        for _ in range(50):
+            if started.is_set():
+                break
+            await pilot.pause(0.05)
+        assert started.is_set()
+        await pilot.pause(0.25)
+        rendered = str(app.query_one("#status", Static).content)
+        assert any(frame in rendered for frame in _SPINNER_FRAMES)
+        assert "Updating" in rendered and "1.0.1" in rendered
+        release.set()
+        await settle(app, pilot)
+        assert "composer update monolog/monolog" in app.status_text
+        assert app._busy_message is None
 
 
 async def test_remediate_escape_cancels(tmp_path: Path):

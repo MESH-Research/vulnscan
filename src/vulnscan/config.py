@@ -46,6 +46,8 @@ _ENV_MAP: dict[str, tuple[str, Any]] = {
     "msteams_webhook_url": ("MSTEAMS_WEBHOOK_URL", ""),
     "msteams_state_filename": ("MSTEAMS_STATE_FILE", "msteams-state.json"),
     "interval_minutes": ("INTERVAL_MINUTES", "60"),
+    "invenio_webpack": ("INVENIO_WEBPACK", "auto"),
+    "invenio_webpack_overlay": ("INVENIO_WEBPACK_OVERLAY", ""),
 }
 
 _TRUE = {"1", "true", "yes", "on", "y"}
@@ -101,6 +103,8 @@ class Settings:
     msteams_webhook_url: str = ""
     msteams_state_filename: str = "msteams-state.json"
     interval_minutes: float = 60.0
+    invenio_webpack: str = "auto"
+    invenio_webpack_overlay: Path | None = None
 
     @property
     def ntfy_state_path(self) -> Path:
@@ -144,6 +148,24 @@ def _to_tuple(value: Any) -> tuple[str, ...]:
     return tuple(part.strip() for part in str(value).split(",") if part.strip())
 
 
+def _to_invenio_webpack(value: Any) -> str:
+    text = str(value).strip().lower()
+    if text not in {"auto", "on", "off"}:
+        raise ValueError(f"VULNSCAN_INVENIO_WEBPACK must be auto, on, or off (got {value!r})")
+    return text
+
+
+def _to_optional_path(value: Any) -> Path | None:
+    if value is None:
+        return None
+    if isinstance(value, Path):
+        return value.expanduser().resolve()
+    text = str(value).strip()
+    if not text:
+        return None
+    return Path(text).expanduser().resolve()
+
+
 _COERCERS = {
     "project_path": lambda v: Path(v).expanduser().resolve(),
     "feed_dir": lambda v: Path(v).expanduser().resolve(),
@@ -158,6 +180,8 @@ _COERCERS = {
     "ignore_dirs": _to_tuple,
     "ntfy_server": lambda v: str(v).rstrip("/"),
     "interval_minutes": float,
+    "invenio_webpack": _to_invenio_webpack,
+    "invenio_webpack_overlay": _to_optional_path,
 }
 
 

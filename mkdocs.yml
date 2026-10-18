@@ -51,6 +51,7 @@ nav:
       - Interactive and command line: usage.md
       - Ignoring directories: ignoring.md
       - Upgrading dependencies: remediation.md
+      - Invenio / webpack.py: invenio.md
       - Notifications (ntfy, Teams): notifications.md
       - Feeds and reports: feeds.md
   - Configuration: configuration.md

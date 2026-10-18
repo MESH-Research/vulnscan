@@ -51,6 +51,13 @@ class Declaration:
     dev: bool = False
 
 
+def format_declaration(declaration: Declaration) -> str:
+    """``path as constraint``, or ``path; no version constraint`` when the constraint is empty."""
+    if declaration.constraint:
+        return f"{declaration.source_file} as {declaration.constraint}"
+    return f"{declaration.source_file}; no version constraint"
+
+
 @dataclass(frozen=True)
 class Dependency:
     """A direct dependency declared in a manifest."""
@@ -86,10 +93,8 @@ class Dependency:
 
     @property
     def declared_in_text(self) -> str:
-        """Human-readable list such as ``a.txt as ==1.0; b.txt as >=1``."""
-        return "; ".join(
-            f"{d.source_file} as {d.constraint or 'any version'}" for d in self.declared_in
-        )
+        """Human-readable list such as ``a.txt as ==1.0; b.txt; no version constraint``."""
+        return "; ".join(format_declaration(d) for d in self.declared_in)
 
 
 def merge_declarations(deps: list[Dependency]) -> list[Dependency]:
@@ -179,6 +184,12 @@ class Finding:
 
     dependency: Dependency
     vulnerabilities: list[Vulnerability]
+    webpack_merge_block: str | None = None
+    """When set, pywebpack cannot merge a safe upgrade (no nearest-safe option)."""
+    upstream_constraints_text: str | None = None
+    """Invenio npm: formatted merge-tree constraints, or ``none``; unset outside Invenio mode."""
+    upgrade_limit: str | None = None
+    """Human-readable reason a safe upgrade is blocked or requires a major bump."""
 
     @property
     def worst_severity(self) -> str:
@@ -216,3 +227,5 @@ class ScanResult:
     findings: list[Finding]
     warnings: list[str]
     scanned_at: datetime
+    webpack_merge: object | None = None
+    """Optional :class:`vulnscan.invenio.WebpackMergeIndex` from the post-scan merge pass."""

@@ -36,14 +36,44 @@ def _vuln_facts(vuln: Vulnerability) -> list[tuple[str, str]]:
     return facts
 
 
-def _dep_facts(finding: Finding) -> list[tuple[str, str]]:
+def _nearest_safe_cell(finding: Finding, result: ScanResult) -> str:
+    """Nearest-safe display for reports: ``none`` when pywebpack blocks an upgrade."""
+    if finding.webpack_merge_block:
+        return "none"
+    merge = result.webpack_merge
+    if merge is not None and finding.dependency.ecosystem == "npm":
+        allows = getattr(merge, "allows", None)
+        if allows is not None:
+            mergeable = [
+                ver for ver in finding.fixed_versions if allows(finding.dependency.name, ver)
+            ]
+            if finding.fixed_versions and not mergeable:
+                return "none"
+            if mergeable:
+                return mergeable[0]
+    return ", ".join(finding.fixed_versions) or "—"
+
+
+def constraint_facts(finding: Finding) -> list[tuple[str, str]]:
+    """Declared in / Upstream constraints / Upgrade limit for details and notifications."""
+    facts = [("Declared in", finding.dependency.declared_in_text)]
+    if finding.upstream_constraints_text is not None:
+        facts.append(("Upstream constraints", finding.upstream_constraints_text))
+    if finding.upgrade_limit:
+        facts.append(("Upgrade limit", finding.upgrade_limit))
+    return facts
+
+
+def _dep_facts(finding: Finding, result: ScanResult) -> list[tuple[str, str]]:
     dep = finding.dependency
-    return [
+    facts = [
         ("Ecosystem", dep.ecosystem + (f" {dep.kind}" if dep.kind else "")),
         ("Version", f"{dep.version or 'unknown'} (from {dep.version_source})"),
-        ("Declared in", dep.declared_in_text),
+        *constraint_facts(finding),
         ("Fixed in", ", ".join(finding.fixed_versions) or "no fix listed"),
+        ("Nearest safe", _nearest_safe_cell(finding, result)),
     ]
+    return facts
 
 
 def render_markdown(result: ScanResult) -> str:
@@ -59,8 +89,9 @@ def render_markdown(result: ScanResult) -> str:
         lines += [
             "## Summary",
             "",
-            "| Package | Ecosystem | Version | Severity | Advisories | Fixed in | Declared in |",
-            "|---|---|---|---|---|---|---|",
+            "| Package | Ecosystem | Version | Severity | Advisories | Fixed in | "
+            "Nearest safe | Declared in |",
+            "|---|---|---|---|---|---|---|---|",
         ]
         for finding in result.findings:
             dep = finding.dependency
@@ -68,13 +99,14 @@ def render_markdown(result: ScanResult) -> str:
             lines.append(
                 f"| {dep.name} | {dep.ecosystem} | {dep.version or '?'} | {finding.worst_severity} "
                 f"| {ids} | {', '.join(finding.fixed_versions) or '-'} "
+                f"| {_nearest_safe_cell(finding, result)} "
                 f"| {', '.join(dep.source_files)} |"
             )
         lines += ["", "## Details", ""]
         for finding in result.findings:
             dep = finding.dependency
             lines += [f"### {dep.name} {dep.version or ''}".rstrip(), ""]
-            lines += [f"- **{k}:** {v}" for k, v in _dep_facts(finding)]
+            lines += [f"- **{k}:** {v}" for k, v in _dep_facts(finding, result)]
             lines.append("")
             for vuln in finding.vulnerabilities:
                 title = f"#### {vuln.id}" + (f": {vuln.summary}" if vuln.summary else "")
@@ -87,6 +119,21 @@ def render_markdown(result: ScanResult) -> str:
                     lines += ["References:", ""]
                     lines += [f"- <{url}>" for url in vuln.references]
                     lines.append("")
+    merge = result.webpack_merge
+    conflicts = getattr(merge, "conflicts", ()) if merge is not None else ()
+    if conflicts:
+        lines += ["## Webpack merge conflicts", ""]
+        lines += [
+            "These packages have incompatible major-version constraints across "
+            "webpack bundles (pywebpack cannot merge them). Nearest-safe upgrades "
+            "are reported as **none** until the constraints agree.",
+            "",
+        ]
+        for conflict in conflicts:
+            lines.append(f"- **{conflict.package}:**")
+            for src, constraint in conflict.entries:
+                lines.append(f"  - `{src}`: `{constraint}`")
+            lines.append("")
     if result.warnings:
         lines += ["## Warnings", ""]
         lines += [f"- {w}" for w in result.warnings]
@@ -106,7 +153,7 @@ def render_text(result: ScanResult) -> str:
         dep = finding.dependency
         heading = f"{dep.name} {dep.version or ''}".rstrip() + f"  [{finding.worst_severity}]"
         lines += [heading, "-" * len(heading)]
-        lines += [f"  {k}: {v}" for k, v in _dep_facts(finding)]
+        lines += [f"  {k}: {v}" for k, v in _dep_facts(finding, result)]
         lines.append("")
         for vuln in finding.vulnerabilities:
             lines.append(f"  * {vuln.id}" + (f": {vuln.summary}" if vuln.summary else ""))
@@ -117,6 +164,20 @@ def render_text(result: ScanResult) -> str:
             if vuln.references:
                 lines += ["", "      References:"]
                 lines += [f"        {url}" for url in vuln.references]
+            lines.append("")
+    merge = result.webpack_merge
+    conflicts = getattr(merge, "conflicts", ()) if merge is not None else ()
+    if conflicts:
+        lines += [
+            "Webpack merge conflicts",
+            "-----------------------",
+            "Incompatible majors across webpack bundles; nearest safe is none.",
+            "",
+        ]
+        for conflict in conflicts:
+            lines.append(f"  {conflict.package}:")
+            for src, constraint in conflict.entries:
+                lines.append(f"    - {src}: {constraint}")
             lines.append("")
     if result.warnings:
         lines += ["Warnings", "--------"]
