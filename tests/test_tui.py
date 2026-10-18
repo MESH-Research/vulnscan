@@ -254,9 +254,7 @@ def _monolog_remediate_scan(path: Path) -> ScanResult:
     result = sample_result(path)
     from vulnscan.models import VersionRange
 
-    result.findings[0].vulnerabilities[0].affected_ranges = [
-        VersionRange(lower="0", upper="1.0.1")
-    ]
+    result.findings[0].vulnerabilities[0].affected_ranges = [VersionRange(lower="0", upper="1.0.1")]
     return result
 
 

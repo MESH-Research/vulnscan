@@ -214,9 +214,7 @@ theme = WebpackThemeBundle(
     settings = _settings(tmp_path)
     apply_remediation(tmp_path, dep, "1.20.0", settings=settings)
     assert extract_theme_dependencies(overlay.read_text())["axios"] == "^1.20.0"
-    assert (
-        extract_theme_dependencies((fork / "webpack.py").read_text())["axios"] == "^1.9.0"
-    )
+    assert extract_theme_dependencies((fork / "webpack.py").read_text())["axios"] == "^1.9.0"
     overlay.write_text(OVERLAY)
     (fork / "webpack.py").write_text(
         """\

@@ -313,9 +313,7 @@ class WebpackMergeIndex:
         if any(self.allows(package, ver) for ver in fixed_versions):
             return None
         entries = self.entries_for(package)
-        constraint_majors = sorted(
-            {m for _, c in entries if (m := npm_major(c)) is not None}
-        )
+        constraint_majors = sorted({m for _, c in entries if (m := npm_major(c)) is not None})
         fixed_majors = sorted({m for ver in fixed_versions if (m := npm_major(ver)) is not None})
         if constraint_majors and fixed_majors and set(constraint_majors).isdisjoint(fixed_majors):
             held = ", ".join(f"major {m}" for m in constraint_majors)

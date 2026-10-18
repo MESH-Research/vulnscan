@@ -224,7 +224,9 @@ def parse_project(
         if directory not in lock_cache:
             lock_cache[directory] = load_lock_versions(directory)
         # Theme bundles → project-root install; otherwise the adjacent lock.
-        locks = root_locks if manifest.name == "webpack.py" and root_locks else lock_cache[directory]
+        locks = (
+            root_locks if manifest.name == "webpack.py" and root_locks else lock_cache[directory]
+        )
         for dep in parse_manifest(manifest, root):
             resolved = resolve_dependency(dep, locks)
             if resolved.version is None:
