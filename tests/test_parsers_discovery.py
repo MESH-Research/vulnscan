@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from vulnscan.models import PACKAGIST, PYPI
+from vulnscan.models import NPM, PACKAGIST, PYPI
 from vulnscan.parsers import (
     discover_manifests,
     is_manifest,
@@ -322,3 +322,122 @@ def test_parse_project_resolves_npm_versions_from_package_lock(tmp_path: Path):
         ("jest", NPM, "29.0.0", "constraint", True),
     ]
     assert warnings == []
+
+
+# -- transitive dependencies ---------------------------------------------------------------
+
+_UV_LOCK = """
+[[package]]
+name = "x"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [{ name = "httpx" }]
+
+[[package]]
+name = "httpx"
+version = "0.27.0"
+dependencies = [{ name = "certifi" }, { name = "httpcore" }]
+
+[[package]]
+name = "certifi"
+version = "2024.2.2"
+
+[[package]]
+name = "httpcore"
+version = "1.0.0"
+dependencies = [{ name = "certifi" }]
+"""
+
+
+def test_parse_project_adds_transitive_lock_entries_when_asked(tmp_path: Path):
+    (tmp_path / "pyproject.toml").write_text('[project]\nname="x"\ndependencies=["httpx>=0.27"]\n')
+    (tmp_path / "uv.lock").write_text(_UV_LOCK)
+    deps, warnings = parse_project(tmp_path, include_transitive=True)
+    assert [(d.name, d.transitive) for d in deps] == [
+        ("httpx", False),
+        ("certifi", True),
+        ("httpcore", True),
+    ]
+    certifi = deps[1]
+    assert certifi.ecosystem == PYPI
+    assert certifi.version == "2024.2.2"
+    assert certifi.version_source == "lock"
+    assert certifi.source_file == "uv.lock"
+    assert certifi.constraint == ""
+    assert certifi.required_by == ("httpcore", "httpx")
+    assert deps[2].required_by == ("httpx",)
+    assert "transitive" in certifi.declared_in_text
+    assert warnings == []
+
+
+def test_parse_project_transitive_entries_use_the_lock_next_to_each_manifest(tmp_path: Path):
+    (tmp_path / "requirements.txt").write_text("requests==2.31.0\n")
+    front = tmp_path / "frontend"
+    front.mkdir()
+    (front / "package.json").write_text(json.dumps({"dependencies": {"express": "^4"}}))
+    (front / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "lockfileVersion": 3,
+                "packages": {
+                    "node_modules/express": {
+                        "version": "4.18.2",
+                        "dependencies": {"body-parser": "1.20.1"},
+                    },
+                    "node_modules/body-parser": {"version": "1.20.1"},
+                },
+            }
+        )
+    )
+    deps, _ = parse_project(tmp_path, include_transitive=True)
+    transitive = [d for d in deps if d.transitive]
+    assert [(d.name, d.ecosystem, d.source_file) for d in transitive] == [
+        ("body-parser", NPM, "frontend/package-lock.json")
+    ]
+    assert transitive[0].required_by == ("express",)
+
+
+def test_parse_project_transitive_composer_packages_are_classified_and_dev_flagged(
+    tmp_path: Path,
+):
+    from vulnscan.models import WORDPRESS
+
+    (tmp_path / "composer.json").write_text(json.dumps({"require": {"a/b": "^1"}}))
+    (tmp_path / "composer.lock").write_text(
+        json.dumps(
+            {
+                "packages": [
+                    {
+                        "name": "a/b",
+                        "version": "1.0.0",
+                        "require": {"wpackagist-plugin/akismet": "*"},
+                    },
+                    {
+                        "name": "wpackagist-plugin/akismet",
+                        "version": "5.3",
+                        "type": "wordpress-plugin",
+                    },
+                ],
+                "packages-dev": [{"name": "phpunit/phpunit", "version": "10.5.0"}],
+            }
+        )
+    )
+    deps, _ = parse_project(tmp_path, include_transitive=True)
+    by_name = {d.name: d for d in deps}
+    akismet = by_name["wpackagist-plugin/akismet"]
+    assert akismet.transitive is True
+    assert akismet.ecosystem == WORDPRESS
+    assert akismet.kind == "plugin"
+    assert akismet.slug == "akismet"
+    assert akismet.required_by == ("a/b",)
+    assert by_name["phpunit/phpunit"].dev is True
+    assert by_name["a/b"].transitive is False
+
+
+def test_parse_project_transitive_entries_never_duplicate_direct_dependencies(tmp_path: Path):
+    (tmp_path / "requirements.txt").write_text("Requests==2.31.0\n")
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname="requests"\nversion="2.31.0"\n\n[[package]]\nname="urllib3"\nversion="2.0.0"\n'
+    )
+    deps, _ = parse_project(tmp_path, include_transitive=True)
+    assert [(d.name, d.transitive) for d in deps] == [("Requests", False), ("urllib3", True)]

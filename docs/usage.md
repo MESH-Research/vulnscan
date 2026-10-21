@@ -107,9 +107,35 @@ Or list patterns in a `.vulnscanignore` file in the project root. See
 | WordPress | `composer.json` entries for `wp-plugin/*`, `wp-theme/*`, `wpackagist-plugin/*`, `wpackagist-theme/*`, `roots/wordpress`, `johnpbloch/wordpress`, and any package the lock file types as `wordpress-plugin`, `wordpress-muplugin`, `wordpress-theme` or `wordpress-core` | `composer.lock` |
 | Node.js (npm) | `package.json` (`dependencies`, `optionalDependencies`, `devDependencies`; `npm:` aliases followed; git, path, tarball and workspace specs skipped; `peerDependencies` ignored) | `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock` (classic and Berry), `pnpm-lock.yaml` (root importer) |
 
-Only the versions of direct dependencies are read from lock files; for
-`yarn.lock`, a package that appears at several versions is taken at the
-first one listed.
+Lock files resolve the versions of direct dependencies; for `yarn.lock`, a
+package that appears at several versions is taken at the first one listed.
+With `--transitive` the other packages they record are scanned too.
+
+## Transitive dependencies
+
+```
+uv run vulnscan --transitive --path /path/to/project
+uv run vulnscan --transitive --outdated --path /path/to/project
+```
+
+By default only packages declared in a manifest are scanned. `--transitive`
+(or `VULNSCAN_TRANSITIVE=true`) adds every package recorded in a lock file
+next to a manifest: `uv.lock`, `poetry.lock`, `Pipfile.lock`,
+`composer.lock`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock` and
+`pnpm-lock.yaml`. The TUI's **Via** column reads `lock (transitive)`, and
+wherever a declaring file is listed the entry reads
+`uv.lock (transitive; required by httpcore, httpx)`. Requirers come from
+`uv.lock`, `poetry.lock`, `composer.lock` and `package-lock.json`; `Pipfile.lock`,
+`yarn.lock` and `pnpm-lock.yaml` list the package without them. The project's
+own package in `uv.lock` is never listed, and `composer.lock` types such as
+`wordpress-plugin` are honoured, so a transitive WordPress plugin is checked
+against Wordfence like a direct one. `VULNSCAN_INCLUDE_DEV=false` drops
+packages the lock marks as development-only.
+
+A transitive package has no manifest line to rewrite, so pressing `u` (after
+a confirmation dialog) or running `--remediate` inserts a constraint into the
+manifest next to the lock file instead; see
+[Upgrading dependencies](remediation.md#transitive-dependencies).
 
 ## A package declared in several files
 

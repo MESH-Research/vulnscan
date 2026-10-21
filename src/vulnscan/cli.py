@@ -36,8 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vulnscan",
         description=(
-            "Scan a Python, PHP, WordPress or Node.js project's direct dependencies for "
-            "known security advisories. Without flags, opens the interactive TUI."
+            "Scan a Python, PHP, WordPress or Node.js project's dependencies for known "
+            "security advisories (direct ones by default, see --transitive). Without "
+            "flags, opens the interactive TUI."
         ),
         epilog=(
             "Settings come from VULNSCAN_* environment variables or a .env file. "
@@ -55,6 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--update-feeds",
         action="store_true",
         help="non-interactive: scan and rewrite the RSS and Atom feeds, then exit",
+    )
+    parser.add_argument(
+        "--transitive",
+        action="store_true",
+        help="also scan packages that lock files record but no manifest declares, marked "
+        "as transitive with what requires them (VULNSCAN_TRANSITIVE)",
     )
     parser.add_argument("--path", help="project directory to scan (VULNSCAN_PROJECT_PATH)")
     parser.add_argument("--feed-dir", help="directory to write feeds into (VULNSCAN_FEED_DIR)")
@@ -222,6 +229,9 @@ def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     for change in outcome.authoritative_changes or outcome.changes:
+        if change.added:
+            print(f"Added {change.new_constraint} to {change.source_file}")
+            continue
         print(
             f"Updated {change.source_file}: {change.old_constraint or '(any)'} -> "
             f"{change.new_constraint}"
@@ -326,8 +336,11 @@ def run_tui(settings: Settings, outdated: bool = False) -> None:
 
 
 def _print_summary(result: ScanResult, written: list[Path]) -> None:
+    transitive = sum(1 for d in result.dependencies if d.transitive)
+    scope = "dependencies" if transitive else "direct dependencies"
+    extra = f" ({transitive} transitive)" if transitive else ""
     print(
-        f"Scanned {len(result.dependencies)} direct dependencies in {result.project_path}: "
+        f"Scanned {len(result.dependencies)} {scope}{extra} in {result.project_path}: "
         f"{len(result.findings)} with known advisories."
     )
     for finding in result.findings:
@@ -336,6 +349,9 @@ def _print_summary(result: ScanResult, written: list[Path]) -> None:
         fixed = ", ".join(finding.fixed_versions) or "no fix listed"
         files = ", ".join(dep.source_files)
         print(f"  [{finding.worst_severity}] {dep.name} {dep.version or '?'} ({files})")
+        if dep.transitive:
+            via = f", required by {', '.join(dep.required_by)}" if dep.required_by else ""
+            print(f"      transitive dependency{via}")
         print(f"      advisories: {ids}")
         print(f"      fixed in: {fixed}")
     for warning in result.warnings:
@@ -404,6 +420,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "interval_minutes": args.interval,
                 "invenio_webpack": args.invenio_webpack,
                 "invenio_webpack_overlay": args.invenio_webpack_overlay,
+                "include_transitive": True if args.transitive else None,
             },
         )
     except ValueError as exc:

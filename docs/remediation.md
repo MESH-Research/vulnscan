@@ -71,6 +71,39 @@ In the TUI the dependency's row and its advisories turn green with a ✔
 marker persists across rescans in the same session, since the dependency
 keeps showing as vulnerable until the lock file is updated.
 
+## Transitive dependencies
+
+A package that only a lock file records (see `--transitive`) is not declared
+anywhere, so there is no constraint to rewrite. Instead vulnscan **inserts**
+one into the manifest next to that lock file. Pressing `u` first shows a
+confirmation dialog naming the file, the section and the exact text that
+will be added, with one option per candidate version (nearest safe and
+latest, or newest-in-series and latest in outdated mode); Esc leaves the
+file untouched. `--remediate` inserts the constraint straight away and prints
+`Added certifi>=2026.10.19 to pyproject.toml`.
+
+| Lock file | Manifest and section | Entry |
+|-----------|---------------------|-------|
+| `uv.lock`, `poetry.lock` | `pyproject.toml`: `[project] dependencies`, or the `[tool.poetry.dependencies]` table when there is no `[project]` table; `requirements.txt` when there is no `pyproject.toml` | `"certifi>=2026.10.19"` / `certifi = ">=2026.10.19"` / `certifi>=2026.10.19` |
+| `Pipfile.lock` | `Pipfile`: `[packages]` | `certifi = ">=2026.10.19"` |
+| `composer.lock` | `composer.json`: `require` | `"psr/log": "^3.0.1"` |
+| `package-lock.json`, `npm-shrinkwrap.json` | `package.json`: `overrides` | `"cookie": "^0.6.0"` |
+| `yarn.lock` | `package.json`: `resolutions` | `"cookie": "^0.6.0"` |
+| `pnpm-lock.yaml` | `package.json`: `pnpm.overrides` | `"cookie": "^0.6.0"` |
+
+The entry goes first in an existing array or object, a missing
+`overrides`/`resolutions`/`pnpm` section is appended to `package.json`, and
+a missing `dependencies` array is added under `[project]`. Formatting and
+everything else in the file stay as they were. If the section already names
+the package (an older override, say) its value is replaced. Then run the
+lock tool the status line suggests, and rescan.
+
+When no manifest can take the entry (no `pyproject.toml` or
+`requirements.txt` next to `uv.lock`, or an Invenio project whose
+`package.json` is generated) nothing is written. The status line, or the
+error with exit code 1, then says what requires the package and which
+constraint to add by hand.
+
 ## Command line
 
 ```

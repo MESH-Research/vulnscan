@@ -217,3 +217,16 @@ def test_ntfy_values_from_environment(tmp_path: Path):
     assert settings.ntfy_state_path == settings.feed_dir / "sent.json"
     assert settings.msteams_webhook_url == "https://example.webhook.office.com/abc"
     assert settings.msteams_state_path == settings.feed_dir / "teams.json"
+
+
+def test_transitive_setting_defaults_off_and_reads_environment(tmp_path: Path):
+    settings = load_settings(env={}, dotenv_path=tmp_path / "missing.env")
+    assert settings.include_transitive is False
+    settings = load_settings(
+        env={"VULNSCAN_TRANSITIVE": "true"}, dotenv_path=tmp_path / "missing.env"
+    )
+    assert settings.include_transitive is True
+    settings = load_settings(
+        env={}, dotenv_path=tmp_path / "missing.env", overrides={"include_transitive": True}
+    )
+    assert settings.include_transitive is True

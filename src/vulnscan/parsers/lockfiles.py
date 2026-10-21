@@ -1,4 +1,7 @@
-"""Lock file readers. These only resolve versions of direct dependencies.
+"""Lock file readers.
+
+:func:`load_lock_versions` resolves the versions of direct dependencies;
+:func:`load_lock_packages` lists every package a lock records, with what requires it.
 
 ``yarn.lock`` and ``pnpm-lock.yaml`` are read with small line-based parsers rather than a
 YAML library; they cover the regular structure those tools emit."""
@@ -9,10 +12,30 @@ import json
 import re
 import tomllib
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from vulnscan.models import NPM, PACKAGIST, PYPI, normalize_name
 from vulnscan.parsers.versions import normalize_version
+
+
+@dataclass(frozen=True)
+class LockedPackage:
+    """One package recorded in a lock file.
+
+    ``name`` is canonical for the ecosystem, ``requires`` lists the canonical names of the
+    packages it depends on (empty when the lock format does not say), ``dev`` whether
+    the lock marks it as a development-only install and ``lock_type`` the package type a
+    composer.lock records (``wordpress-plugin`` ...), otherwise ``None``.
+    """
+
+    ecosystem: str
+    name: str
+    version: str
+    lock_file: str
+    requires: tuple[str, ...] = ()
+    dev: bool = False
+    lock_type: str | None = None
 
 
 def composer_lock_packages(path: Path) -> dict[str, dict]:
@@ -231,6 +254,183 @@ LOCK_PARSERS: dict[str, tuple[str, Callable[[Path], dict[str, str]]]] = {
     "yarn.lock": (NPM, parse_yarn_lock),
     "pnpm-lock.yaml": (NPM, parse_pnpm_lock),
 }
+
+
+def _names(items: object, ecosystem: str) -> tuple[str, ...]:
+    """Canonical, sorted, distinct names from a dependency list (uv) or mapping (poetry, npm)."""
+    found: set[str] = set()
+    if isinstance(items, dict):
+        found = {normalize_name(str(k), ecosystem) for k in items}
+    elif isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                found.add(normalize_name(item["name"], ecosystem))
+            elif isinstance(item, str):
+                found.add(normalize_name(item, ecosystem))
+    return tuple(sorted(found))
+
+
+def _toml_entries(path: Path, lock_file: str) -> list[LockedPackage]:
+    """uv.lock and poetry.lock packages; the project itself (editable/virtual) is skipped."""
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    entries: list[LockedPackage] = []
+    for pkg in data.get("package") or []:
+        if not isinstance(pkg, dict):
+            continue
+        name, version = pkg.get("name"), pkg.get("version")
+        if not (isinstance(name, str) and isinstance(version, str)):
+            continue
+        source = pkg.get("source") if isinstance(pkg.get("source"), dict) else {}
+        if "editable" in source or "virtual" in source:
+            continue
+        entries.append(
+            LockedPackage(
+                PYPI,
+                normalize_name(name, PYPI),
+                normalize_version(version),
+                lock_file,
+                requires=_names(pkg.get("dependencies"), PYPI),
+                dev=str(pkg.get("category", "")).lower() == "dev",
+            )
+        )
+    return entries
+
+
+def _composer_entries(path: Path, lock_file: str) -> list[LockedPackage]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return []
+    entries: list[LockedPackage] = []
+    for section, dev in (("packages", False), ("packages-dev", True)):
+        for pkg in data.get(section) or []:
+            if not isinstance(pkg, dict):
+                continue
+            name, version = pkg.get("name"), pkg.get("version")
+            if not (isinstance(name, str) and isinstance(version, str)):
+                continue
+            require = pkg.get("require") if isinstance(pkg.get("require"), dict) else {}
+            # Platform requirements (php, ext-*, lib-*) have no vendor prefix.
+            packages = {k: v for k, v in require.items() if "/" in str(k)}
+            entries.append(
+                LockedPackage(
+                    PACKAGIST,
+                    normalize_name(name, PACKAGIST),
+                    normalize_version(version),
+                    lock_file,
+                    requires=_names(packages, PACKAGIST),
+                    dev=dev,
+                    lock_type=pkg.get("type") if isinstance(pkg.get("type"), str) else None,
+                )
+            )
+    return entries
+
+
+def _pipfile_entries(path: Path, lock_file: str) -> list[LockedPackage]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    entries: list[LockedPackage] = []
+    for section, dev in (("default", False), ("develop", True)):
+        for name, spec in (data.get(section) or {}).items():
+            version = spec.get("version") if isinstance(spec, dict) else None
+            if isinstance(version, str):
+                entries.append(
+                    LockedPackage(
+                        PYPI,
+                        normalize_name(name, PYPI),
+                        normalize_version(version.lstrip("=")),
+                        lock_file,
+                        dev=dev,
+                    )
+                )
+    return entries
+
+
+def _package_lock_entries(path: Path, lock_file: str) -> list[LockedPackage]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return []
+    entries: list[LockedPackage] = []
+    packages = data.get("packages")
+    if isinstance(packages, dict):
+        for key, meta in packages.items():
+            if not (isinstance(key, str) and key.startswith(_NODE_MODULES)):
+                continue
+            name = key[len(_NODE_MODULES) :]
+            if _NODE_MODULES in name or not isinstance(meta, dict):
+                continue
+            version = meta.get("version")
+            if not isinstance(version, str):
+                continue
+            requires = {
+                **(meta.get("dependencies") if isinstance(meta.get("dependencies"), dict) else {}),
+                **(
+                    meta.get("optionalDependencies")
+                    if isinstance(meta.get("optionalDependencies"), dict)
+                    else {}
+                ),
+            }
+            entries.append(
+                LockedPackage(
+                    NPM,
+                    normalize_name(name, NPM),
+                    normalize_version(version),
+                    lock_file,
+                    requires=_names(requires, NPM),
+                    dev=bool(meta.get("dev")),
+                )
+            )
+        return entries
+    for name, meta in (data.get("dependencies") or {}).items():
+        version = meta.get("version") if isinstance(meta, dict) else None
+        if isinstance(version, str):
+            entries.append(
+                LockedPackage(
+                    NPM,
+                    normalize_name(str(name), NPM),
+                    normalize_version(version),
+                    lock_file,
+                    requires=_names(meta.get("requires"), NPM),
+                    dev=bool(meta.get("dev")),
+                )
+            )
+    return entries
+
+
+def _flat_entries(parser: Callable[[Path], dict[str, str]], ecosystem: str):
+    """Entries for formats whose requirers are not read (yarn.lock, pnpm-lock.yaml)."""
+
+    def read(path: Path, lock_file: str) -> list[LockedPackage]:
+        return [LockedPackage(ecosystem, n, v, lock_file) for n, v in parser(path).items()]
+
+    return read
+
+
+_LOCK_ENTRY_PARSERS: dict[str, Callable[[Path, str], list[LockedPackage]]] = {
+    "composer.lock": _composer_entries,
+    "uv.lock": _toml_entries,
+    "poetry.lock": _toml_entries,
+    "Pipfile.lock": _pipfile_entries,
+    "package-lock.json": _package_lock_entries,
+    "npm-shrinkwrap.json": _package_lock_entries,
+    "yarn.lock": _flat_entries(parse_yarn_lock, NPM),
+    "pnpm-lock.yaml": _flat_entries(parse_pnpm_lock, NPM),
+}
+
+
+def load_lock_packages(directory: Path) -> list[LockedPackage]:
+    """Every package recorded by every lock file in a directory, with what requires it.
+
+    Corrupt or unreadable lock files are skipped, as in :func:`load_lock_versions`.
+    """
+    entries: list[LockedPackage] = []
+    for filename, parser in _LOCK_ENTRY_PARSERS.items():
+        path = directory / filename
+        if not path.is_file():
+            continue
+        try:
+            entries.extend(parser(path, filename))
+        except (ValueError, OSError, UnicodeDecodeError, AttributeError):
+            continue
+    return entries
 
 
 def load_lock_versions(directory: Path) -> dict[tuple[str, str], str]:

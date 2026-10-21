@@ -547,3 +547,303 @@ def test_pipfile_script_named_like_a_package_is_left_alone(tmp_path: Path):
     assert (tmp_path / "Pipfile").read_text() == original.replace(
         'django = "==6.0.7"', 'django = "==6.1.2"'
     )
+
+
+# -- transitive dependencies cannot be edited in place ----------------------------------------
+
+
+def _certifi(required_by=("httpx",), lock="uv.lock"):
+    from vulnscan.models import PYPI, Dependency
+
+    return Dependency(
+        "certifi", PYPI, "", "2024.2.2", "lock", lock, transitive=True, required_by=required_by
+    )
+
+
+def test_plan_pin_targets_pyproject_next_to_uv_lock(tmp_path: Path):
+    from vulnscan.remediate import plan_pin
+
+    (tmp_path / "uv.lock").write_text('[[package]]\nname="certifi"\nversion="2024.2.2"\n')
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\ndependencies = [\n]\n')
+    plan = plan_pin(tmp_path, _certifi(), "2026.10.19")
+    assert plan.path == tmp_path / "pyproject.toml"
+    assert plan.source_file == "pyproject.toml"
+    assert plan.entry == "certifi>=2026.10.19"
+    assert "dependencies" in plan.section
+    assert plan.replaces is None
+
+
+def test_apply_pin_inserts_into_multi_line_pep621_array(tmp_path: Path):
+    from vulnscan.remediate import apply_pin
+
+    (tmp_path / "uv.lock").write_text("")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = [\n    "httpx>=0.27",\n]\n\n'
+        "[tool.ruff]\nline-length = 100\n"
+    )
+    outcome = apply_pin(tmp_path, _certifi(), "2026.10.19")
+    assert (tmp_path / "pyproject.toml").read_text() == (
+        '[project]\nname = "x"\ndependencies = [\n    "certifi>=2026.10.19",\n'
+        '    "httpx>=0.27",\n]\n'
+        "\n[tool.ruff]\nline-length = 100\n"
+    )
+    assert outcome.new_constraint == "certifi>=2026.10.19"
+    assert outcome.changes[0].added is True
+    assert outcome.changes[0].source_file == "pyproject.toml"
+    assert "uv lock" in outcome.hint
+
+
+def test_apply_pin_inserts_into_single_line_and_empty_pep621_arrays(tmp_path: Path):
+    from vulnscan.remediate import apply_pin
+
+    (tmp_path / "uv.lock").write_text("")
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "x"\ndependencies = ["httpx>=0.27", "rich"]\n')
+    apply_pin(tmp_path, _certifi(), "2026.10.19")
+    assert pyproject.read_text() == (
+        '[project]\nname = "x"\ndependencies = ["certifi>=2026.10.19", "httpx>=0.27", "rich"]\n'
+    )
+    pyproject.write_text('[project]\nname = "x"\ndependencies = []\n')
+    apply_pin(tmp_path, _certifi(), "2026.10.19")
+    assert pyproject.read_text() == (
+        '[project]\nname = "x"\ndependencies = [\n    "certifi>=2026.10.19",\n]\n'
+    )
+
+
+def test_apply_pin_adds_a_dependencies_array_when_project_has_none(tmp_path: Path):
+    from vulnscan.remediate import apply_pin
+
+    (tmp_path / "uv.lock").write_text("")
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "1.0"\n\n[tool.uv]\ndev-dependencies = []\n'
+    )
+    apply_pin(tmp_path, _certifi(), "2026.10.19")
+    text = pyproject.read_text()
+    assert 'dependencies = [\n    "certifi>=2026.10.19",\n]\n' in text
+    assert text.index("[project]") < text.index("certifi") < text.index("[tool.uv]")
+    import tomllib
+
+    assert tomllib.loads(text)["project"]["dependencies"] == ["certifi>=2026.10.19"]
+
+
+def test_apply_pin_uses_poetry_table_next_to_poetry_lock(tmp_path: Path):
+    from vulnscan.remediate import apply_pin
+
+    (tmp_path / "poetry.lock").write_text("")
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[tool.poetry]\nname = "x"\n\n[tool.poetry.dependencies]\n'
+        'python = "^3.12"\nhttpx = "^0.27"\n'
+    )
+    outcome = apply_pin(tmp_path, _certifi(lock="poetry.lock"), "2026.10.19")
+    assert pyproject.read_text() == (
+        '[tool.poetry]\nname = "x"\n\n[tool.poetry.dependencies]\ncertifi = ">=2026.10.19"\n'
+        'python = "^3.12"\nhttpx = "^0.27"\n'
+    )
+    assert outcome.new_constraint == 'certifi = ">=2026.10.19"'
+    assert "poetry lock" in outcome.hint
+
+
+def test_apply_pin_appends_to_requirements_txt_without_a_pyproject(tmp_path: Path):
+    from vulnscan.remediate import apply_pin
+
+    (tmp_path / "uv.lock").write_text("")
+    (tmp_path / "requirements.txt").write_text("httpx>=0.27")
+    outcome = apply_pin(tmp_path, _certifi(), "2026.10.19")
+    assert (tmp_path / "requirements.txt").read_text() == "httpx>=0.27\ncertifi>=2026.10.19\n"
+    assert outcome.changes[0].source_file == "requirements.txt"
+
+
+def test_apply_pin_inserts_into_pipfile_packages(tmp_path: Path):
+    from vulnscan.remediate import apply_pin
+
+    (tmp_path / "Pipfile.lock").write_text("{}")
+    pipfile = tmp_path / "Pipfile"
+    pipfile.write_text(
+        '[[source]]\nurl = "https://pypi.org/simple"\n\n[packages]\nhttpx = "*"\n\n[dev-packages]\n'
+    )
+    apply_pin(tmp_path, _certifi(lock="Pipfile.lock"), "2026.10.19")
+    assert pipfile.read_text() == (
+        '[[source]]\nurl = "https://pypi.org/simple"\n\n[packages]\ncertifi = ">=2026.10.19"\n'
+        'httpx = "*"\n\n[dev-packages]\n'
+    )
+
+
+def test_apply_pin_inserts_into_composer_require_preserving_formatting(tmp_path: Path):
+    from vulnscan.models import PACKAGIST, Dependency
+    from vulnscan.remediate import apply_pin
+
+    (tmp_path / "composer.lock").write_text("{}")
+    composer = tmp_path / "composer.json"
+    composer.write_text(
+        '{\n    "name": "acme/site",\n    "require": {\n        "monolog/monolog": "^2.0"\n    },\n'
+        '    "require-dev": {}\n}\n'
+    )
+    dep = Dependency("psr/log", PACKAGIST, "", "2.0.0", "lock", "composer.lock", transitive=True)
+    outcome = apply_pin(tmp_path, dep, "3.0.1")
+    text = composer.read_text()
+    assert text == (
+        '{\n    "name": "acme/site",\n    "require": {\n        "psr/log": "^3.0.1",\n'
+        '        "monolog/monolog": "^2.0"\n    },\n    "require-dev": {}\n}\n'
+    )
+    assert json.loads(text)["require"]["psr/log"] == "^3.0.1"
+    assert outcome.new_constraint == '"psr/log": "^3.0.1"'
+    assert "composer update psr/log" in outcome.hint
+
+
+def test_apply_pin_creates_npm_overrides_when_missing(tmp_path: Path):
+    from vulnscan.models import NPM, Dependency
+    from vulnscan.remediate import apply_pin
+
+    (tmp_path / "package-lock.json").write_text("{}")
+    package = tmp_path / "package.json"
+    package.write_text('{\n  "name": "app",\n  "dependencies": {\n    "express": "^4"\n  }\n}\n')
+    dep = Dependency("cookie", NPM, "", "0.5.0", "lock", "package-lock.json", transitive=True)
+    outcome = apply_pin(tmp_path, dep, "0.6.0")
+    text = package.read_text()
+    assert json.loads(text) == {
+        "name": "app",
+        "dependencies": {"express": "^4"},
+        "overrides": {"cookie": "^0.6.0"},
+    }
+    assert '"overrides": {\n    "cookie": "^0.6.0"\n  }' in text
+    assert text.endswith("}\n")
+    assert outcome.new_constraint == '"cookie": "^0.6.0"'
+    assert "npm install" in outcome.hint
+
+
+def test_apply_pin_adds_to_existing_npm_overrides_or_replaces_the_entry(tmp_path: Path):
+    from vulnscan.models import NPM, Dependency
+    from vulnscan.remediate import apply_pin
+
+    (tmp_path / "package-lock.json").write_text("{}")
+    package = tmp_path / "package.json"
+    package.write_text('{\n  "name": "app",\n  "overrides": {\n    "semver": "^7.5.2"\n  }\n}\n')
+    dep = Dependency("cookie", NPM, "", "0.5.0", "lock", "package-lock.json", transitive=True)
+    apply_pin(tmp_path, dep, "0.6.0")
+    assert json.loads(package.read_text())["overrides"] == {"cookie": "^0.6.0", "semver": "^7.5.2"}
+    outcome = apply_pin(tmp_path, dep, "0.7.0")
+    assert json.loads(package.read_text())["overrides"] == {"cookie": "^0.7.0", "semver": "^7.5.2"}
+    assert outcome.old_constraint == "^0.6.0"
+    assert outcome.changes[0].added is False
+
+
+def test_apply_pin_uses_resolutions_for_yarn_and_pnpm_overrides_for_pnpm(tmp_path: Path):
+    from vulnscan.models import NPM, Dependency
+    from vulnscan.remediate import apply_pin
+
+    yarn = tmp_path / "yarn"
+    yarn.mkdir()
+    (yarn / "yarn.lock").write_text("")
+    (yarn / "package.json").write_text('{\n  "name": "a"\n}\n')
+    dep = Dependency("cookie", NPM, "", "0.5.0", "lock", "yarn/yarn.lock", transitive=True)
+    apply_pin(tmp_path, dep, "0.6.0")
+    assert json.loads((yarn / "package.json").read_text()) == {
+        "name": "a",
+        "resolutions": {"cookie": "^0.6.0"},
+    }
+    pnpm = tmp_path / "pnpm"
+    pnpm.mkdir()
+    (pnpm / "pnpm-lock.yaml").write_text("")
+    (pnpm / "package.json").write_text(
+        '{\n  "name": "b",\n  "pnpm": {\n    "onlyBuiltDependencies": []\n  }\n}\n'
+    )
+    dep = Dependency("cookie", NPM, "", "0.5.0", "lock", "pnpm/pnpm-lock.yaml", transitive=True)
+    outcome = apply_pin(tmp_path, dep, "0.6.0")
+    assert json.loads((pnpm / "package.json").read_text()) == {
+        "name": "b",
+        "pnpm": {"onlyBuiltDependencies": [], "overrides": {"cookie": "^0.6.0"}},
+    }
+    assert "pnpm install" in outcome.hint
+
+
+def test_apply_remediation_pins_transitive_dependencies(tmp_path: Path):
+    from vulnscan.remediate import apply_remediation
+
+    (tmp_path / "uv.lock").write_text('[[package]]\nname="certifi"\nversion="2024.2.2"\n')
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\ndependencies = [\n]\n')
+    outcome = apply_remediation(tmp_path, _certifi(), "2026.10.19")
+    assert outcome.changes[0].added is True
+    assert '"certifi>=2026.10.19"' in (tmp_path / "pyproject.toml").read_text()
+    assert (tmp_path / "uv.lock").read_text() == '[[package]]\nname="certifi"\nversion="2024.2.2"\n'
+
+
+def test_apply_pin_without_a_manifest_explains_what_to_add(tmp_path: Path):
+    from vulnscan.remediate import RemediationError, apply_pin, plan_pin
+
+    (tmp_path / "uv.lock").write_text("")
+    for call in (plan_pin, apply_pin):
+        with pytest.raises(RemediationError) as excinfo:
+            call(tmp_path, _certifi(), "2026.10.19")
+        message = str(excinfo.value)
+        assert "transitive" in message
+        assert "httpx" in message
+        assert "certifi>=2026.10.19" in message
+
+
+def test_apply_pin_refuses_npm_in_invenio_mode(tmp_path: Path):
+    from vulnscan.config import Settings
+    from vulnscan.models import NPM, Dependency
+    from vulnscan.remediate import RemediationError, apply_pin
+
+    (tmp_path / "package-lock.json").write_text("{}")
+    (tmp_path / "package.json").write_text("{}")
+    settings = Settings(
+        project_path=tmp_path,
+        feed_dir=tmp_path,
+        rss_filename="r",
+        atom_filename="a",
+        state_filename="s",
+        feed_title="t",
+        feed_link="",
+        feed_description="d",
+        osv_base_url="u",
+        request_timeout=1.0,
+        include_dev=True,
+        query_unknown_versions=False,
+        invenio_webpack="on",
+    )
+    dep = Dependency("cookie", NPM, "", "0.5.0", "lock", "package-lock.json", transitive=True)
+    with pytest.raises(RemediationError) as excinfo:
+        apply_pin(tmp_path, dep, "0.6.0", settings=settings)
+    assert "transitive" in str(excinfo.value)
+    assert (tmp_path / "package.json").read_text() == "{}"
+
+
+@pytest.mark.parametrize(
+    ("ecosystem", "name", "expected"),
+    [
+        ("PyPI", "certifi", "certifi>=2026.10.19"),
+        ("Packagist", "psr/log", '"psr/log": "^2026.10.19"'),
+        ("WordPress", "wpackagist-plugin/akismet", '"wpackagist-plugin/akismet": "^2026.10.19"'),
+        ("npm", "cookie", '"cookie": "^2026.10.19"'),
+    ],
+)
+def test_transitive_hint_names_the_constraint_to_add(ecosystem, name, expected):
+    from vulnscan.models import Dependency
+    from vulnscan.remediate import transitive_hint
+
+    dep = Dependency(name, ecosystem, "", "1.0.0", "lock", "lock", transitive=True)
+    hint = transitive_hint(dep, "2026.10.19")
+    assert expected in hint
+    if ecosystem == "npm":
+        assert "overrides" in hint
+
+
+def test_apply_pin_creates_the_whole_pnpm_section_when_missing(tmp_path: Path):
+    from vulnscan.models import NPM, Dependency
+    from vulnscan.remediate import apply_pin
+
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+    package = tmp_path / "package.json"
+    package.write_text('{\n  "name": "b",\n  "version": "1.0.0"\n}\n')
+    dep = Dependency("cookie", NPM, "", "0.5.0", "lock", "pnpm-lock.yaml", transitive=True)
+    apply_pin(tmp_path, dep, "0.6.0")
+    text = package.read_text()
+    assert json.loads(text) == {
+        "name": "b",
+        "version": "1.0.0",
+        "pnpm": {"overrides": {"cookie": "^0.6.0"}},
+    }
+    assert '"pnpm": {\n    "overrides": {\n      "cookie": "^0.6.0"\n    }\n  }' in text

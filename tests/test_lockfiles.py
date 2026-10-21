@@ -315,3 +315,215 @@ def test_load_lock_versions_reads_node_lock_files(tmp_path: Path):
     )
     (tmp_path / "yarn.lock").write_text('lodash@^4:\n  version "4.17.21"\n')
     assert load_lock_versions(tmp_path) == {(NPM, "express"): "4.18.2", (NPM, "lodash"): "4.17.21"}
+
+
+# -- every package in a lock file, with requirers ------------------------------------------
+
+
+def _by_name(packages):
+    return {p.name: p for p in packages}
+
+
+def test_load_lock_packages_uv_lock_records_requirers_and_skips_the_project_itself(
+    tmp_path: Path,
+):
+    from vulnscan.parsers.lockfiles import LockedPackage, load_lock_packages
+
+    (tmp_path / "uv.lock").write_text(
+        """
+version = 1
+
+[[package]]
+name = "demo"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [{ name = "httpx" }]
+
+[[package]]
+name = "httpx"
+version = "0.27.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "HTTPCore", marker = "python_full_version >= '3.8'" },
+]
+
+[[package]]
+name = "certifi"
+version = "2024.2.2"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "httpcore"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [{ name = "certifi" }]
+"""
+    )
+    packages = _by_name(load_lock_packages(tmp_path))
+    assert set(packages) == {"httpx", "certifi", "httpcore"}
+    assert packages["certifi"] == LockedPackage(PYPI, "certifi", "2024.2.2", "uv.lock")
+    assert packages["httpx"].requires == ("certifi", "httpcore")
+    assert packages["httpcore"].requires == ("certifi",)
+
+
+def test_load_lock_packages_poetry_lock_reads_dependencies_and_dev_category(tmp_path: Path):
+    from vulnscan.parsers.lockfiles import load_lock_packages
+
+    (tmp_path / "poetry.lock").write_text(
+        """
+[[package]]
+name = "httpx"
+version = "0.27.0"
+category = "main"
+
+[package.dependencies]
+certifi = "*"
+httpcore = ">=1.0"
+
+[[package]]
+name = "certifi"
+version = "2024.2.2"
+
+[[package]]
+name = "pytest"
+version = "7.0.0"
+category = "dev"
+"""
+    )
+    packages = _by_name(load_lock_packages(tmp_path))
+    assert packages["httpx"].requires == ("certifi", "httpcore")
+    assert packages["httpx"].dev is False
+    assert packages["pytest"].dev is True
+    assert packages["certifi"].lock_file == "poetry.lock"
+
+
+def test_load_lock_packages_composer_lock_reads_require_dev_and_type(tmp_path: Path):
+    from vulnscan.parsers.lockfiles import load_lock_packages
+
+    (tmp_path / "composer.lock").write_text(
+        json.dumps(
+            {
+                "packages": [
+                    {
+                        "name": "Monolog/Monolog",
+                        "version": "2.9.1",
+                        "require": {"php": ">=7.2", "ext-json": "*", "psr/log": "^1||^2"},
+                    },
+                    {"name": "psr/log", "version": "2.0.0"},
+                    {
+                        "name": "wpackagist-plugin/akismet",
+                        "version": "5.3",
+                        "type": "wordpress-plugin",
+                    },
+                ],
+                "packages-dev": [{"name": "phpunit/phpunit", "version": "v10.5.0"}],
+            }
+        )
+    )
+    packages = _by_name(load_lock_packages(tmp_path))
+    assert packages["monolog/monolog"].requires == ("psr/log",)
+    assert packages["monolog/monolog"].ecosystem == PACKAGIST
+    assert packages["phpunit/phpunit"].dev is True
+    assert packages["phpunit/phpunit"].version == "10.5.0"
+    assert packages["wpackagist-plugin/akismet"].lock_type == "wordpress-plugin"
+    assert packages["psr/log"].lock_type is None
+
+
+def test_load_lock_packages_pipfile_lock_marks_develop_section(tmp_path: Path):
+    from vulnscan.parsers.lockfiles import load_lock_packages
+
+    (tmp_path / "Pipfile.lock").write_text(
+        json.dumps(
+            {
+                "default": {"requests": {"version": "==2.31.0"}},
+                "develop": {"pytest": {"version": "==7.0.0"}},
+            }
+        )
+    )
+    packages = _by_name(load_lock_packages(tmp_path))
+    assert packages["requests"].dev is False
+    assert packages["pytest"].dev is True
+    assert packages["pytest"].version == "7.0.0"
+
+
+def test_load_lock_packages_package_lock_v3_reads_dependencies_and_dev(tmp_path: Path):
+    from vulnscan.parsers.lockfiles import load_lock_packages
+
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"name": "app", "dependencies": {"express": "^4"}},
+                    "node_modules/express": {
+                        "version": "4.18.2",
+                        "dependencies": {"body-parser": "1.20.1", "cookie": "0.5.0"},
+                    },
+                    "node_modules/body-parser": {"version": "1.20.1"},
+                    "node_modules/cookie": {"version": "0.5.0"},
+                    "node_modules/jest": {"version": "29.0.0", "dev": True},
+                    "node_modules/express/node_modules/cookie": {"version": "0.4.0"},
+                },
+            }
+        )
+    )
+    packages = _by_name(load_lock_packages(tmp_path))
+    assert set(packages) == {"express", "body-parser", "cookie", "jest"}
+    assert packages["express"].requires == ("body-parser", "cookie")
+    assert packages["cookie"].version == "0.5.0"
+    assert packages["jest"].dev is True
+    assert packages["express"].ecosystem == NPM
+
+
+def test_load_lock_packages_package_lock_v1_reads_requires(tmp_path: Path):
+    from vulnscan.parsers.lockfiles import load_lock_packages
+
+    (tmp_path / "package-lock.json").write_text(
+        json.dumps(
+            {
+                "lockfileVersion": 1,
+                "dependencies": {
+                    "express": {"version": "4.18.2", "requires": {"body-parser": "^1.20"}},
+                    "body-parser": {"version": "1.20.1", "dev": True},
+                },
+            }
+        )
+    )
+    packages = _by_name(load_lock_packages(tmp_path))
+    assert packages["express"].requires == ("body-parser",)
+    assert packages["body-parser"].dev is True
+
+
+def test_load_lock_packages_yarn_lock_lists_packages_without_requirers(tmp_path: Path):
+    from vulnscan.parsers.lockfiles import load_lock_packages
+
+    (tmp_path / "yarn.lock").write_text(
+        '# yarn lockfile v1\n\nexpress@^4:\n  version "4.18.2"\n\n"body-parser@^1.20":\n'
+        '  version "1.20.1"\n'
+    )
+    packages = _by_name(load_lock_packages(tmp_path))
+    assert set(packages) == {"express", "body-parser"}
+    assert packages["express"].requires == ()
+    assert packages["express"].lock_file == "yarn.lock"
+
+
+def test_load_lock_packages_combines_lock_files_and_skips_corrupt_ones(tmp_path: Path):
+    from vulnscan.parsers.lockfiles import load_lock_packages
+
+    (tmp_path / "composer.lock").write_text(
+        json.dumps({"packages": [{"name": "psr/log", "version": "3.0.0"}]})
+    )
+    (tmp_path / "uv.lock").write_text('[[package]]\nname="certifi"\nversion="2024.2.2"\n')
+    (tmp_path / "Pipfile.lock").write_text("{not json")
+    packages = load_lock_packages(tmp_path)
+    assert {(p.ecosystem, p.name, p.lock_file) for p in packages} == {
+        (PACKAGIST, "psr/log", "composer.lock"),
+        (PYPI, "certifi", "uv.lock"),
+    }
+
+
+def test_load_lock_packages_empty_dir(tmp_path: Path):
+    from vulnscan.parsers.lockfiles import load_lock_packages
+
+    assert load_lock_packages(tmp_path) == []

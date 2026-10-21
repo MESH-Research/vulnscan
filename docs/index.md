@@ -36,7 +36,9 @@ whenever something new turns up.
 
 ## Scope
 
-Only direct dependencies are evaluated. Lock files are read solely to learn
-the installed version of those direct dependencies; transitive dependencies
-are never scanned. That keeps the output focused on things you can actually
-change in your own manifests.
+Direct dependencies are evaluated by default, which keeps the output focused
+on things you can change in your own manifests. Pass `--transitive` (or set
+`VULNSCAN_TRANSITIVE=true`) to scan every package a lock file records as well;
+those are marked as transitive together with the packages that require them,
+and upgrade advice tells you which constraint to add by hand. See
+[Usage](usage.md#transitive-dependencies).

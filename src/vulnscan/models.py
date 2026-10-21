@@ -49,10 +49,20 @@ class Declaration:
     source_file: str
     constraint: str
     dev: bool = False
+    transitive: bool = False
+    required_by: tuple[str, ...] = ()
 
 
 def format_declaration(declaration: Declaration) -> str:
-    """``path as constraint``, or ``path; no version constraint`` when the constraint is empty."""
+    """``path as constraint``, or ``path; no version constraint`` when the constraint is empty.
+
+    A transitive declaration reads ``lockfile (transitive; required by a, b)``.
+    """
+    if declaration.transitive:
+        text = f"{declaration.source_file} (transitive"
+        if declaration.required_by:
+            text += f"; required by {', '.join(declaration.required_by)}"
+        return text + ")"
     if declaration.constraint:
         return f"{declaration.source_file} as {declaration.constraint}"
     return f"{declaration.source_file}; no version constraint"
@@ -60,7 +70,7 @@ def format_declaration(declaration: Declaration) -> str:
 
 @dataclass(frozen=True)
 class Dependency:
-    """A direct dependency declared in a manifest."""
+    """A dependency declared in a manifest, or (``transitive``) recorded only by a lock file."""
 
     name: str
     ecosystem: str
@@ -73,6 +83,10 @@ class Dependency:
     slug: str = ""
     custom_source: bool = False
     declarations: tuple[Declaration, ...] = ()
+    transitive: bool = False
+    """Not declared in any manifest: known only from a lock file."""
+    required_by: tuple[str, ...] = ()
+    """Packages in the same lock file that require this one (transitive dependencies only)."""
 
     @property
     def key(self) -> tuple[str, str]:
@@ -84,7 +98,11 @@ class Dependency:
         """Every place this dependency is declared, the primary location first."""
         if self.declarations:
             return list(self.declarations)
-        return [Declaration(self.source_file, self.constraint, self.dev)]
+        return [
+            Declaration(
+                self.source_file, self.constraint, self.dev, self.transitive, self.required_by
+            )
+        ]
 
     @property
     def source_files(self) -> list[str]:

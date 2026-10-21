@@ -8,9 +8,9 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from vulnscan.models import Dependency
-from vulnscan.parsers.composer import parse_composer_json
-from vulnscan.parsers.lockfiles import load_lock_versions
+from vulnscan.models import PACKAGIST, Dependency
+from vulnscan.parsers.composer import classify_composer_package, parse_composer_json
+from vulnscan.parsers.lockfiles import LockedPackage, load_lock_packages, load_lock_versions
 from vulnscan.parsers.node import parse_package_json
 from vulnscan.parsers.python import (
     parse_pipfile,
@@ -201,9 +201,12 @@ def parse_manifest(path: Path, root: Path) -> list[Dependency]:
 
 
 def parse_project(
-    root: Path, ignore_dirs: tuple[str, ...] = ()
+    root: Path, ignore_dirs: tuple[str, ...] = (), include_transitive: bool = False
 ) -> tuple[list[Dependency], list[str]]:
     """Parse every manifest under root and resolve versions using adjacent lock files.
+
+    With ``include_transitive`` every package a lock file records that no manifest in
+    that directory declares is added as a transitive dependency.
 
     Invenio ``webpack.py`` theme bundles feed the project-root ``package.json``;
     their versions are resolved from the **root** lock files so they merge with the
@@ -235,4 +238,52 @@ def parse_project(
                     f"from constraint {resolved.constraint!r}; not queried"
                 )
             deps.append(resolved)
+    if include_transitive:
+        deps.extend(_transitive_dependencies(root, list(lock_cache), deps))
     return deps, warnings
+
+
+def _transitive_dependency(
+    pkg: LockedPackage, source_file: str, required_by: tuple[str, ...]
+) -> Dependency:
+    ecosystem, kind, slug = pkg.ecosystem, "", ""
+    if pkg.ecosystem == PACKAGIST:
+        ecosystem, kind, slug = classify_composer_package(pkg.name, pkg.lock_type)
+    return Dependency(
+        name=pkg.name,
+        ecosystem=ecosystem,
+        constraint="",
+        version=pkg.version,
+        version_source="lock",
+        source_file=source_file,
+        dev=pkg.dev,
+        kind=kind,
+        slug=slug,
+        transitive=True,
+        required_by=required_by,
+    )
+
+
+def _transitive_dependencies(
+    root: Path, directories: list[Path], direct: list[Dependency]
+) -> list[Dependency]:
+    """Lock-only packages from each manifest directory, skipping anything declared directly."""
+    direct_keys = {d.key for d in direct}
+    found: list[Dependency] = []
+    for directory in directories:
+        packages = load_lock_packages(directory)
+        requirers: dict[str, set[str]] = {}
+        for pkg in packages:
+            for needed in pkg.requires:
+                requirers.setdefault(needed, set()).add(pkg.name)
+        for pkg in packages:
+            required_by = tuple(sorted(requirers.get(pkg.name, ())))
+            try:
+                source_file = (directory / pkg.lock_file).relative_to(root).as_posix()
+            except ValueError:
+                source_file = (directory / pkg.lock_file).as_posix()
+            dep = _transitive_dependency(pkg, source_file, required_by)
+            if dep.key in direct_keys:
+                continue
+            found.append(dep)
+    return found

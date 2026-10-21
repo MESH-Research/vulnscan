@@ -84,7 +84,7 @@ def render_markdown(result: ScanResult) -> str:
     lines = [f"# Vulnerability report: {result.project_path.name or result.project_path}", ""]
     lines += [_header_line(result), ""]
     if not result.findings:
-        lines += ["No known vulnerabilities in direct dependencies.", ""]
+        lines += ["No known vulnerabilities in the scanned dependencies.", ""]
     else:
         lines += [
             "## Summary",
@@ -148,7 +148,7 @@ def render_text(result: ScanResult) -> str:
     title = f"Vulnerability report: {result.project_path.name or result.project_path}"
     lines = [title, "=" * len(title), "", _header_line(result), ""]
     if not result.findings:
-        lines += ["No known vulnerabilities in direct dependencies.", ""]
+        lines += ["No known vulnerabilities in the scanned dependencies.", ""]
     for finding in result.findings:
         dep = finding.dependency
         heading = f"{dep.name} {dep.version or ''}".rstrip() + f"  [{finding.worst_severity}]"

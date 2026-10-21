@@ -66,6 +66,8 @@ class RemediationChange:
     old_constraint: str
     new_constraint: str
     authoritative: bool = True
+    added: bool = False
+    """The constraint was inserted (a transitive dependency pinned) rather than rewritten."""
 
 
 @dataclass(frozen=True)
@@ -837,6 +839,8 @@ def apply_remediation(
     For other ecosystems (and npm outside Invenio mode), every rewrite is computed before
     any file is written, so a manifest that cannot be edited leaves all of them untouched.
     """
+    if dep.transitive:
+        return apply_pin(project_root, dep, new_version, settings=settings)
     if dep.ecosystem == NPM and settings is not None and _invenio_active(project_root, settings):
         return _apply_invenio_npm(
             project_root, dep, new_version, settings, webpack_merge=webpack_merge
@@ -866,3 +870,384 @@ def apply_remediation(
 def display_name(dep: Dependency) -> str:
     """Canonical package name used when referring to a dependency in messages."""
     return normalize_name(dep.name, dep.ecosystem)
+
+
+@dataclass(frozen=True)
+class PinPlan:
+    """Where and how a transitive dependency would be pinned to a version.
+
+    ``path`` / ``source_file`` name the manifest next to the lock file that recorded the
+    dependency, ``section`` the part of it that receives the entry (for people), and
+    ``entry`` the exact text that will be inserted, such as ``certifi>=2026.10.19`` or
+    ``"cookie": "^0.6.0"``. ``replaces`` is the existing value when the section already
+    names the package.
+    """
+
+    path: Path
+    source_file: str
+    section: str
+    entry: str
+    replaces: str | None = None
+    method: str = ""
+    """Writing style: ``json``, ``pep621``, ``poetry``, ``pipfile`` or ``requirements``."""
+    keys: tuple[str, ...] = ()
+    """For ``json``: the path of the object that receives the entry (``("pnpm", "overrides")``)."""
+
+
+# package.json section that forces a transitive version, by the lock file that sits next to it
+_NPM_PIN_KEYS: dict[str, tuple[str, ...]] = {
+    "package-lock.json": ("overrides",),
+    "npm-shrinkwrap.json": ("overrides",),
+    "yarn.lock": ("resolutions",),
+    "pnpm-lock.yaml": ("pnpm", "overrides"),
+}
+
+
+def _skip_string(text: str, i: int) -> int:
+    """Index just past the JSON string that opens at ``text[i]``."""
+    i += 1
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == '"':
+            return i + 1
+        i += 1
+    return i
+
+
+def _match_bracket(text: str, i: int) -> int:
+    """Index of the bracket closing the one at ``text[i]``, skipping strings."""
+    depth = 0
+    j = i
+    while j < len(text):
+        char = text[j]
+        if char == '"':
+            j = _skip_string(text, j)
+            continue
+        if char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    raise RemediationError("unbalanced brackets in JSON manifest")
+
+
+def _json_members(text: str, open_: int, close: int):
+    """Yield ``(key, value_start, value_end)`` for each direct member of a JSON object."""
+    i = open_ + 1
+    while True:
+        while i < close and text[i] in " \t\r\n,":
+            i += 1
+        if i >= close:
+            return
+        if text[i] != '"':
+            raise RemediationError("unexpected content in JSON manifest")
+        key_end = _skip_string(text, i)
+        key = json.loads(text[i:key_end])
+        i = key_end
+        while text[i] in " \t\r\n":
+            i += 1
+        if text[i] != ":":
+            raise RemediationError("unexpected content in JSON manifest")
+        i += 1
+        while text[i] in " \t\r\n":
+            i += 1
+        start = i
+        if text[i] in "{[":
+            end = _match_bracket(text, i) + 1
+        elif text[i] == '"':
+            end = _skip_string(text, i)
+        else:
+            end = i
+            while end < close and text[end] != ",":
+                end += 1
+            while text[end - 1] in " \t\r\n":
+                end -= 1
+        yield key, start, end
+        i = end
+
+
+def _json_indent_unit(text: str) -> str:
+    for line in text.splitlines():
+        match = re.match(r'^([ \t]+)"', line)
+        if match:
+            return match.group(1)
+    return "  "
+
+
+def _render_json_value(value: str | dict, indent: str, unit: str) -> str:
+    if isinstance(value, str):
+        return json.dumps(value)
+    inner = indent + unit
+    members = [
+        f"{inner}{json.dumps(k)}: {_render_json_value(v, inner, unit)}" for k, v in value.items()
+    ]
+    return "{\n" + ",\n".join(members) + "\n" + indent + "}"
+
+
+def _json_insert_member(
+    text: str, open_: int, close: int, key: str, value: str | dict, last: bool
+) -> str:
+    """Insert ``key: value`` into the object spanning ``text[open_:close + 1]``, keeping style."""
+    unit = _json_indent_unit(text)
+    line_start = text.rfind("\n", 0, open_) + 1
+    outer = re.match(r"[ \t]*", text[line_start:open_]).group()
+    inner = outer + unit
+    body = text[open_ + 1 : close]
+    member = f"{json.dumps(key)}: {_render_json_value(value, inner, unit)}"
+    if not body.strip():
+        return text[: open_ + 1] + "\n" + inner + member + "\n" + outer + text[close:]
+    if last:
+        end = close
+        while text[end - 1] in " \t\r\n":
+            end -= 1
+        return text[:end] + ",\n" + inner + member + "\n" + outer + text[close:]
+    if body.lstrip(" \t").startswith(("\n", "\r")):
+        return text[: open_ + 1] + "\n" + inner + member + "," + text[open_ + 1 :]
+    return text[: open_ + 1] + member + ", " + text[open_ + 1 :].lstrip(" ")
+
+
+def _json_find(text: str, keys: tuple[str, ...]) -> tuple[int, int, int]:
+    """``(open, close, found)`` of the deepest existing object along ``keys``.
+
+    ``found`` is how many keys resolved to an object; the span is that object's.
+    """
+    open_ = text.index("{")
+    close = _match_bracket(text, open_)
+    found = 0
+    for key in keys:
+        hit = None
+        for name, start, end in _json_members(text, open_, close):
+            if name == key:
+                if text[start] != "{":
+                    raise RemediationError(f"{'.'.join(keys)} is not a JSON object")
+                hit = (start, end - 1)
+                break
+        if hit is None:
+            break
+        open_, close = hit
+        found += 1
+    return open_, close, found
+
+
+def _json_existing(text: str, keys: tuple[str, ...], name: str) -> str | None:
+    """Current string value of ``name`` inside the object at ``keys``, if any."""
+    try:
+        open_, close, found = _json_find(text, keys)
+    except (ValueError, RemediationError):
+        return None
+    if found != len(keys):
+        return None
+    for member, start, end in _json_members(text, open_, close):
+        if member == name and text[start] == '"':
+            return json.loads(text[start:end])
+    return None
+
+
+def _json_pin(text: str, keys: tuple[str, ...], name: str, value: str) -> str:
+    """Set ``name: value`` inside the object at ``keys``, creating missing objects."""
+    open_, close, found = _json_find(text, keys)
+    if found < len(keys):
+        # Build the missing objects from the inside out: {name: value} wrapped in each
+        # absent key, then appended so new sections do not jump ahead of name/version.
+        nested: dict = {name: value}
+        for key in reversed(keys[found + 1 :]):
+            nested = {key: nested}
+        return _json_insert_member(text, open_, close, keys[found], nested, last=True)
+    for member, start, end in _json_members(text, open_, close):
+        if member == name:
+            return text[:start] + json.dumps(value) + text[end:]
+    return _json_insert_member(text, open_, close, name, value, last=False)
+
+
+def _toml_table_line(text: str, table: str) -> int | None:
+    """Index of the line holding the ``[table]`` header."""
+    for idx, line in enumerate(text.splitlines(keepends=True)):
+        header = _TOML_HEADER.match(line)
+        if header and header.group(1).strip().strip("\"'") == table:
+            return idx
+    return None
+
+
+def _toml_pep621_pin(text: str, requirement: str) -> str:
+    """Add ``requirement`` to ``[project] dependencies``, creating the array if needed."""
+    contexts = _toml_line_contexts(text)
+    lines = text.splitlines(keepends=True)
+    for idx, line in enumerate(lines):
+        _offset, table, key = contexts[idx]
+        match = _TOML_KEY.match(line)
+        if not (table == "project" and key == "dependencies" and match):
+            continue
+        if match.group(1).strip("\"'") != "dependencies" or "[" not in line:
+            continue
+        bracket = line.index("[", match.end())
+        rest = line[bracket + 1 :]
+        if rest.strip() == "":
+            following = next((ln for ln in lines[idx + 1 :] if ln.strip()), "")
+            indent = re.match(r"[ \t]*", following).group() if following.strip() != "]" else ""
+            indent = indent or "    "
+            lines.insert(idx + 1, f'{indent}"{requirement}",\n')
+        elif rest.strip().startswith("]"):
+            lines[idx] = line[: bracket + 1] + f'\n    "{requirement}",\n' + rest.lstrip()
+        else:
+            lines[idx] = line[: bracket + 1] + f'"{requirement}", ' + rest.lstrip(" ")
+        return "".join(lines)
+    header = _toml_table_line(text, "project")
+    if header is None:
+        raise RemediationError("pyproject.toml has no [project] table")
+    lines.insert(header + 1, f'dependencies = [\n    "{requirement}",\n]\n')
+    return "".join(lines)
+
+
+def _toml_table_pin(text: str, table: str, entry: str, create: bool) -> str:
+    """Insert ``entry`` as the first line under ``[table]``."""
+    header = _toml_table_line(text, table)
+    lines = text.splitlines(keepends=True)
+    if header is None:
+        if not create:
+            raise RemediationError(f"no [{table}] table to add {entry} to")
+        joiner = "" if not text or text.endswith("\n") else "\n"
+        return text + joiner + f"\n[{table}]\n{entry}\n"
+    lines.insert(header + 1, entry + "\n")
+    return "".join(lines)
+
+
+def plan_pin(
+    project_root: Path, dep: Dependency, version: str, settings: Settings | None = None
+) -> PinPlan:
+    """Work out which manifest would receive a constraint pinning ``dep`` to ``version``.
+
+    The manifest is the one next to the lock file that recorded the dependency:
+    ``package.json`` (``overrides``, ``resolutions`` or ``pnpm.overrides`` depending on
+    the lock), ``composer.json`` (``require``), ``pyproject.toml`` (``[project]
+    dependencies`` or the Poetry table), ``Pipfile`` (``[packages]``) or, failing a
+    ``pyproject.toml``, ``requirements.txt``. Raises :class:`RemediationError` carrying
+    :func:`transitive_hint` when nothing suitable exists.
+    """
+    name = display_name(dep)
+    lock = Path(dep.source_file)
+    directory = project_root / lock.parent
+    hint = transitive_hint(dep, version)
+
+    def plan(path: Path, section: str, entry: str, method: str, **extra) -> PinPlan:
+        if not path.is_file():
+            raise RemediationError(f"{hint} ({path.name} not found next to {lock.name}.)")
+        return PinPlan(path, _rel(project_root, path), section, entry, method=method, **extra)
+
+    if dep.ecosystem == NPM:
+        if _invenio_active(project_root, settings):
+            raise RemediationError(
+                f"{hint} (Invenio webpack mode: package.json is generated, so it was not edited.)"
+            )
+        keys = _NPM_PIN_KEYS.get(lock.name, ("overrides",))
+        path = directory / "package.json"
+        existing = (
+            _json_existing(path.read_text(encoding="utf-8"), keys, name) if path.is_file() else None
+        )
+        return plan(
+            path,
+            f'"{".".join(keys)}" in package.json',
+            f'"{name}": "^{version}"',
+            "json",
+            keys=keys,
+            replaces=existing,
+        )
+    if dep.ecosystem in (PACKAGIST, WORDPRESS):
+        path = directory / "composer.json"
+        existing = (
+            _json_existing(path.read_text(encoding="utf-8"), ("require",), name)
+            if path.is_file()
+            else None
+        )
+        return plan(
+            path,
+            '"require" in composer.json',
+            f'"{name}": "^{version}"',
+            "json",
+            keys=("require",),
+            replaces=existing,
+        )
+    if lock.name == "Pipfile.lock":
+        return plan(
+            directory / "Pipfile", "[packages] in Pipfile", f'{name} = ">={version}"', "pipfile"
+        )
+    pyproject = directory / "pyproject.toml"
+    if pyproject.is_file():
+        text = pyproject.read_text(encoding="utf-8")
+        if _toml_table_line(text, "project") is not None:
+            return plan(
+                pyproject,
+                "[project] dependencies in pyproject.toml",
+                f"{name}>={version}",
+                "pep621",
+            )
+        if _toml_table_line(text, "tool.poetry.dependencies") is not None:
+            return plan(
+                pyproject,
+                "[tool.poetry.dependencies] in pyproject.toml",
+                f'{name} = ">={version}"',
+                "poetry",
+            )
+        raise RemediationError(
+            f"{hint} (pyproject.toml has neither a [project] nor a "
+            "[tool.poetry.dependencies] table.)"
+        )
+    requirements = directory / "requirements.txt"
+    if requirements.is_file():
+        return plan(
+            requirements, "a new line in requirements.txt", f"{name}>={version}", "requirements"
+        )
+    raise RemediationError(hint)
+
+
+def apply_pin(
+    project_root: Path, dep: Dependency, version: str, settings: Settings | None = None
+) -> RemediationResult:
+    """Insert the constraint from :func:`plan_pin` into its manifest and return the change."""
+    pin = plan_pin(project_root, dep, version, settings=settings)
+    name = display_name(dep)
+    text = pin.path.read_text(encoding="utf-8")
+    if pin.method == "json":
+        new_text = _json_pin(text, pin.keys, name, f"^{version}")
+    elif pin.method == "pep621":
+        new_text = _toml_pep621_pin(text, pin.entry)
+    elif pin.method == "poetry":
+        new_text = _toml_table_pin(text, "tool.poetry.dependencies", pin.entry, create=False)
+    elif pin.method == "pipfile":
+        new_text = _toml_table_pin(text, "packages", pin.entry, create=True)
+    else:
+        joiner = "" if not text or text.endswith("\n") else "\n"
+        new_text = text + joiner + pin.entry + "\n"
+    pin.path.write_text(new_text, encoding="utf-8")
+    change = RemediationChange(
+        pin.path, pin.source_file, pin.replaces or "", pin.entry, added=pin.replaces is None
+    )
+    return RemediationResult((change,), follow_up_hint(project_root, dep, pin.source_file))
+
+
+def transitive_hint(dep: Dependency, version: str) -> str:
+    """Explain how to move a transitive dependency to ``version``.
+
+    Nothing declares the package, so no manifest can be rewritten in place; the hint names
+    the constraint to add by hand and the packages that pull the dependency in.
+    """
+    name = display_name(dep)
+    if dep.ecosystem == PYPI:
+        add = f"add {name}>={version} to your dependencies (pyproject.toml or a requirements file)"
+    elif dep.ecosystem == NPM:
+        add = f'add "{name}": "^{version}" under "overrides" in package.json'
+    else:
+        add = f'add "{name}": "^{version}" to "require" in composer.json'
+    via = ""
+    upgrade = ""
+    if dep.required_by:
+        requirers = ", ".join(dep.required_by)
+        via = f" required by {requirers}"
+        upgrade = f", or upgrade {requirers} to a release that needs {name} {version} or newer"
+    return (
+        f"{dep.name} is a transitive dependency{via}; it is not declared in any manifest. "
+        f"To move to {version}, {add}{upgrade}, then reinstall."
+    )

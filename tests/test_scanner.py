@@ -302,3 +302,28 @@ def test_scan_queries_npm_dependencies_through_osv(tmp_path: Path):
         ("lodash", NPM)
     ]
     assert [d.ecosystem for d in client.seen] == [NPM]
+
+
+def test_scan_includes_transitive_lock_packages_when_configured(tmp_path: Path):
+    (tmp_path / "requirements.txt").write_text("requests==2.31.0\n")
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname="requests"\nversion="2.31.0"\ndependencies=[{name="urllib3"}]\n\n'
+        '[[package]]\nname="urllib3"\nversion="2.0.0"\n'
+    )
+    client = FakeClient({("urllib3", "2.0.0"): [vuln("GHSA-U", "HIGH")]})
+    result = scan(settings_for(tmp_path, include_transitive=True), client=client)
+    assert {d.name for d in result.dependencies} == {"requests", "urllib3"}
+    assert [f.dependency.name for f in result.findings] == ["urllib3"]
+    assert result.findings[0].dependency.transitive is True
+    assert result.findings[0].dependency.required_by == ("requests",)
+
+
+def test_scan_leaves_transitive_packages_out_by_default(tmp_path: Path):
+    (tmp_path / "requirements.txt").write_text("requests==2.31.0\n")
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname="requests"\nversion="2.31.0"\n\n[[package]]\nname="urllib3"\nversion="2.0.0"\n'
+    )
+    client = FakeClient({("urllib3", "2.0.0"): [vuln("GHSA-U", "HIGH")]})
+    result = scan(settings_for(tmp_path), client=client)
+    assert {d.name for d in result.dependencies} == {"requests"}
+    assert result.findings == []

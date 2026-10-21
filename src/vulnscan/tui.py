@@ -16,14 +16,16 @@ from textual.widgets.option_list import Option
 
 from vulnscan.config import Settings
 from vulnscan.feeds import write_feeds
-from vulnscan.models import Dependency, Finding, ScanResult, Vulnerability
+from vulnscan.models import Dependency, Finding, ScanResult, Vulnerability, format_declaration
 from vulnscan.outdated import OutdatedPackage, UpgradeOptions, find_outdated
 from vulnscan.registry import RegistryClient, RegistryError
 from vulnscan.remediate import (
+    PinPlan,
     RemediationError,
     RemediationPlan,
     RemediationResult,
     apply_remediation,
+    plan_pin,
     plan_remediation,
 )
 from vulnscan.reports import write_reports
@@ -92,7 +94,9 @@ def vulnerability_markdown(finding: Finding, vuln: Vulnerability) -> str:
         lines += [f"**{vuln.summary}**", ""]
     declared = "; ".join(
         (
-            f"{d.source_file} as `{d.constraint}`"
+            format_declaration(d)
+            if d.transitive
+            else f"{d.source_file} as `{d.constraint}`"
             if d.constraint
             else f"{d.source_file}; no version constraint"
         )
@@ -193,7 +197,8 @@ class OptionDialog(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         """Build the dialog: a multi-line summary, the options and a key hint."""
         with Vertical(id="remediate-box"):
-            yield Static("\n".join(self.summary_lines()), id="remediate-summary")
+            # Plain text: section names such as "[project]" must not be read as markup.
+            yield Static("\n".join(self.summary_lines()), id="remediate-summary", markup=False)
             yield OptionList(*self.options(), id="remediate-options")
             yield Label(
                 "Enter to apply the highlighted option, Esc to cancel.", id="remediate-help"
@@ -309,6 +314,45 @@ class UpgradeScreen(OptionDialog):
         else:
             latest = Option("Latest release: none newer", id="latest", disabled=True)
         return [in_series, latest]
+
+
+class PinScreen(OptionDialog):
+    """Confirm pinning a transitive dependency by inserting a constraint into a manifest.
+
+    ``choices`` are ``(option id, label, entry)`` triples; ``entry`` is the exact text that
+    would be inserted, or ``None`` when that option has no version. Dismisses with the
+    chosen id or ``None``.
+    """
+
+    def __init__(
+        self, finding: Finding, pin: PinPlan, choices: list[tuple[str, str, str | None]]
+    ) -> None:
+        super().__init__()
+        self.finding = finding
+        self.pin = pin
+        self.choices = choices
+
+    def summary_lines(self) -> list[str]:
+        """Why nothing can be rewritten in place, and which file gets the new constraint."""
+        dep = self.finding.dependency
+        via = f" required by {', '.join(dep.required_by)}" if dep.required_by else ""
+        lines = [
+            f"Pin {dep.name} (currently {dep.version or 'unknown'})",
+            f"{dep.name} is a transitive dependency{via}; no manifest declares it.",
+            f"Confirming inserts a constraint into {self.pin.source_file} ({self.pin.section}).",
+        ]
+        if self.pin.replaces is not None:
+            lines.append(f"The existing entry {self.pin.replaces!r} will be replaced.")
+        return lines
+
+    def options(self) -> list[Option]:
+        """One option per candidate version, showing the exact text that will be added."""
+        return [
+            Option(f"{label}: add {entry}", id=option_id)
+            if entry
+            else Option(f"{label}: none available", id=option_id, disabled=True)
+            for option_id, label, entry in self.choices
+        ]
 
 
 class VulnScanApp(App[None]):
@@ -527,6 +571,7 @@ class VulnScanApp(App[None]):
     def _dep_cells(self, finding: Finding) -> list[str | Text]:
         dep = finding.dependency
         done = self._is_remediated(finding)
+        via = dep.version_source + (" (transitive)" if dep.transitive else "")
         if self.outdated:
             options = self._upgrades.get(dep.key)
             values = [
@@ -534,7 +579,7 @@ class VulnScanApp(App[None]):
                 dep.name,
                 dep.ecosystem,
                 dep.version or "?",
-                dep.version_source,
+                via,
                 (options.series_latest if options else None) or "-",
                 (options.latest if options else None) or "-",
                 str(len(finding.vulnerabilities)) if finding.vulnerabilities else "none",
@@ -546,7 +591,7 @@ class VulnScanApp(App[None]):
             dep.name,
             dep.ecosystem,
             dep.version or "?",
-            dep.version_source,
+            via,
             finding.worst_severity,
             str(len(finding.vulnerabilities)),
             ", ".join(finding.fixed_versions) or "-",
@@ -687,7 +732,46 @@ class VulnScanApp(App[None]):
         except RegistryError as exc:
             self.call_from_thread(self._set_status, f"Could not look up versions: {exc}")
             return
+        if finding.dependency.transitive:
+            self.call_from_thread(self._offer_pin, finding, plan)
+            return
         self.call_from_thread(self._offer_remediation, finding, plan)
+
+    def _offer_pin(self, finding: Finding, plan: RemediationPlan | UpgradeOptions) -> None:
+        """Transitive dependency: confirm inserting a constraint into the nearest manifest."""
+        dep = finding.dependency
+        if isinstance(plan, RemediationPlan):
+            candidates = [
+                ("nearest", "Nearest safe version", plan.nearest_safe),
+                ("latest", "Latest release", plan.latest),
+            ]
+        else:
+            candidates = [
+                ("series", f"Newest {plan.series or '?'}.x release", plan.series_latest),
+                ("latest", "Latest release", plan.latest),
+            ]
+        versions = {option_id: version for option_id, _label, version in candidates if version}
+        if not versions:
+            self.notify(f"{dep.name} has no version to pin to.", severity="warning")
+            return
+        try:
+            pins = {
+                option_id: plan_pin(self.settings.project_path, dep, version, self.settings)
+                for option_id, version in versions.items()
+            }
+        except RemediationError as exc:
+            self._set_status(str(exc))
+            self.notify(f"{dep.name} is transitive: see the status line.", severity="warning")
+            return
+        choices = [
+            (option_id, label, pins[option_id].entry if option_id in pins else None)
+            for option_id, label, _version in candidates
+        ]
+
+        def on_choice(choice: str | None) -> None:
+            self._apply_choice(finding, choice, versions.get(choice) if choice else None)
+
+        self.push_screen(PinScreen(finding, next(iter(pins.values())), choices), on_choice)
 
     def _offer_remediation(self, finding: Finding, plan: RemediationPlan) -> None:
         self._set_status(
@@ -707,6 +791,9 @@ class VulnScanApp(App[None]):
         options = self._upgrades.get(dep.key)
         if options is None or not options.is_outdated:
             self.notify(f"{dep.name} has no newer release.", severity="warning")
+            return
+        if dep.transitive:
+            self._offer_pin(finding, options)
             return
 
         def on_choice(choice: str | None) -> None:
@@ -751,12 +838,16 @@ class VulnScanApp(App[None]):
         self._remediated[dep.key] = outcome.new_constraint
         self._refresh_dep_row(finding)
         authoritative = outcome.authoritative_changes or outcome.changes
-        edits = "; ".join(
-            f"{c.source_file}: {c.old_constraint or '(any)'} -> {c.new_constraint}"
-            for c in authoritative
-        )
         warn = f" ({'; '.join(outcome.warnings)})" if outcome.warnings else ""
-        self._set_status(f"Updated {edits}. {outcome.hint}{warn} Press r to rescan afterwards.")
+        if all(c.added for c in authoritative):
+            edits = "; ".join(f"Added {c.new_constraint} to {c.source_file}" for c in authoritative)
+            self._set_status(f"{edits}. {outcome.hint}{warn} Press r to rescan afterwards.")
+        else:
+            edits = "; ".join(
+                f"{c.source_file}: {c.old_constraint or '(any)'} -> {c.new_constraint}"
+                for c in authoritative
+            )
+            self._set_status(f"Updated {edits}. {outcome.hint}{warn} Press r to rescan afterwards.")
         self.notify(f"{dep.name} -> {outcome.new_constraint}")
 
     def action_open_advisory(self) -> None:

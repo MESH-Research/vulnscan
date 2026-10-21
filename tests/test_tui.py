@@ -793,3 +793,156 @@ def test_upgrade_markdown_states_it_is_not_a_security_update():
     v = Vulnerability("GHSA-x", "s", "d", severity="HIGH")
     with_finding = upgrade_markdown(dep, options, Finding(dep, [v]))
     assert "GHSA-x" in with_finding
+
+
+# -- transitive dependencies ---------------------------------------------------------------
+
+
+def _transitive_result(path: Path) -> ScanResult:
+    httpx = Dependency("httpx", PYPI, ">=0.27", "0.27.0", "constraint", "pyproject.toml")
+    certifi = Dependency(
+        "certifi",
+        PYPI,
+        "",
+        "2024.2.2",
+        "lock",
+        "uv.lock",
+        transitive=True,
+        required_by=("httpx",),
+    )
+    v = Vulnerability("GHSA-C", "s", "d", severity="HIGH", fixed_versions=["2026.10.19"])
+    return ScanResult(path, [httpx, certifi], [Finding(certifi, [v])], [], datetime.now(UTC))
+
+
+async def test_transitive_dependency_row_is_marked(tmp_path: Path):
+    app = VulnScanApp(settings_for(tmp_path), scan_fn=lambda s: _transitive_result(s.project_path))
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        deps = app.query_one("#deps", DataTable)
+        row = _row_text(deps, 0)
+        assert any("certifi" in c for c in row)
+        assert any("transitive" in c for c in row)
+        detail = app.query_one("#detail", Markdown).source
+        assert "transitive" in detail
+        assert "httpx" in detail
+
+
+def _transitive_project(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    settings.project_path.mkdir()
+    (settings.project_path / "uv.lock").write_text(
+        '[[package]]\nname="certifi"\nversion="2024.2.2"\n'
+    )
+    (settings.project_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = [\n    "httpx>=0.27",\n]\n'
+    )
+    return settings
+
+
+async def test_upgrade_key_confirms_then_pins_a_transitive_dependency(tmp_path: Path):
+    from textual.widgets import OptionList, Static
+
+    settings = _transitive_project(tmp_path)
+    app = VulnScanApp(
+        settings,
+        scan_fn=lambda s: _transitive_result(s.project_path),
+        versions_fn=lambda d: ["2024.2.2", "2026.10.19", "2027.1.1"],
+    )
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        screen = app.screen
+        assert screen.__class__.__name__ == "PinScreen"
+        widget = screen.query_one("#remediate-summary", Static)
+        summary = str(widget.content)
+        assert "transitive" in summary
+        assert "httpx" in summary
+        assert "pyproject.toml" in summary
+        assert "[project]" in widget.render().plain  # square brackets are not markup
+        options = screen.query_one("#remediate-options", OptionList)
+        prompts = [str(options.get_option_at_index(i).prompt) for i in range(options.option_count)]
+        assert any("certifi>=2026.10.19" in p for p in prompts)
+        assert any("certifi>=2027.1.1" in p for p in prompts)
+        await pilot.press("enter")  # nearest safe version
+        await settle(app, pilot)
+        assert app.screen.__class__.__name__ != "PinScreen"
+        text = (settings.project_path / "pyproject.toml").read_text()
+        assert '    "certifi>=2026.10.19",\n    "httpx>=0.27",' in text
+        assert "Added certifi>=2026.10.19 to pyproject.toml" in app.status_text
+        assert "uv lock" in app.status_text
+        assert app.remediated == {("PyPI", "certifi"): "certifi>=2026.10.19"}
+        assert "✔" in str(app.query_one("#deps", DataTable).get_row_at(0)[0])
+
+
+async def test_pin_dialog_escape_leaves_the_manifest_alone(tmp_path: Path):
+    settings = _transitive_project(tmp_path)
+    original = (settings.project_path / "pyproject.toml").read_text()
+    app = VulnScanApp(
+        settings,
+        scan_fn=lambda s: _transitive_result(s.project_path),
+        versions_fn=lambda d: ["2024.2.2", "2026.10.19"],
+    )
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        assert app.screen.__class__.__name__ == "PinScreen"
+        await pilot.press("escape")
+        await settle(app, pilot)
+        assert (settings.project_path / "pyproject.toml").read_text() == original
+        assert app.remediated == {}
+
+
+async def test_upgrade_key_explains_transitive_dependency_without_a_manifest(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    settings.project_path.mkdir()
+    (settings.project_path / "uv.lock").write_text(
+        '[[package]]\nname="certifi"\nversion="2024.2.2"\n'
+    )
+    app = VulnScanApp(
+        settings,
+        scan_fn=lambda s: _transitive_result(s.project_path),
+        versions_fn=lambda d: ["2024.2.2", "2026.10.19"],
+    )
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        assert app.screen.__class__.__name__ not in (
+            "RemediateScreen",
+            "UpgradeScreen",
+            "PinScreen",
+        )
+        assert "transitive" in app.status_text
+        assert "certifi>=2026.10.19" in app.status_text
+        assert app.remediated == {}
+
+
+async def test_outdated_mode_pins_transitive_dependency_to_series_or_latest(tmp_path: Path):
+    from textual.widgets import OptionList
+
+    settings = _transitive_project(tmp_path)
+    app = VulnScanApp(
+        settings,
+        scan_fn=lambda s: _transitive_result(s.project_path),
+        versions_fn=lambda d: {"certifi": ["2024.2.2", "2024.2.5", "2026.10.19"]}.get(
+            d.name, ["0.27.0"]
+        ),
+        outdated=True,
+    )
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        deps = app.query_one("#deps", DataTable)
+        assert [_column(deps, i, "Package") for i in range(deps.row_count)] == ["certifi"]
+        await pilot.press("u")
+        await settle(app, pilot)
+        assert app.screen.__class__.__name__ == "PinScreen"
+        options = app.screen.query_one("#remediate-options", OptionList)
+        prompts = [str(options.get_option_at_index(i).prompt) for i in range(options.option_count)]
+        assert "certifi>=2024.2.5" in prompts[0]
+        assert "certifi>=2026.10.19" in prompts[1]
+        await pilot.press("down")
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert '"certifi>=2026.10.19"' in (settings.project_path / "pyproject.toml").read_text()
