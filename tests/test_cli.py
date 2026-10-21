@@ -616,7 +616,24 @@ def test_summary_marks_transitive_dependencies(tmp_path: Path, monkeypatch, caps
     assert "httpx" in out
 
 
-def test_remediate_flag_explains_transitive_dependencies(tmp_path: Path, monkeypatch, capsys):
+def test_remediate_flag_pins_transitive_dependencies(tmp_path: Path, monkeypatch, capsys):
+    (tmp_path / "uv.lock").write_text('[[package]]\nname="certifi"\nversion="2024.2.2"\n')
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\ndependencies = [\n]\n')
+    monkeypatch.setattr(cli, "scan", lambda settings: transitive_result(settings.project_path))
+    monkeypatch.setattr(
+        cli, "fetch_versions", lambda settings, dep: ["2024.2.2", "2025.1.1", "2026.10.19"]
+    )
+    code = cli.main(["--remediate", "certifi", "--path", str(tmp_path)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Added certifi>=2026.10.19 to pyproject.toml" in out
+    assert "uv lock" in out
+    assert '"certifi>=2026.10.19"' in (tmp_path / "pyproject.toml").read_text()
+
+
+def test_remediate_flag_explains_transitive_dependency_without_a_manifest(
+    tmp_path: Path, monkeypatch, capsys
+):
     (tmp_path / "uv.lock").write_text('[[package]]\nname="certifi"\nversion="2024.2.2"\n')
     monkeypatch.setattr(cli, "scan", lambda settings: transitive_result(settings.project_path))
     monkeypatch.setattr(
@@ -628,4 +645,3 @@ def test_remediate_flag_explains_transitive_dependencies(tmp_path: Path, monkeyp
     assert "transitive" in err
     assert "httpx" in err
     assert "certifi>=2026.10.19" in err
-    assert (tmp_path / "uv.lock").read_text() == '[[package]]\nname="certifi"\nversion="2024.2.2"\n'

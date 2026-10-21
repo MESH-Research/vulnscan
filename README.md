@@ -199,9 +199,13 @@ read from `uv.lock`, `poetry.lock`, `composer.lock` and
 `package-lock.json`; the other formats list the package without them.
 
 A transitive package has no manifest line to rewrite, so `u` and
-`--remediate` explain what to do instead: add an explicit constraint such as
-`certifi>=2026.10.19` to your own dependencies (an `overrides` entry for npm),
-or upgrade the package that requires it.
+`--remediate` instead **insert** a constraint into the manifest next to the
+lock file: `certifi>=2026.10.19` in `[project] dependencies` (or the Poetry
+table, `requirements.txt` or `Pipfile`), a `require` entry in
+`composer.json`, or an `overrides`/`resolutions`/`pnpm.overrides` entry in
+`package.json`. In the TUI a confirmation dialog shows the file and the exact
+text first; Esc leaves it untouched. See
+[Upgrading dependencies](docs/remediation.md#transitive-dependencies).
 
 ### Ignoring directories
 

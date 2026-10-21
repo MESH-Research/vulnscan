@@ -229,6 +229,9 @@ def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     for change in outcome.authoritative_changes or outcome.changes:
+        if change.added:
+            print(f"Added {change.new_constraint} to {change.source_file}")
+            continue
         print(
             f"Updated {change.source_file}: {change.old_constraint or '(any)'} -> "
             f"{change.new_constraint}"

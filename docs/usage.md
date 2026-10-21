@@ -132,8 +132,9 @@ own package in `uv.lock` is never listed, and `composer.lock` types such as
 against Wordfence like a direct one. `VULNSCAN_INCLUDE_DEV=false` drops
 packages the lock marks as development-only.
 
-A transitive package has no manifest line to rewrite, so pressing `u` or
-running `--remediate` explains what to do instead; see
+A transitive package has no manifest line to rewrite, so pressing `u` (after
+a confirmation dialog) or running `--remediate` inserts a constraint into the
+manifest next to the lock file instead; see
 [Upgrading dependencies](remediation.md#transitive-dependencies).
 
 ## A package declared in several files
