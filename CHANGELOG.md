@@ -1,3 +1,10 @@
+## 1.8.0 (2026-10-21)
+
+### Feat
+
+- **remediate**: pin transitive dependencies by inserting a constraint
+- **scan**: scan transitive dependencies from lock files
+
 ## 1.7.0 (2026-10-21)
 
 ### Feat
