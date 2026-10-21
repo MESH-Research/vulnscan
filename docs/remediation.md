@@ -71,6 +71,24 @@ In the TUI the dependency's row and its advisories turn green with a ✔
 marker persists across rescans in the same session, since the dependency
 keeps showing as vulnerable until the lock file is updated.
 
+## Transitive dependencies
+
+A package that only a lock file records (see `--transitive`) is not declared
+anywhere vulnscan could edit, so `u` and `--remediate` do not rewrite
+anything. Instead the status line (or the error, with exit code 1) says what
+requires the package and which constraint to add by hand, for example:
+
+```
+certifi is a transitive dependency required by httpcore, httpx; it is not
+declared in any manifest. To move to 2026.10.19, add certifi>=2026.10.19 to
+your dependencies (pyproject.toml or a requirements file), or upgrade
+httpcore, httpx to a release that needs certifi 2026.10.19 or newer, then
+reinstall.
+```
+
+For npm the suggestion is an `overrides` entry in `package.json`; for
+Composer, a `require` entry in `composer.json`.
+
 ## Command line
 
 ```

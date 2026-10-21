@@ -20,9 +20,9 @@ channel the first time a new advisory appears.
 - **Interfaces:** an interactive terminal UI; non-interactive modes for cron; a
   continuous watch mode that notifies [ntfy](https://ntfy.sh) and/or Microsoft
   Teams.
-- **Scope:** direct dependencies only. Lock files are read solely to learn the
-  installed version of those direct dependencies; transitive dependencies are
-  never scanned.
+- **Scope:** direct dependencies by default. With `--transitive` (or
+  `VULNSCAN_TRANSITIVE=true`) every package a lock file records is scanned too,
+  marked as transitive together with the packages that require it.
 
 Full documentation, including an API reference, lives in [`docs/`](docs/) and
 builds with MkDocs (`uv run mkdocs serve`).
@@ -182,6 +182,27 @@ InvenioRDM apps, npm upgrades edit `webpack.py` (site overlay and declaring
 bundles) rather than relying on the generated `package.json`; see
 [docs/invenio.md](docs/invenio.md).
 
+### Transitive dependencies
+
+```
+uv run vulnscan --transitive --path /path/to/project
+```
+
+By default only packages declared in a manifest are scanned. With
+`--transitive` (or `VULNSCAN_TRANSITIVE=true`) every package recorded in a lock
+file next to a manifest is scanned as well: `uv.lock`, `poetry.lock`,
+`Pipfile.lock`, `composer.lock`, `package-lock.json`, `npm-shrinkwrap.json`,
+`yarn.lock` and `pnpm-lock.yaml`. Such packages show as
+`uv.lock (transitive; required by httpcore, httpx)` wherever a declaring file
+is listed, in the TUI, reports, feeds and notifications. The requirers are
+read from `uv.lock`, `poetry.lock`, `composer.lock` and
+`package-lock.json`; the other formats list the package without them.
+
+A transitive package has no manifest line to rewrite, so `u` and
+`--remediate` explain what to do instead: add an explicit constraint such as
+`certifi>=2026.10.19` to your own dependencies (an `overrides` entry for npm),
+or upgrade the package that requires it.
+
 ### Ignoring directories
 
 Some directories should never be scanned, such as a quarantine of plugins you
@@ -221,6 +242,7 @@ comments.
 | --------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | `VULNSCAN_PROJECT_PATH`                             | `.`                                               | Project to scan (`--path`)                                                             |
 | `VULNSCAN_INCLUDE_DEV`                              | `true`                                            | Include dev / test / optional dependencies                                             |
+| `VULNSCAN_TRANSITIVE`                               | `false`                                           | Also scan packages lock files record but no manifest declares (`--transitive`)         |
 | `VULNSCAN_QUERY_UNKNOWN_VERSIONS`                   | `false`                                           | Query packages whose version is unknown (noisy)                                        |
 | `VULNSCAN_IGNORE_DIRS`                              | empty                                             | Directories to skip: names, relative paths or globs (`--ignore`)                       |
 | `VULNSCAN_INVENIO_WEBPACK`                          | `auto`                                            | Use Invenio `webpack.py` npm sources and remediation strategies: `auto` / `on` / `off` |

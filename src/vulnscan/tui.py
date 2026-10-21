@@ -16,7 +16,7 @@ from textual.widgets.option_list import Option
 
 from vulnscan.config import Settings
 from vulnscan.feeds import write_feeds
-from vulnscan.models import Dependency, Finding, ScanResult, Vulnerability
+from vulnscan.models import Dependency, Finding, ScanResult, Vulnerability, format_declaration
 from vulnscan.outdated import OutdatedPackage, UpgradeOptions, find_outdated
 from vulnscan.registry import RegistryClient, RegistryError
 from vulnscan.remediate import (
@@ -25,6 +25,7 @@ from vulnscan.remediate import (
     RemediationResult,
     apply_remediation,
     plan_remediation,
+    transitive_hint,
 )
 from vulnscan.reports import write_reports
 from vulnscan.scanner import scan
@@ -92,7 +93,9 @@ def vulnerability_markdown(finding: Finding, vuln: Vulnerability) -> str:
         lines += [f"**{vuln.summary}**", ""]
     declared = "; ".join(
         (
-            f"{d.source_file} as `{d.constraint}`"
+            format_declaration(d)
+            if d.transitive
+            else f"{d.source_file} as `{d.constraint}`"
             if d.constraint
             else f"{d.source_file}; no version constraint"
         )
@@ -527,6 +530,7 @@ class VulnScanApp(App[None]):
     def _dep_cells(self, finding: Finding) -> list[str | Text]:
         dep = finding.dependency
         done = self._is_remediated(finding)
+        via = dep.version_source + (" (transitive)" if dep.transitive else "")
         if self.outdated:
             options = self._upgrades.get(dep.key)
             values = [
@@ -534,7 +538,7 @@ class VulnScanApp(App[None]):
                 dep.name,
                 dep.ecosystem,
                 dep.version or "?",
-                dep.version_source,
+                via,
                 (options.series_latest if options else None) or "-",
                 (options.latest if options else None) or "-",
                 str(len(finding.vulnerabilities)) if finding.vulnerabilities else "none",
@@ -546,7 +550,7 @@ class VulnScanApp(App[None]):
             dep.name,
             dep.ecosystem,
             dep.version or "?",
-            dep.version_source,
+            via,
             finding.worst_severity,
             str(len(finding.vulnerabilities)),
             ", ".join(finding.fixed_versions) or "-",
@@ -687,7 +691,18 @@ class VulnScanApp(App[None]):
         except RegistryError as exc:
             self.call_from_thread(self._set_status, f"Could not look up versions: {exc}")
             return
+        if finding.dependency.transitive:
+            target = plan.nearest_safe or plan.latest or "a fixed version"
+            self.call_from_thread(self._explain_transitive, finding, target)
+            return
         self.call_from_thread(self._offer_remediation, finding, plan)
+
+    def _explain_transitive(self, finding: Finding, target: str) -> None:
+        """A transitive dependency has no manifest to edit: say what to add by hand instead."""
+        self._set_status(transitive_hint(finding.dependency, target))
+        self.notify(
+            f"{finding.dependency.name} is transitive: see the status line.", severity="warning"
+        )
 
     def _offer_remediation(self, finding: Finding, plan: RemediationPlan) -> None:
         self._set_status(
@@ -707,6 +722,9 @@ class VulnScanApp(App[None]):
         options = self._upgrades.get(dep.key)
         if options is None or not options.is_outdated:
             self.notify(f"{dep.name} has no newer release.", severity="warning")
+            return
+        if dep.transitive:
+            self._explain_transitive(finding, options.series_latest or options.latest)
             return
 
         def on_choice(choice: str | None) -> None:

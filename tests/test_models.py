@@ -261,3 +261,32 @@ def test_merge_declarations_does_not_repeat_identical_locations():
         _dep("authlib", "==1.2.0", "requirements/base.txt"),
     ]
     assert merge_declarations(deps)[0].source_files == ["requirements/base.txt"]
+
+
+def test_format_declaration_describes_transitive_dependencies():
+    from vulnscan.models import Declaration, format_declaration
+
+    text = format_declaration(
+        Declaration("uv.lock", "", transitive=True, required_by=("httpcore", "httpx"))
+    )
+    assert "uv.lock" in text
+    assert "transitive" in text
+    assert "httpcore, httpx" in text
+    alone = format_declaration(Declaration("uv.lock", "", transitive=True))
+    assert "transitive" in alone
+    assert "required by" not in alone
+
+
+def test_transitive_dependency_declarations_carry_the_marker():
+    from vulnscan.models import PYPI, Dependency, merge_declarations
+
+    dep = Dependency(
+        "certifi", PYPI, "", "2024.2.2", "lock", "uv.lock", transitive=True, required_by=("httpx",)
+    )
+    assert dep.declared_in[0].transitive is True
+    assert dep.declared_in[0].required_by == ("httpx",)
+    assert "transitive" in dep.declared_in_text
+    assert "httpx" in dep.declared_in_text
+    (merged,) = merge_declarations([dep])
+    assert merged.transitive is True
+    assert "transitive" in merged.declared_in_text

@@ -66,7 +66,11 @@ def scan(
     """Scan the configured project. Raises OSVError / WordfenceError if a source fails."""
     if client is None:
         client = OSVClient(base_url=settings.osv_base_url, timeout=settings.request_timeout)
-    deps, warnings = parse_project(settings.project_path, ignore_dirs=settings.ignore_dirs)
+    deps, warnings = parse_project(
+        settings.project_path,
+        ignore_dirs=settings.ignore_dirs,
+        include_transitive=settings.include_transitive,
+    )
     if not settings.include_dev:
         deps = [d for d in deps if not d.dev]
     deps = merge_declarations(deps)

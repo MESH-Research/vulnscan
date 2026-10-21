@@ -547,3 +547,43 @@ def test_pipfile_script_named_like_a_package_is_left_alone(tmp_path: Path):
     assert (tmp_path / "Pipfile").read_text() == original.replace(
         'django = "==6.0.7"', 'django = "==6.1.2"'
     )
+
+
+# -- transitive dependencies cannot be edited in place ----------------------------------------
+
+
+def test_apply_remediation_refuses_transitive_dependency_with_a_hint(tmp_path: Path):
+    from vulnscan.models import PYPI, Dependency
+    from vulnscan.remediate import RemediationError, apply_remediation
+
+    (tmp_path / "uv.lock").write_text('[[package]]\nname="certifi"\nversion="2024.2.2"\n')
+    dep = Dependency(
+        "certifi", PYPI, "", "2024.2.2", "lock", "uv.lock", transitive=True, required_by=("httpx",)
+    )
+    with pytest.raises(RemediationError) as excinfo:
+        apply_remediation(tmp_path, dep, "2026.10.19")
+    message = str(excinfo.value)
+    assert "transitive" in message
+    assert "httpx" in message
+    assert "certifi>=2026.10.19" in message
+    assert (tmp_path / "uv.lock").read_text() == '[[package]]\nname="certifi"\nversion="2024.2.2"\n'
+
+
+@pytest.mark.parametrize(
+    ("ecosystem", "name", "expected"),
+    [
+        ("PyPI", "certifi", "certifi>=2026.10.19"),
+        ("Packagist", "psr/log", '"psr/log": "^2026.10.19"'),
+        ("WordPress", "wpackagist-plugin/akismet", '"wpackagist-plugin/akismet": "^2026.10.19"'),
+        ("npm", "cookie", '"cookie": "^2026.10.19"'),
+    ],
+)
+def test_transitive_hint_names_the_constraint_to_add(ecosystem, name, expected):
+    from vulnscan.models import Dependency
+    from vulnscan.remediate import transitive_hint
+
+    dep = Dependency(name, ecosystem, "", "1.0.0", "lock", "lock", transitive=True)
+    hint = transitive_hint(dep, "2026.10.19")
+    assert expected in hint
+    if ecosystem == "npm":
+        assert "overrides" in hint

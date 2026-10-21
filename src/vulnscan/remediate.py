@@ -837,6 +837,8 @@ def apply_remediation(
     For other ecosystems (and npm outside Invenio mode), every rewrite is computed before
     any file is written, so a manifest that cannot be edited leaves all of them untouched.
     """
+    if dep.transitive:
+        raise RemediationError(transitive_hint(dep, new_version))
     if dep.ecosystem == NPM and settings is not None and _invenio_active(project_root, settings):
         return _apply_invenio_npm(
             project_root, dep, new_version, settings, webpack_merge=webpack_merge
@@ -866,3 +868,28 @@ def apply_remediation(
 def display_name(dep: Dependency) -> str:
     """Canonical package name used when referring to a dependency in messages."""
     return normalize_name(dep.name, dep.ecosystem)
+
+
+def transitive_hint(dep: Dependency, version: str) -> str:
+    """Explain how to move a transitive dependency to ``version``.
+
+    Nothing declares the package, so no manifest can be rewritten in place; the hint names
+    the constraint to add by hand and the packages that pull the dependency in.
+    """
+    name = display_name(dep)
+    if dep.ecosystem == PYPI:
+        add = f"add {name}>={version} to your dependencies (pyproject.toml or a requirements file)"
+    elif dep.ecosystem == NPM:
+        add = f'add "{name}": "^{version}" under "overrides" in package.json'
+    else:
+        add = f'add "{name}": "^{version}" to "require" in composer.json'
+    via = ""
+    upgrade = ""
+    if dep.required_by:
+        requirers = ", ".join(dep.required_by)
+        via = f" required by {requirers}"
+        upgrade = f", or upgrade {requirers} to a release that needs {name} {version} or newer"
+    return (
+        f"{dep.name} is a transitive dependency{via}; it is not declared in any manifest. "
+        f"To move to {version}, {add}{upgrade}, then reinstall."
+    )

@@ -28,6 +28,7 @@ _ENV_MAP: dict[str, tuple[str, Any]] = {
     "osv_base_url": ("OSV_URL", "https://api.osv.dev"),
     "request_timeout": ("TIMEOUT", "30"),
     "include_dev": ("INCLUDE_DEV", "true"),
+    "include_transitive": ("TRANSITIVE", "false"),
     "query_unknown_versions": ("QUERY_UNKNOWN_VERSIONS", "false"),
     "wordfence_api_key": ("WORDFENCE_API_KEY", ""),
     "wordfence_url": ("WORDFENCE_URL", "https://www.wordfence.com/api/intelligence/v3"),
@@ -105,6 +106,8 @@ class Settings:
     interval_minutes: float = 60.0
     invenio_webpack: str = "auto"
     invenio_webpack_overlay: Path | None = None
+    include_transitive: bool = False
+    """Also scan packages that lock files record but no manifest declares."""
 
     @property
     def ntfy_state_path(self) -> Path:
@@ -172,6 +175,7 @@ _COERCERS = {
     "osv_base_url": lambda v: str(v).rstrip("/"),
     "request_timeout": float,
     "include_dev": _to_bool,
+    "include_transitive": _to_bool,
     "query_unknown_versions": _to_bool,
     "wordfence_url": lambda v: str(v).rstrip("/"),
     "wordfence_ttl_hours": float,

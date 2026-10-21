@@ -192,3 +192,22 @@ def test_text_report_lists_every_declaring_file(tmp_path: Path):
     text = render_text(_multi_declared(tmp_path))
     assert "requirements/base.txt as ==1.2.0" in text
     assert "requirements/production.txt as >=1.2" in text
+
+
+def test_reports_mark_transitive_dependencies():
+    certifi = Dependency(
+        "certifi",
+        PYPI,
+        "",
+        "2024.2.2",
+        "lock",
+        "uv.lock",
+        transitive=True,
+        required_by=("httpcore", "httpx"),
+    )
+    v = Vulnerability("GHSA-C", "s", "d", severity="HIGH", fixed_versions=["2026.10.19"])
+    result = ScanResult(Path("/p"), [certifi], [Finding(certifi, [v])], [], NOW)
+    for text in (render_markdown(result), render_text(result)):
+        assert "certifi" in text
+        assert "transitive" in text
+        assert "httpcore, httpx" in text

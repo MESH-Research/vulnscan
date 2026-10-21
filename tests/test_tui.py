@@ -793,3 +793,57 @@ def test_upgrade_markdown_states_it_is_not_a_security_update():
     v = Vulnerability("GHSA-x", "s", "d", severity="HIGH")
     with_finding = upgrade_markdown(dep, options, Finding(dep, [v]))
     assert "GHSA-x" in with_finding
+
+
+# -- transitive dependencies ---------------------------------------------------------------
+
+
+def _transitive_result(path: Path) -> ScanResult:
+    httpx = Dependency("httpx", PYPI, ">=0.27", "0.27.0", "constraint", "pyproject.toml")
+    certifi = Dependency(
+        "certifi",
+        PYPI,
+        "",
+        "2024.2.2",
+        "lock",
+        "uv.lock",
+        transitive=True,
+        required_by=("httpx",),
+    )
+    v = Vulnerability("GHSA-C", "s", "d", severity="HIGH", fixed_versions=["2026.10.19"])
+    return ScanResult(path, [httpx, certifi], [Finding(certifi, [v])], [], datetime.now(UTC))
+
+
+async def test_transitive_dependency_row_is_marked(tmp_path: Path):
+    app = VulnScanApp(settings_for(tmp_path), scan_fn=lambda s: _transitive_result(s.project_path))
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        deps = app.query_one("#deps", DataTable)
+        row = _row_text(deps, 0)
+        assert any("certifi" in c for c in row)
+        assert any("transitive" in c for c in row)
+        detail = app.query_one("#detail", Markdown).source
+        assert "transitive" in detail
+        assert "httpx" in detail
+
+
+async def test_upgrade_key_explains_transitive_dependency_instead_of_editing(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    settings.project_path.mkdir()
+    (settings.project_path / "uv.lock").write_text(
+        '[[package]]\nname="certifi"\nversion="2024.2.2"\n'
+    )
+    app = VulnScanApp(
+        settings,
+        scan_fn=lambda s: _transitive_result(s.project_path),
+        versions_fn=lambda d: ["2024.2.2", "2026.10.19"],
+    )
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        assert app.screen.__class__.__name__ not in ("RemediateScreen", "UpgradeScreen")
+        assert "transitive" in app.status_text
+        assert "httpx" in app.status_text
+        assert "certifi>=2026.10.19" in app.status_text
+        assert app.remediated == {}
