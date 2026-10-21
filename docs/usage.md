@@ -30,6 +30,26 @@ The bottom-right pane shows the full disclosure: severity and CVSS vector,
 aliases, fixed versions, each declaring file with the constraint written
 there, the advisory text and all reference links.
 
+## Outdated packages (any update, not only security)
+
+```
+uv run vulnscan --outdated --path /path/to/project
+```
+
+The same interface in **outdated mode**. The left table lists every direct
+dependency with a newer stable release, whether or not an advisory affects
+it: package, ecosystem, installed version and its source, the newest release
+in the current series, the latest release, the number of known advisories
+affecting the installed version (or `none`) and the declaring files. A banner
+under the header and the window title state that these are routine updates,
+not security advisories. The detail pane describes the available update; a
+package that does have advisories still lists them in the top-right table.
+
+`u` offers two choices, see [Upgrading dependencies](remediation.md#routine-updates):
+the newest release in the current `major.minor` series (disabled when there
+is none) and the latest release. `--outdated` is interactive only and is
+rejected alongside any non-interactive flag.
+
 ## Feeds for a feed reader (cron)
 
 ```

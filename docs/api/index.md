@@ -33,6 +33,7 @@ Then, for example, `vulnscan.feeds.write_feeds(result, settings)`,
 | [`vulnscan.wordfence`](wordfence.md) | Wordfence Intelligence client and cache |
 | [`vulnscan.registry`](registry.md) | Available versions from PyPI, Packagist and wordpress.org |
 | [`vulnscan.remediate`](remediate.md) | Upgrade planning and manifest rewriting |
+| [`vulnscan.outdated`](outdated.md) | Newer-release detection for the `--outdated` mode |
 | [`vulnscan.feeds`](feeds.md) | RSS and Atom |
 | [`vulnscan.reports`](reports.md) | Markdown and plain text |
 | [`vulnscan.notify`](notify.md) | Notification building, per-channel sent state, the watch loop |

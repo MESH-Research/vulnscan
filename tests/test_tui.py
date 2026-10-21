@@ -544,3 +544,252 @@ async def test_remediation_updates_every_declaring_file(tmp_path: Path):
         assert (tmp_path / "proj" / "requirements-prod.txt").read_text() == "requests>=2.31.0\n"
         assert "requirements-prod.txt" in app.status_text
         assert app.remediated == {("PyPI", "requests"): "requests==2.31.0"}
+
+
+# -- outdated mode -----------------------------------------------------------------------------
+
+
+OUTDATED_VERSIONS = {
+    "flask": ["2.3.0", "3.0.0", "3.0.3", "3.1.0"],
+    "requests": ["2.30.0", "2.31.0", "2.32.4"],
+    "monolog/monolog": ["1.0.0", "2.9.1"],
+    "click": ["8.1.7"],
+}
+
+
+def _outdated_scan(path: Path) -> ScanResult:
+    result = sample_result(path)
+    result.dependencies.append(
+        Dependency("click", PYPI, "==8.1.7", "8.1.7", "pinned", "requirements.txt")
+    )
+    return result
+
+
+def _outdated_app(tmp_path: Path, versions_fn=None) -> VulnScanApp:
+    settings = settings_for(tmp_path)
+    project = settings.project_path
+    project.mkdir()
+    (project / "requirements.txt").write_text("flask==3.0.0\nrequests==2.30.0\nclick==8.1.7\n")
+    (project / "composer.json").write_text('{"require": {"monolog/monolog": "^1.0"}}')
+    return VulnScanApp(
+        settings,
+        scan_fn=lambda s: _outdated_scan(s.project_path),
+        versions_fn=versions_fn or (lambda d: OUTDATED_VERSIONS[d.name]),
+        outdated=True,
+    )
+
+
+def _column(table: DataTable, row: int, header: str) -> str:
+    from vulnscan.tui import OUTDATED_COLUMNS
+
+    return str(table.get_row_at(row)[OUTDATED_COLUMNS.index(header)])
+
+
+async def test_outdated_mode_lists_packages_with_newer_releases(tmp_path: Path):
+    app = _outdated_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        deps = app.query_one("#deps", DataTable)
+        assert deps.row_count == 3  # click is up to date
+        names = [_column(deps, i, "Package") for i in range(deps.row_count)]
+        assert names == ["flask", "monolog/monolog", "requests"]
+        assert _column(deps, 0, "Installed") == "3.0.0"
+        assert _column(deps, 0, "Series update") == "3.0.3"
+        assert _column(deps, 0, "Latest") == "3.1.0"
+        assert _column(deps, 1, "Series update") == "-"
+        assert _column(deps, 1, "Latest") == "2.9.1"
+
+
+async def test_outdated_mode_shows_advisory_counts_per_package(tmp_path: Path):
+    app = _outdated_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        deps = app.query_one("#deps", DataTable)
+        assert _column(deps, 0, "Advisories") == "none"
+        assert _column(deps, 1, "Advisories") == "1"
+        assert _column(deps, 2, "Advisories") == "2"
+
+
+async def test_outdated_mode_clearly_marks_updates_as_non_security(tmp_path: Path):
+    from textual.widgets import Static
+
+    app = _outdated_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert "not security" in app.sub_title.lower()
+        banner = str(app.query_one("#mode-banner", Static).content).lower()
+        assert "not security" in banner
+        assert "update" in app.status_text
+        assert "4" in app.status_text  # dependencies scanned
+        assert "3" in app.status_text  # with updates
+
+
+async def test_normal_mode_has_no_outdated_banner(tmp_path: Path):
+    from textual.css.query import NoMatches
+    from textual.widgets import Static
+
+    app = VulnScanApp(settings_for(tmp_path), scan_fn=lambda s: sample_result(s.project_path))
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        with pytest.raises(NoMatches):
+            app.query_one("#mode-banner", Static)
+        assert "not security" not in app.sub_title.lower()
+
+
+async def test_outdated_mode_detail_pane_describes_the_update(tmp_path: Path):
+    app = _outdated_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        detail = app.query_one("#detail", Markdown).source
+        assert "flask" in detail
+        assert "3.0.3" in detail
+        assert "3.1.0" in detail
+        assert "not a security" in detail.lower()
+        assert "requirements.txt" in detail
+        assert app.query_one("#vulns", DataTable).row_count == 0
+
+
+async def test_outdated_mode_shows_advisories_for_a_vulnerable_package(tmp_path: Path):
+    app = _outdated_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        deps = app.query_one("#deps", DataTable)
+        deps.move_cursor(row=2)  # requests
+        await settle(app, pilot)
+        vulns = app.query_one("#vulns", DataTable)
+        assert vulns.row_count == 2
+        detail = app.query_one("#detail", Markdown).source
+        assert "2.32.4" in detail
+        assert "GHSA-j8r2-6x86-q33q" in detail
+        vulns.focus()  # as with Tab: move into the advisory table, then down
+        vulns.move_cursor(row=1)
+        await settle(app, pilot)
+        assert "GHSA-other" in app.query_one("#detail", Markdown).source
+
+
+async def test_outdated_mode_upgrade_offers_series_and_latest(tmp_path: Path):
+    from textual.widgets import OptionList, Static
+
+    app = _outdated_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        screen = app.screen
+        assert screen.__class__.__name__ == "UpgradeScreen"
+        summary = str(screen.query_one("#remediate-summary", Static).content).lower()
+        assert "not a security" in summary
+        options = screen.query_one("#remediate-options", OptionList)
+        assert options.option_count == 2
+        prompts = [str(options.get_option_at_index(i).prompt) for i in range(2)]
+        assert "3.0.3" in prompts[0]
+        assert "3.1.0" in prompts[1]
+        assert not options.get_option_at_index(0).disabled
+        await pilot.press("enter")  # first option: newest release in the 3.0 series
+        await settle(app, pilot)
+        assert app.screen.__class__.__name__ != "UpgradeScreen"
+        text = (tmp_path / "proj" / "requirements.txt").read_text()
+        assert "flask==3.0.3" in text
+        assert "requests==2.30.0" in text
+        assert app.remediated == {("PyPI", "flask"): "flask==3.0.3"}
+
+
+async def test_outdated_mode_latest_option_applies_newest_release(tmp_path: Path):
+    app = _outdated_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        await pilot.press("down")
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert "flask==3.1.0" in (tmp_path / "proj" / "requirements.txt").read_text()
+
+
+async def test_outdated_mode_series_option_disabled_without_a_series_release(tmp_path: Path):
+    from textual.widgets import OptionList
+
+    app = _outdated_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        app.query_one("#deps", DataTable).move_cursor(row=1)  # monolog 1.0.0 -> only 2.9.1
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        options = app.screen.query_one("#remediate-options", OptionList)
+        assert options.get_option_at_index(0).disabled
+        assert not options.get_option_at_index(1).disabled
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert '"monolog/monolog": "^2.9.1"' in (tmp_path / "proj" / "composer.json").read_text()
+
+
+async def test_outdated_mode_escape_cancels_upgrade(tmp_path: Path):
+    app = _outdated_app(tmp_path)
+    original = (tmp_path / "proj" / "requirements.txt").read_text()
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("u")
+        await settle(app, pilot)
+        await pilot.press("escape")
+        await settle(app, pilot)
+        assert (tmp_path / "proj" / "requirements.txt").read_text() == original
+        assert app.remediated == {}
+
+
+async def test_outdated_mode_upgraded_row_is_ticked(tmp_path: Path):
+    app = _outdated_app(tmp_path)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        deps = app.query_one("#deps", DataTable)
+        assert "✔" not in "".join(_row_text(deps, 0))
+        await pilot.press("u")
+        await settle(app, pilot)
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert "✔" in str(deps.get_row_at(0)[0])
+        assert "✔" not in "".join(_row_text(deps, 1))
+
+
+async def test_outdated_mode_registry_failure_is_a_warning(tmp_path: Path):
+    from vulnscan.registry import RegistryError
+
+    def versions(dep):
+        if dep.name == "requests":
+            raise RegistryError("registry down")
+        return OUTDATED_VERSIONS[dep.name]
+
+    app = _outdated_app(tmp_path, versions_fn=versions)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        deps = app.query_one("#deps", DataTable)
+        assert deps.row_count == 2
+        assert "requests" in app.status_text
+        assert "registry down" in app.status_text
+
+
+async def test_outdated_mode_scan_failure_is_reported(tmp_path: Path):
+    def failing(s):
+        raise RuntimeError("OSV exploded")
+
+    app = VulnScanApp(settings_for(tmp_path), scan_fn=failing, outdated=True)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert "OSV exploded" in app.status_text
+        assert app.query_one("#deps", DataTable).row_count == 0
+
+
+def test_upgrade_markdown_states_it_is_not_a_security_update():
+    from vulnscan.outdated import UpgradeOptions
+    from vulnscan.tui import upgrade_markdown
+
+    dep = Dependency("flask", PYPI, "==3.0.0", "3.0.0", "pinned", "requirements.txt")
+    options = UpgradeOptions("3.0.0", "3.0", "3.0.3", "3.1.0")
+    text = upgrade_markdown(dep, options, None)
+    assert "not a security" in text.lower()
+    assert "3.0.3" in text
+    assert "3.1.0" in text
+    assert "requirements.txt" in text
+    v = Vulnerability("GHSA-x", "s", "d", severity="HIGH")
+    with_finding = upgrade_markdown(dep, options, Finding(dep, [v]))
+    assert "GHSA-x" in with_finding

@@ -14,6 +14,20 @@ two choices:
 
 Pre-release and yanked versions are never offered.
 
+## Routine updates
+
+`vulnscan --outdated` lists dependencies with newer releases regardless of
+advisories. There `u` offers two different choices, and the dialog says that
+the upgrade is not a security fix:
+
+- **Newest release in the current series**: the newest version sharing the
+  installed version's `major.minor`. On 2.6.1 with 2.6.2 and 2.7.2 published
+  this is 2.6.2; it is disabled when the series has nothing newer.
+- **Latest release**: the newest stable version.
+
+If known advisories still affect the chosen version, the option says so.
+What gets edited is the same as below.
+
 ## What gets edited
 
 The constraint is rewritten in **every manifest that declares the package**

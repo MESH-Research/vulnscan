@@ -17,6 +17,7 @@ from textual.widgets.option_list import Option
 from vulnscan.config import Settings
 from vulnscan.feeds import write_feeds
 from vulnscan.models import Dependency, Finding, ScanResult, Vulnerability
+from vulnscan.outdated import OutdatedPackage, UpgradeOptions, find_outdated
 from vulnscan.registry import RegistryClient, RegistryError
 from vulnscan.remediate import (
     RemediationError,
@@ -47,9 +48,27 @@ DEP_COLUMNS = (
     "Fixed in",
     "File",
 )
+OUTDATED_COLUMNS = (
+    " ",
+    "Package",
+    "Ecosystem",
+    "Installed",
+    "Via",
+    "Series update",
+    "Latest",
+    "Advisories",
+    "File",
+)
 VULN_COLUMNS = ("Advisory", "Severity", "CVE", "Summary", "Status")
 REMEDIATED_STYLE = "bold green"
 TICK = "✔"
+OUTDATED_SUBTITLE = "OUTDATED PACKAGES: all updates, not security advisories"
+OUTDATED_BANNER = (
+    "Outdated mode: these packages have newer releases. These are routine updates, NOT "
+    "security advisories; any known advisories are counted in the Advisories column. "
+    "Press u for the newest release in the current series or the latest release."
+)
+NOT_SECURITY_NOTE = "Routine update: this is not a security advisory."
 
 
 def _cells(values: list[str], remediated: bool) -> list[str | Text]:
@@ -113,11 +132,46 @@ def vulnerability_markdown(finding: Finding, vuln: Vulnerability) -> str:
     return "\n".join(lines)
 
 
-class RemediateScreen(ModalScreen[str | None]):
-    """Ask which upgrade to apply. Dismisses with 'nearest', 'latest' or None."""
+def _advisory_list(finding: Finding | None) -> str:
+    if not finding or not finding.vulnerabilities:
+        return "none"
+    return ", ".join(f"{v.id} ({v.severity})" for v in finding.vulnerabilities)
+
+
+def upgrade_markdown(dep: Dependency, options: UpgradeOptions, finding: Finding | None) -> str:
+    """Markdown shown in the detail pane for an outdated (not necessarily vulnerable) package."""
+    series = options.series or "?"
+    if options.series_latest:
+        series_line = f"newest {series}.x release is {options.series_latest}"
+    else:
+        series_line = f"no newer release in the {series} series"
+    lines = [
+        f"# {dep.name}",
+        "",
+        f"**{NOT_SECURITY_NOTE}** A newer release is available.",
+        "",
+        f"- **Package:** {dep.name} {options.current or '(unknown version)'} ({dep.ecosystem})",
+        f"- **Declared in:** {dep.declared_in_text} (version from {dep.version_source})",
+        f"- **Current series:** {series}; {series_line}",
+        f"- **Latest release:** {options.latest or 'none newer'}",
+        f"- **Known advisories affecting {options.current or 'this version'}:** "
+        f"{_advisory_list(finding)}",
+    ]
+    if finding and finding.vulnerabilities:
+        lines.append("")
+        lines.append(
+            "_Select an advisory in the table above for its details. "
+            "Press o to open it in a browser._"
+        )
+    lines += ["", "Press u to upgrade this package in every manifest that declares it."]
+    return "\n".join(lines)
+
+
+class OptionDialog(ModalScreen[str | None]):
+    """A modal with a summary, a list of options and a key hint; dismisses with an option id."""
 
     DEFAULT_CSS = """
-    RemediateScreen { align: center middle; }
+    OptionDialog { align: center middle; }
     #remediate-box {
         width: 90; height: auto; max-height: 90%; padding: 1 2;
         border: thick $primary; background: $surface;
@@ -128,40 +182,19 @@ class RemediateScreen(ModalScreen[str | None]):
     """
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, finding: Finding, plan: RemediationPlan) -> None:
-        super().__init__()
-        self.finding = finding
-        self.plan = plan
+    def summary_lines(self) -> list[str]:
+        """Lines shown above the options."""
+        raise NotImplementedError
+
+    def options(self) -> list[Option]:
+        """The selectable (or disabled) options."""
+        raise NotImplementedError
 
     def compose(self) -> ComposeResult:
-        """Build the dialog: a multi-line summary, the two upgrade options and a key hint."""
-        from vulnscan.reports import constraint_facts
-
-        dep = self.finding.dependency
-        summary = [
-            f"Upgrade {dep.name} (currently {self.plan.current or 'unknown'})",
-            *[f"{key}: {value}" for key, value in constraint_facts(self.finding)],
-        ]
-        if not self.plan.nearest_safe and not self.finding.upgrade_limit:
-            summary.append("Nearest safe: none available")
+        """Build the dialog: a multi-line summary, the options and a key hint."""
         with Vertical(id="remediate-box"):
-            yield Static("\n".join(summary), id="remediate-summary")
-            if self.plan.nearest_safe:
-                nearest = Option(
-                    f"Nearest safe version: {self.plan.nearest_safe}  "
-                    "(smallest upgrade that clears all known advisories)",
-                    id="nearest",
-                )
-            else:
-                nearest = Option(
-                    "Nearest safe version: none available", id="nearest", disabled=True
-                )
-            if self.plan.latest:
-                note = "" if self.plan.latest_is_safe else "  (still has known advisories!)"
-                latest = Option(f"Latest release: {self.plan.latest}{note}", id="latest")
-            else:
-                latest = Option("Latest release: none found", id="latest", disabled=True)
-            yield OptionList(nearest, latest, id="remediate-options")
+            yield Static("\n".join(self.summary_lines()), id="remediate-summary")
+            yield OptionList(*self.options(), id="remediate-options")
             yield Label(
                 "Enter to apply the highlighted option, Esc to cancel.", id="remediate-help"
             )
@@ -176,12 +209,106 @@ class RemediateScreen(ModalScreen[str | None]):
                 break
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        """Dismiss with the chosen option id, ``'nearest'`` or ``'latest'``."""
+        """Dismiss with the chosen option id."""
         self.dismiss(event.option.id)
 
     def action_cancel(self) -> None:
         """Dismiss with ``None`` (Esc)."""
         self.dismiss(None)
+
+
+class RemediateScreen(OptionDialog):
+    """Ask which security upgrade to apply. Dismisses with 'nearest', 'latest' or None."""
+
+    def __init__(self, finding: Finding, plan: RemediationPlan) -> None:
+        super().__init__()
+        self.finding = finding
+        self.plan = plan
+
+    def summary_lines(self) -> list[str]:
+        """Package, current version, constraint facts and a note when no safe version exists."""
+        from vulnscan.reports import constraint_facts
+
+        dep = self.finding.dependency
+        summary = [
+            f"Upgrade {dep.name} (currently {self.plan.current or 'unknown'})",
+            *[f"{key}: {value}" for key, value in constraint_facts(self.finding)],
+        ]
+        if not self.plan.nearest_safe and not self.finding.upgrade_limit:
+            summary.append("Nearest safe: none available")
+        return summary
+
+    def options(self) -> list[Option]:
+        """Nearest safe version and latest release, disabled when unavailable."""
+        if self.plan.nearest_safe:
+            nearest = Option(
+                f"Nearest safe version: {self.plan.nearest_safe}  "
+                "(smallest upgrade that clears all known advisories)",
+                id="nearest",
+            )
+        else:
+            nearest = Option("Nearest safe version: none available", id="nearest", disabled=True)
+        if self.plan.latest:
+            note = "" if self.plan.latest_is_safe else "  (still has known advisories!)"
+            latest = Option(f"Latest release: {self.plan.latest}{note}", id="latest")
+        else:
+            latest = Option("Latest release: none found", id="latest", disabled=True)
+        return [nearest, latest]
+
+
+class UpgradeScreen(OptionDialog):
+    """Ask which routine upgrade to apply. Dismisses with 'series', 'latest' or None."""
+
+    def __init__(self, dep: Dependency, options: UpgradeOptions, finding: Finding | None) -> None:
+        super().__init__()
+        self.dep = dep
+        self.upgrade = options
+        self.finding = finding
+
+    def summary_lines(self) -> list[str]:
+        """Package, current version, the not-a-security-fix note and where it is declared."""
+        lines = [
+            f"Upgrade {self.dep.name} (currently {self.upgrade.current or 'unknown'})",
+            NOT_SECURITY_NOTE,
+        ]
+        if self.finding and self.finding.vulnerabilities:
+            count = len(self.finding.vulnerabilities)
+            noun = "known advisory affects" if count == 1 else "known advisories affect"
+            lines.append(f"Note: {count} {noun} the current version.")
+        lines.append(f"Declared in: {self.dep.declared_in_text}")
+        return lines
+
+    def _affected(self, version: str) -> bool:
+        if not self.finding:
+            return False
+        return any(v.affects(version, self.dep.ecosystem) for v in self.finding.vulnerabilities)
+
+    def options(self) -> list[Option]:
+        """Newest release in the current series, then the latest release."""
+        series = self.upgrade.series or "?"
+        if self.upgrade.series_latest:
+            note = (
+                "  (still has known advisories!)"
+                if self._affected(self.upgrade.series_latest)
+                else ""
+            )
+            in_series = Option(
+                f"Newest {series}.x release: {self.upgrade.series_latest}  "
+                f"(smallest step, stays in the {series} series){note}",
+                id="series",
+            )
+        else:
+            in_series = Option(
+                f"Newest {series}.x release: none newer than {self.upgrade.current}",
+                id="series",
+                disabled=True,
+            )
+        if self.upgrade.latest:
+            note = "  (still has known advisories!)" if self._affected(self.upgrade.latest) else ""
+            latest = Option(f"Latest release: {self.upgrade.latest}{note}", id="latest")
+        else:
+            latest = Option("Latest release: none newer", id="latest", disabled=True)
+        return [in_series, latest]
 
 
 class VulnScanApp(App[None]):
@@ -191,6 +318,11 @@ class VulnScanApp(App[None]):
     ``f`` write feeds, ``e`` export reports, ``u`` upgrade the selected dependency,
     ``o`` open the selected advisory in a browser, ``q`` quit. ``scan_fn`` and
     ``versions_fn`` replace the real scanner and registry lookups in tests.
+
+    With ``outdated`` the dependency table lists every dependency that has a newer
+    stable release, whether or not an advisory affects it, and ``u`` offers the newest
+    release in the current series or the latest release. The interface says plainly
+    that these are routine updates rather than security fixes.
     """
 
     TITLE = "vulnscan"
@@ -200,6 +332,9 @@ class VulnScanApp(App[None]):
     #vulns { height: auto; max-height: 40%; min-height: 4; }
     #detail-scroll { height: 1fr; border-top: solid $primary; padding: 0 1; }
     #status { height: auto; padding: 0 1; background: $panel; }
+    #mode-banner {
+        height: auto; padding: 0 1; background: $warning 25%; text-style: bold;
+    }
     """
     BINDINGS = [
         Binding("r", "rescan", "Rescan"),
@@ -215,13 +350,17 @@ class VulnScanApp(App[None]):
         settings: Settings,
         scan_fn: ScanFn | None = None,
         versions_fn: VersionsFn | None = None,
+        outdated: bool = False,
     ) -> None:
         super().__init__()
         self.settings = settings
+        self.outdated = outdated
         self._scan_fn: ScanFn = scan_fn or scan
         self._versions_fn: VersionsFn | None = versions_fn
         self.result: ScanResult | None = None
         self._remediated: dict[tuple[str, str], str] = {}
+        self._rows: list[Finding] = []
+        self._upgrades: dict[tuple[str, str], UpgradeOptions] = {}
         self._dep_row_keys: list = []
         self._dep_column_keys: list = []
         self._status = "Starting scan..."
@@ -249,6 +388,8 @@ class VulnScanApp(App[None]):
     def compose(self) -> ComposeResult:
         """Lay out the dependency table, advisory table, detail pane and status bar."""
         yield Header()
+        if self.outdated:
+            yield Static(OUTDATED_BANNER, id="mode-banner")
         with Horizontal():
             yield DataTable(id="deps", cursor_type="row", zebra_stripes=True)
             with Vertical(id="right"):
@@ -261,7 +402,11 @@ class VulnScanApp(App[None]):
     def on_mount(self) -> None:
         """Add the table columns and start the first scan."""
         self.sub_title = str(self.settings.project_path)
-        self._dep_column_keys = self.query_one("#deps", DataTable).add_columns(*DEP_COLUMNS)
+        columns = DEP_COLUMNS
+        if self.outdated:
+            self.sub_title += f"  |  {OUTDATED_SUBTITLE}"
+            columns = OUTDATED_COLUMNS
+        self._dep_column_keys = self.query_one("#deps", DataTable).add_columns(*columns)
         self.query_one("#vulns", DataTable).add_columns(*VULN_COLUMNS)
         self._start_scan()
 
@@ -307,19 +452,27 @@ class VulnScanApp(App[None]):
     # -- scanning -----------------------------------------------------------------
 
     def _start_scan(self) -> None:
-        self._start_busy(f"Scanning {self.settings.project_path} ...")
+        what = " and checking registries for newer releases" if self.outdated else ""
+        self._start_busy(f"Scanning {self.settings.project_path}{what} ...")
         self.run_worker(self._scan_in_thread, thread=True, exclusive=True, exit_on_error=False)
 
     def _scan_in_thread(self) -> None:
         try:
             result = self._scan_fn(self.settings)
+            outdated = None
+            if self.outdated:
+                outdated, warnings = find_outdated(result.dependencies, self._available_versions)
+                # Lookup failures hide packages from the list, so they are shown first.
+                result.warnings[:0] = warnings
         except Exception as exc:  # noqa: BLE001 - surfaced to the user in the status bar
             self.call_from_thread(self._apply_error, exc)
             return
-        self.call_from_thread(self._apply_result, result)
+        self.call_from_thread(self._apply_result, result, outdated)
 
     def _apply_error(self, exc: Exception) -> None:
         self.result = None
+        self._rows = []
+        self._upgrades = {}
         self._clear_tables()
         self._set_status(f"Scan failed: {exc}")
 
@@ -330,16 +483,29 @@ class VulnScanApp(App[None]):
         self._current_finding = None
         self._current_vuln = None
 
-    def _apply_result(self, result: ScanResult) -> None:
+    def _outdated_rows(self, result: ScanResult, outdated: list[OutdatedPackage]) -> list[Finding]:
+        """One row per outdated package, reusing the scan's finding when the package has one."""
+        by_key = {f.dependency.key: f for f in result.findings}
+        self._upgrades = {o.dependency.key: o.options for o in outdated}
+        return [by_key.get(o.dependency.key) or Finding(o.dependency, []) for o in outdated]
+
+    def _apply_result(
+        self, result: ScanResult, outdated: list[OutdatedPackage] | None = None
+    ) -> None:
         self.result = result
         self._clear_tables()
+        if outdated is not None:
+            self._rows = self._outdated_rows(result, outdated)
+            subject = f"{_plural(len(self._rows), 'dependency')} with updates available"
+            subject += " (any update, not only security fixes)"
+        else:
+            self._rows = list(result.findings)
+            subject = _plural(len(self._rows), "vulnerable dependency")
         deps = self.query_one("#deps", DataTable)
-        self._dep_row_keys = [
-            deps.add_row(*self._dep_cells(finding)) for finding in result.findings
-        ]
+        self._dep_row_keys = [deps.add_row(*self._dep_cells(finding)) for finding in self._rows]
         summary = (
             f"{_plural(len(result.dependencies), 'dependency')} scanned, "
-            f"{_plural(len(result.findings), 'vulnerable dependency')}, "
+            f"{subject}, "
             f"{_plural(len(result.warnings), 'warning')}."
         )
         if result.warnings:
@@ -350,7 +516,7 @@ class VulnScanApp(App[None]):
             if len(result.warnings) > 1:
                 summary += f" (+{len(result.warnings) - 1} more in the exported report)"
         self._set_status(summary.replace("dependencys", "dependencies"))
-        if result.findings:
+        if self._rows:
             self._show_finding(0)
 
     # -- rows -----------------------------------------------------------------------
@@ -361,6 +527,20 @@ class VulnScanApp(App[None]):
     def _dep_cells(self, finding: Finding) -> list[str | Text]:
         dep = finding.dependency
         done = self._is_remediated(finding)
+        if self.outdated:
+            options = self._upgrades.get(dep.key)
+            values = [
+                f"{TICK} upgraded" if done else "",
+                dep.name,
+                dep.ecosystem,
+                dep.version or "?",
+                dep.version_source,
+                (options.series_latest if options else None) or "-",
+                (options.latest if options else None) or "-",
+                str(len(finding.vulnerabilities)) if finding.vulnerabilities else "none",
+                ", ".join(dep.source_files),
+            ]
+            return _cells(values, done)
         values = [
             f"{TICK} upgraded" if done else "",
             dep.name,
@@ -387,9 +567,9 @@ class VulnScanApp(App[None]):
         return _cells(values, done)
 
     def _refresh_dep_row(self, finding: Finding) -> None:
-        if not self.result or finding not in self.result.findings:
+        if finding not in self._rows:
             return
-        index = self.result.findings.index(finding)
+        index = self._rows.index(finding)
         deps = self.query_one("#deps", DataTable)
         row_key = self._dep_row_keys[index]
         for column_key, value in zip(self._dep_column_keys, self._dep_cells(finding), strict=True):
@@ -400,16 +580,24 @@ class VulnScanApp(App[None]):
     # -- selection ----------------------------------------------------------------
 
     def _show_finding(self, index: int) -> None:
-        if not self.result or index < 0 or index >= len(self.result.findings):
+        if index < 0 or index >= len(self._rows):
             return
-        finding = self.result.findings[index]
+        finding = self._rows[index]
         self._current_finding = finding
         vulns = self.query_one("#vulns", DataTable)
         vulns.clear()
         for vuln in finding.vulnerabilities:
             vulns.add_row(*self._vuln_cells(finding, vuln))
-        if finding.vulnerabilities:
+        if self.outdated:
+            self._show_upgrade_detail(finding)
+        elif finding.vulnerabilities:
             self._show_vulnerability(0)
+
+    def _show_upgrade_detail(self, finding: Finding) -> None:
+        dep = finding.dependency
+        options = self._upgrades.get(dep.key) or UpgradeOptions(dep.version, None, None, None)
+        self._current_vuln = finding.vulnerabilities[0] if finding.vulnerabilities else None
+        self.query_one("#detail", Markdown).update(upgrade_markdown(dep, options, finding))
 
     def _show_vulnerability(self, index: int) -> None:
         finding = self._current_finding
@@ -424,6 +612,10 @@ class VulnScanApp(App[None]):
         if event.data_table.id == "deps":
             self._show_finding(event.cursor_row)
         elif event.data_table.id == "vulns":
+            # In outdated mode the pane describes the update until the user actually moves
+            # into the advisory table; the automatic highlight after repopulating is ignored.
+            if self.outdated and not event.data_table.has_focus:
+                return
             self._show_vulnerability(event.cursor_row)
 
     # -- actions ------------------------------------------------------------------
@@ -466,10 +658,16 @@ class VulnScanApp(App[None]):
         return RegistryClient(timeout=self.settings.request_timeout).available_versions(dep)
 
     def action_remediate(self) -> None:
-        """Look up versions for the selected dependency in a worker and offer an upgrade (``u``)."""
+        """Look up versions for the selected dependency in a worker and offer an upgrade (``u``).
+
+        In outdated mode the versions are already known, so the upgrade dialog opens at once.
+        """
         finding = self._current_finding
         if finding is None:
-            self.notify("Select a vulnerable dependency first.", severity="warning")
+            self.notify("Select a dependency first.", severity="warning")
+            return
+        if self.outdated:
+            self._offer_upgrade(finding)
             return
         self._start_busy(f"Looking up available versions of {finding.dependency.name} ...")
         self.run_worker(
@@ -498,22 +696,40 @@ class VulnScanApp(App[None]):
         )
 
         def on_choice(choice: str | None) -> None:
-            if choice is None:
-                self._set_status("Upgrade cancelled.")
-                return
             target = plan.nearest_safe if choice == "nearest" else plan.latest
-            if target is None:
-                self._set_status("That option has no version to upgrade to.")
-                return
-            self._start_busy(f"Updating {finding.dependency.name} to {target} ...")
-            self.run_worker(
-                lambda: self._apply_remediation_in_thread(finding, target),
-                thread=True,
-                exclusive=False,
-                exit_on_error=False,
-            )
+            self._apply_choice(finding, choice, target)
 
         self.push_screen(RemediateScreen(finding, plan), on_choice)
+
+    def _offer_upgrade(self, finding: Finding) -> None:
+        """Outdated mode: offer the newest same-series release and the latest release."""
+        dep = finding.dependency
+        options = self._upgrades.get(dep.key)
+        if options is None or not options.is_outdated:
+            self.notify(f"{dep.name} has no newer release.", severity="warning")
+            return
+
+        def on_choice(choice: str | None) -> None:
+            target = options.series_latest if choice == "series" else options.latest
+            self._apply_choice(finding, choice, target)
+
+        self.push_screen(UpgradeScreen(dep, options, finding), on_choice)
+
+    def _apply_choice(self, finding: Finding, choice: str | None, target: str | None) -> None:
+        """Start the manifest rewrite for a dialog choice, or report why nothing happens."""
+        if choice is None:
+            self._set_status("Upgrade cancelled.")
+            return
+        if target is None:
+            self._set_status("That option has no version to upgrade to.")
+            return
+        self._start_busy(f"Updating {finding.dependency.name} to {target} ...")
+        self.run_worker(
+            lambda: self._apply_remediation_in_thread(finding, target),
+            thread=True,
+            exclusive=False,
+            exit_on_error=False,
+        )
 
     def _apply_remediation_in_thread(self, finding: Finding, target: str) -> None:
         dep = finding.dependency
