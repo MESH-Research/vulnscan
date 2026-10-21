@@ -1,3 +1,20 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="logo/vulnscan-logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="logo/vulnscan-logo-light.svg">
+    <img alt="vulnscan" src="logo/vulnscan-logo-light.svg" width="480">
+  </picture>
+</p>
+
+<p align="center">
+  <a href="https://github.com/MESH-Research/vulnscan/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/MESH-Research/vulnscan/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/MESH-Research/vulnscan/tags"><img alt="Latest version" src="https://img.shields.io/github/v/tag/MESH-Research/vulnscan?label=version"></a>
+  <a href="https://github.com/MESH-Research/vulnscan/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/MESH-Research/vulnscan"></a>
+  <a href="https://github.com/MESH-Research/vulnscan/issues"><img alt="Open issues" src="https://img.shields.io/github/issues/MESH-Research/vulnscan"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/MESH-Research/vulnscan"></a>
+  <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-blue">
+</p>
+
 # vulnscan
 
 Point vulnscan at a Python, PHP, WordPress or Node.js project and it tells you
