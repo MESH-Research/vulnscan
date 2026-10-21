@@ -1,22 +1,8 @@
-## Unreleased
+## 1.6.0 (2026-10-21)
 
 ### Feat
 
-- **parsers**: read (p)npm constraints from Invenio `webpack.py`
-  (`WebpackThemeBundle`) in root project and submodules
-- **remediate**: in Invenio apps, update npm dependencies in the site overlay
-  `webpack.py` (insert or bump), declaring submodule `webpack.py` files, and
-  companion `package.json`; block when pywebpack merge would fail due to
-  same-major constraint or other upstream version pins
-- **scanner**: after each Invenio scan, perform an in-memory pywebpack merge of
-  entry-point webpack bundles; report conflicts with sources and clear
-  nearest-safe when blocked
-- **reports**: for Invenio projects, add per-finding **Upstream constraints**
-  and **Upgrade limit** sections alongside **Declared in** (in details, TUI,
-  feeds, ntfy and Teams); empty constraints say `no version constraint`
-- **ui**: add activity spinners to the footer line during scans and the
-  remediation overlay during upgrade operations (because Invenio ops can be
-  slow)
+- **invenio**: add InvenioRDM project scanning and remediation support
 
 ## 1.5.0 (2026-10-11)
 
