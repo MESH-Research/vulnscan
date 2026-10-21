@@ -69,6 +69,29 @@ shows the full disclosure: severity and CVSS vector, aliases, fixed versions,
 each declaring file with its constraint, the advisory text and all reference
 links.
 
+### Outdated packages (not just security)
+
+```
+uv run vulnscan --outdated --path /path/to/project
+```
+
+Opens the same interface in **outdated mode**: the left table lists every
+direct dependency that has a newer stable release, whether or not an advisory
+affects it. A banner and the window title say so, because these are routine
+updates rather than security fixes; the **Advisories** column shows how many
+known advisories, if any, affect the installed version. Pressing `u` offers
+two choices:
+
+- the newest release in the **current series** (`major.minor`): on 2.6.1 with
+  2.6.2 and 2.7.2 published, this is 2.6.2. It is disabled when the series has
+  nothing newer;
+- the **latest release** overall.
+
+Either option rewrites the constraint in every manifest that declares the
+package, exactly as a security upgrade does. `--outdated` is interactive
+only and cannot be combined with `--update-feeds`, `--markdown`, `--text`,
+`--remediate`, `--ntfy` or `--msteams`.
+
 ### Feeds and reports (cron)
 
 ```

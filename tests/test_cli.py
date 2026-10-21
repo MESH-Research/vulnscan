@@ -89,7 +89,7 @@ def test_update_feeds_fails_for_missing_project(tmp_path: Path, monkeypatch, cap
 def test_default_mode_launches_tui(tmp_path: Path, monkeypatch):
     launched = {}
 
-    def fake_run_tui(settings):
+    def fake_run_tui(settings, **kwargs):
         launched["settings"] = settings
 
     monkeypatch.setattr(cli, "run_tui", fake_run_tui)
@@ -527,3 +527,37 @@ def test_test_flag_still_requires_channel_configuration(tmp_path: Path, monkeypa
 def test_test_flag_without_a_channel_is_an_error(tmp_path: Path, capsys):
     assert cli.main(["--test", "--path", str(tmp_path)]) == 2
     assert "--ntfy" in capsys.readouterr().err
+
+
+def test_parser_outdated_flag():
+    assert cli.build_parser().parse_args([]).outdated is False
+    assert cli.build_parser().parse_args(["--outdated"]).outdated is True
+
+
+def test_outdated_flag_launches_tui_in_outdated_mode(tmp_path: Path, monkeypatch):
+    launched = {}
+
+    def fake_run_tui(settings, outdated=False):
+        launched["outdated"] = outdated
+
+    monkeypatch.setattr(cli, "run_tui", fake_run_tui)
+    assert cli.main(["--outdated", "--path", str(tmp_path)]) == 0
+    assert launched["outdated"] is True
+    assert cli.main(["--path", str(tmp_path)]) == 0
+    assert launched["outdated"] is False
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [["--update-feeds"], ["--markdown"], ["--text", "-"], ["--remediate", "requests"], ["--ntfy"]],
+)
+def test_outdated_flag_is_interactive_only(tmp_path: Path, monkeypatch, capsys, flags):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("nothing should run")
+
+    monkeypatch.setattr(cli, "scan", forbidden)
+    monkeypatch.setattr(cli, "run_tui", forbidden)
+    monkeypatch.setattr(cli, "run_notifications", forbidden)
+    code = cli.main(["--outdated", *flags, "--path", str(tmp_path)])
+    assert code == 2
+    assert "--outdated" in capsys.readouterr().err

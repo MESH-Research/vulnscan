@@ -45,6 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--outdated",
+        action="store_true",
+        help="interactive: list dependencies with newer releases available (any update, "
+        "not only security fixes); u offers the newest release in the current series and "
+        "the latest release",
+    )
+    parser.add_argument(
         "--update-feeds",
         action="store_true",
         help="non-interactive: scan and rewrite the RSS and Atom feeds, then exit",
@@ -307,11 +314,15 @@ def run_notifications(settings: Settings, args: argparse.Namespace) -> int:
     )
 
 
-def run_tui(settings: Settings) -> None:
-    """Start the interactive Textual interface (imported lazily to keep CLI start-up light)."""
+def run_tui(settings: Settings, outdated: bool = False) -> None:
+    """Start the interactive Textual interface (imported lazily to keep CLI start-up light).
+
+    With ``outdated`` the TUI lists dependencies with newer releases instead of
+    vulnerable ones.
+    """
     from vulnscan.tui import VulnScanApp
 
-    VulnScanApp(settings).run()
+    VulnScanApp(settings, outdated=outdated).run()
 
 
 def _print_summary(result: ScanResult, written: list[Path]) -> None:
@@ -401,6 +412,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not settings.project_path.exists():
         print(f"error: project path does not exist: {settings.project_path}", file=sys.stderr)
         return 1
+    non_interactive = (
+        args.ntfy
+        or args.msteams
+        or args.test
+        or args.remediate
+        or args.update_feeds
+        or args.markdown is not None
+        or args.text is not None
+    )
+    if args.outdated and non_interactive:
+        print(
+            "error: --outdated opens the TUI and cannot be combined with non-interactive flags",
+            file=sys.stderr,
+        )
+        return 2
     if args.ntfy or args.msteams:
         return run_notifications(settings, args)
     if args.test:
@@ -410,5 +436,5 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_remediate(settings, args)
     if args.update_feeds or args.markdown is not None or args.text is not None:
         return run_non_interactive(settings, args)
-    run_tui(settings)
+    run_tui(settings, outdated=args.outdated)
     return 0

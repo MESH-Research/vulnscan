@@ -66,6 +66,7 @@ nav:
       - wordfence: api/wordfence.md
       - registry: api/registry.md
       - remediate: api/remediate.md
+      - outdated: api/outdated.md
       - feeds: api/feeds.md
       - reports: api/reports.md
       - notify: api/notify.md
