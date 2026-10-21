@@ -1,3 +1,9 @@
+## 1.7.0 (2026-10-21)
+
+### Feat
+
+- **tui**: add --outdated mode listing packages with newer releases
+
 ## 1.6.0 (2026-10-21)
 
 ### Feat
