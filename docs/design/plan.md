@@ -67,6 +67,12 @@ scanner, to feeds, CLI and TUI. Each task starts with failing tests.
 ### Checkpoint: Phase 5
 - [x] `uv run pytest` and `uv run ruff check .` clean, `mkdocs build --strict` clean
 
+### Phase 8: Invenio webpack.py npm remediation
+- [x] Task 28: Parse `webpack.py` `WebpackThemeBundle` dependencies (`parsers/webpack.py`)
+- [x] Task 29: Detect Invenio mode + resolve site overlay (`invenio.py`, config/CLI)
+- [x] Task 30: Remediate overlay (insert/bump), declaring submodule `webpack.py`, companion `package.json`; block on pywebpack major conflict (`remediate.py`)
+- [x] Task 31: Docs (`docs/invenio.md`, README, changelog)
+
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |

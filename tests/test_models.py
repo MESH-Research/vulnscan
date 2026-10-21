@@ -202,7 +202,7 @@ def test_declared_in_lists_every_declaration_primary_first():
 
 def test_declared_in_text_describes_unconstrained_declarations():
     dep = _dep("flask", "", "requirements.txt")
-    assert dep.declared_in_text == "requirements.txt as any version"
+    assert dep.declared_in_text == "requirements.txt; no version constraint"
 
 
 def test_merge_declarations_collapses_same_package_and_version_across_files():

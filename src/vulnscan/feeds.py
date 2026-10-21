@@ -13,7 +13,8 @@ from pathlib import Path
 from urllib.parse import quote, urljoin
 
 from vulnscan.config import Settings
-from vulnscan.models import Dependency, ScanResult, Vulnerability, normalize_name
+from vulnscan.models import Dependency, Finding, ScanResult, Vulnerability, normalize_name
+from vulnscan.reports import constraint_facts
 from vulnscan.wordfence import SOURCE as WORDFENCE_SOURCE
 from vulnscan.wordfence import wordfence_attribution
 
@@ -75,11 +76,16 @@ def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
-def _entry_html(dep: Dependency, vuln: Vulnerability) -> str:
+def _entry_html(dep: Dependency, vuln: Vulnerability, finding: Finding | None = None) -> str:
     rows = [
         ("Package", f"{dep.name} ({dep.ecosystem})"),
         ("Version", f"{dep.version or 'unknown'} (from {dep.version_source})"),
-        ("Declared in", dep.declared_in_text),
+    ]
+    if finding is not None:
+        rows.extend(constraint_facts(finding))
+    else:
+        rows.append(("Declared in", dep.declared_in_text))
+    rows += [
         ("Severity", vuln.severity + (f" ({vuln.cvss})" if vuln.cvss else "")),
         ("Fixed in", ", ".join(vuln.fixed_versions) or "no fix listed"),
         ("CVE", ", ".join(vuln.cve_ids) or "none assigned"),
@@ -124,7 +130,7 @@ def build_entries(result: ScanResult, state: dict[str, str], now: datetime) -> l
                     title=title,
                     link=vuln.url,
                     summary=vuln.summary or vuln.id,
-                    content_html=_entry_html(dep, vuln),
+                    content_html=_entry_html(dep, vuln, finding),
                     published=published,
                     updated=_as_utc(vuln.modified) if vuln.modified else now,
                     categories=[vuln.severity, dep.ecosystem, dep.name],

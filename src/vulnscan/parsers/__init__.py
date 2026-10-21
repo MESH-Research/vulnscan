@@ -19,6 +19,7 @@ from vulnscan.parsers.python import (
     parse_setup_cfg,
 )
 from vulnscan.parsers.versions import resolve_dependency
+from vulnscan.parsers.webpack import parse_webpack_py
 
 IGNORED_DIRS = {
     ".git",
@@ -75,6 +76,7 @@ _EXACT_NAMES: dict[str, Parser] = {
     "pyproject.toml": parse_pyproject,
     "pipfile": parse_pipfile,
     "setup.cfg": parse_setup_cfg,
+    "webpack.py": parse_webpack_py,
 }
 
 
@@ -201,7 +203,13 @@ def parse_manifest(path: Path, root: Path) -> list[Dependency]:
 def parse_project(
     root: Path, ignore_dirs: tuple[str, ...] = ()
 ) -> tuple[list[Dependency], list[str]]:
-    """Parse every manifest under root and resolve versions using adjacent lock files."""
+    """Parse every manifest under root and resolve versions using adjacent lock files.
+
+    Invenio ``webpack.py`` theme bundles feed the project-root ``package.json``;
+    their versions are resolved from the **root** lock files so they merge with the
+    generated manifest declaration instead of standing alone on a constraint lower
+    bound (there is usually no lock next to ``webpack.py``).
+    """
     warnings: list[str] = []
     manifests = discover_manifests(root, ignore_dirs=ignore_dirs)
     if not manifests:
@@ -209,12 +217,18 @@ def parse_project(
         return [], warnings
     deps: list[Dependency] = []
     lock_cache: dict[Path, dict[tuple[str, str], str]] = {}
+    root_locks = load_lock_versions(root)
+    lock_cache[root] = root_locks
     for manifest in manifests:
         directory = manifest.parent
         if directory not in lock_cache:
             lock_cache[directory] = load_lock_versions(directory)
+        # Theme bundles → project-root install; otherwise the adjacent lock.
+        locks = (
+            root_locks if manifest.name == "webpack.py" and root_locks else lock_cache[directory]
+        )
         for dep in parse_manifest(manifest, root):
-            resolved = resolve_dependency(dep, lock_cache[directory])
+            resolved = resolve_dependency(dep, locks)
             if resolved.version is None:
                 warnings.append(
                     f"{resolved.name} ({resolved.source_file}): could not determine a version "

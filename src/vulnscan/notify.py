@@ -37,6 +37,7 @@ from vulnscan.models import (
     Finding,
     ScanResult,
     Vulnerability,
+    format_declaration,
     normalize_severity,
     severity_rank,
 )
@@ -113,6 +114,8 @@ class Notification:
     latest: str | None
     latest_is_safe: bool | None
     versions_checked: bool
+    upstream_constraints_text: str | None = None
+    upgrade_limit: str | None = None
 
     @property
     def guids(self) -> tuple[str, ...]:
@@ -127,9 +130,7 @@ class Notification:
     @property
     def declared_in_text(self) -> str:
         """``file as constraint`` for every declaration, ``;`` separated."""
-        return "; ".join(
-            f"{d.source_file} as {d.constraint or 'any version'}" for d in self.declared_in
-        )
+        return "; ".join(format_declaration(d) for d in self.declared_in)
 
 
 class Channel(Protocol):
@@ -220,7 +221,11 @@ class _VersionCache:
 
 
 def _notification(
-    project: str, finding: Finding, new: list[tuple[str, Vulnerability]], cache: _VersionCache
+    project: str,
+    finding: Finding,
+    new: list[tuple[str, Vulnerability]],
+    cache: _VersionCache,
+    webpack_merge: object | None = None,
 ) -> Notification:
     dep = finding.dependency
     versions = cache.get(dep)
@@ -228,7 +233,7 @@ def _notification(
     worst = min((n.severity for n in notes), key=severity_rank)
     nearest_safe = latest = latest_is_safe = None
     if versions is not None:
-        plan = plan_remediation(finding, versions)
+        plan = plan_remediation(finding, versions, webpack_merge=webpack_merge)
         nearest_safe, latest, latest_is_safe = plan.nearest_safe, plan.latest, plan.latest_is_safe
     return Notification(
         project=project,
@@ -244,6 +249,8 @@ def _notification(
         latest=latest,
         latest_is_safe=latest_is_safe,
         versions_checked=versions is not None,
+        upstream_constraints_text=finding.upstream_constraints_text,
+        upgrade_limit=finding.upgrade_limit,
     )
 
 
@@ -269,7 +276,9 @@ def _build(result: ScanResult, already_sent: Collection[str], cache: _VersionCac
             if (guid := entry_guid(project, finding.dependency, vuln)) not in already_sent
         ]
         if new:
-            notifications.append(_notification(project, finding, new, cache))
+            notifications.append(
+                _notification(project, finding, new, cache, webpack_merge=result.webpack_merge)
+            )
     return notifications
 
 

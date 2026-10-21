@@ -125,6 +125,18 @@ def build_parser() -> argparse.ArgumentParser:
         "glob; repeatable or comma separated; overrides VULNSCAN_IGNORE_DIRS. A "
         ".vulnscanignore file in the project root is always read as well",
     )
+    parser.add_argument(
+        "--invenio-webpack",
+        choices=("auto", "on", "off"),
+        help="treat Invenio webpack.py theme bundles as npm constraint sources and "
+        "remediation targets (VULNSCAN_INVENIO_WEBPACK; default auto)",
+    )
+    parser.add_argument(
+        "--invenio-webpack-overlay",
+        metavar="PATH",
+        help="site overlay webpack.py to always update on npm remediate "
+        "(VULNSCAN_INVENIO_WEBPACK_OVERLAY)",
+    )
     parser.add_argument("--env-file", help="path to a .env file (default: ./.env)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
@@ -172,30 +184,49 @@ def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
         return 1
     dep = finding.dependency
     try:
-        plan = plan_remediation(finding, fetch_versions(settings, dep))
+        plan = plan_remediation(
+            finding, fetch_versions(settings, dep), webpack_merge=result.webpack_merge
+        )
     except RegistryError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     target = plan.nearest_safe if args.strategy == "nearest" else plan.latest
     if target is None:
+        extra = ""
+        if finding.webpack_merge_block and args.strategy == "nearest":
+            extra = f" ({finding.webpack_merge_block})"
         print(
             f"error: no {'safe' if args.strategy == 'nearest' else 'newer'} version of {dep.name} "
-            f"is available above {dep.version or 'the current version'}",
+            f"is available above {dep.version or 'the current version'}{extra}",
             file=sys.stderr,
         )
         return 1
     if args.strategy == "latest" and not plan.latest_is_safe:
         print(f"warning: {target} still has known advisories", file=sys.stderr)
     try:
-        outcome = apply_remediation(settings.project_path, dep, target)
+        outcome = apply_remediation(
+            settings.project_path,
+            dep,
+            target,
+            settings=settings,
+            webpack_merge=result.webpack_merge,
+        )
     except RemediationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    for change in outcome.changes:
+    for change in outcome.authoritative_changes or outcome.changes:
         print(
             f"Updated {change.source_file}: {change.old_constraint or '(any)'} -> "
             f"{change.new_constraint}"
         )
+    companions = [c for c in outcome.changes if not c.authoritative]
+    for change in companions:
+        print(
+            f"Also updated {change.source_file}: {change.old_constraint or '(any)'} -> "
+            f"{change.new_constraint}"
+        )
+    for warning in outcome.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
     print(outcome.hint)
     return 0
 
@@ -360,6 +391,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "feed_dir": args.feed_dir,
                 "ignore_dirs": ",".join(args.ignore) if args.ignore else None,
                 "interval_minutes": args.interval,
+                "invenio_webpack": args.invenio_webpack,
+                "invenio_webpack_overlay": args.invenio_webpack_overlay,
             },
         )
     except ValueError as exc:

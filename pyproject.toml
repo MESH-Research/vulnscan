@@ -25,6 +25,7 @@ dependencies = [
     "httpx>=0.27",
     "python-dotenv>=1.0",
     "packaging>=24.0",
+    "certifi>=2026.10.19",
 ]
 
 [project.scripts]

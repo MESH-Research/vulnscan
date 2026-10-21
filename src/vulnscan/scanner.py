@@ -5,9 +5,21 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from vulnscan.config import Settings
-from vulnscan.models import WORDPRESS, Finding, ScanResult, merge_declarations, severity_rank
+from vulnscan.invenio import (
+    WebpackMergeIndex,
+    build_webpack_merge_index,
+    detect_invenio_webpack,
+)
+from vulnscan.models import (
+    NPM,
+    WORDPRESS,
+    Finding,
+    ScanResult,
+    merge_declarations,
+    severity_rank,
+)
 from vulnscan.osv import OSVClient
-from vulnscan.parsers import parse_project
+from vulnscan.parsers import load_ignore_file, parse_project
 from vulnscan.wordfence import WordfenceClient
 
 WORDFENCE_CACHE_FILENAME = "wordfence-production.json"
@@ -15,6 +27,35 @@ WORDFENCE_CACHE_FILENAME = "wordfence-production.json"
 
 def _plural(count: int, singular: str, plural: str) -> str:
     return f"{count} {singular if count == 1 else plural}"
+
+
+def _annotate_webpack_merge(
+    settings: Settings, findings: list[Finding], warnings: list[str]
+) -> WebpackMergeIndex | None:
+    """Run one in-memory pywebpack merge pass; attach blocks and warnings."""
+    root = settings.project_path
+    discovered = [
+        p
+        for p in root.rglob("webpack.py")
+        if ".venv" not in p.parts
+        and "site-packages" not in p.parts
+        and "node_modules" not in p.parts
+    ]
+    if not detect_invenio_webpack(root, settings.invenio_webpack, discovered_webpack=discovered):
+        return None
+    patterns = tuple(settings.ignore_dirs) + load_ignore_file(root)
+    index = build_webpack_merge_index(root, ignore_patterns=patterns)
+    warnings.extend(index.warning_lines())
+    for finding in findings:
+        if finding.dependency.ecosystem != NPM:
+            continue
+        name = finding.dependency.name
+        finding.upstream_constraints_text = index.upstream_constraints_text(name)
+        limit = index.upgrade_limit_for(name, finding.fixed_versions)
+        if limit:
+            finding.webpack_merge_block = limit
+            finding.upgrade_limit = limit
+    return index
 
 
 def scan(
@@ -70,10 +111,12 @@ def scan(
 
     findings = [Finding(dep, vulns) for dep, vulns in found.items() if vulns]
     findings.sort(key=lambda f: (severity_rank(f.worst_severity), f.dependency.name.lower()))
+    webpack_merge = _annotate_webpack_merge(settings, findings, warnings)
     return ScanResult(
         project_path=settings.project_path,
         dependencies=deps,
         findings=findings,
         warnings=warnings,
         scanned_at=datetime.now(UTC),
+        webpack_merge=webpack_merge,
     )
