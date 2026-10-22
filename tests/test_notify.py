@@ -467,3 +467,10 @@ def test_registry_name_knows_npm():
     from vulnscan.notify import registry_name
 
     assert registry_name(NPM) == "npm"
+
+
+def test_registry_name_knows_container_images():
+    from vulnscan.models import CONTAINER
+    from vulnscan.notify import registry_name
+
+    assert registry_name(CONTAINER) == "the container registry"

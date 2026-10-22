@@ -34,6 +34,10 @@ _ENV_MAP: dict[str, tuple[str, Any]] = {
     "wordfence_url": ("WORDFENCE_URL", "https://www.wordfence.com/api/intelligence/v3"),
     "wordfence_ttl_hours": ("WORDFENCE_TTL_HOURS", "24"),
     "wordfence_min_interval_minutes": ("WORDFENCE_MIN_INTERVAL_MINUTES", "30"),
+    "nvd_api_key": ("NVD_API_KEY", ""),
+    "nvd_url": ("NVD_URL", "https://services.nvd.nist.gov/rest/json/cves/2.0"),
+    "nvd_ttl_hours": ("NVD_TTL_HOURS", "24"),
+    "image_products": ("IMAGE_PRODUCTS", ""),
     "cache_dir": ("CACHE_DIR", None),  # default depends on XDG_CACHE_HOME, see load_settings
     "ignore_dirs": ("IGNORE_DIRS", ""),
     "markdown_filename": ("MARKDOWN_FILE", "vulns.md"),
@@ -91,6 +95,12 @@ class Settings:
     wordfence_url: str = "https://www.wordfence.com/api/intelligence/v3"
     wordfence_ttl_hours: float = 24.0
     wordfence_min_interval_minutes: float = 30.0
+    nvd_api_key: str = ""
+    """Optional NVD API key: raises the rate limit for container image lookups."""
+    nvd_url: str = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+    nvd_ttl_hours: float = 24.0
+    image_products: tuple[str, ...] = ()
+    """``image=vendor:product`` entries mapping container images to CPE products."""
     cache_dir: Path = Path.home() / ".cache" / "vulnscan"
     ignore_dirs: tuple[str, ...] = ()
     markdown_filename: str = "vulns.md"
@@ -180,6 +190,9 @@ _COERCERS = {
     "wordfence_url": lambda v: str(v).rstrip("/"),
     "wordfence_ttl_hours": float,
     "wordfence_min_interval_minutes": float,
+    "nvd_url": lambda v: str(v).rstrip("/"),
+    "nvd_ttl_hours": float,
+    "image_products": _to_tuple,
     "cache_dir": lambda v: Path(v).expanduser().absolute(),
     "ignore_dirs": _to_tuple,
     "ntfy_server": lambda v: str(v).rstrip("/"),

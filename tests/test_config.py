@@ -230,3 +230,25 @@ def test_transitive_setting_defaults_off_and_reads_environment(tmp_path: Path):
         env={}, dotenv_path=tmp_path / "missing.env", overrides={"include_transitive": True}
     )
     assert settings.include_transitive is True
+
+
+def test_nvd_and_image_product_defaults(tmp_path: Path):
+    settings = load_settings(env={}, dotenv_path=tmp_path / "missing.env")
+    assert settings.nvd_api_key == ""
+    assert settings.nvd_url == "https://services.nvd.nist.gov/rest/json/cves/2.0"
+    assert settings.nvd_ttl_hours == 24.0
+    assert settings.image_products == ()
+
+
+def test_nvd_and_image_product_settings_from_environment(tmp_path: Path):
+    env = {
+        "VULNSCAN_NVD_API_KEY": "k",
+        "VULNSCAN_NVD_URL": "https://nvd.example/cves/",
+        "VULNSCAN_NVD_TTL_HOURS": "6",
+        "VULNSCAN_IMAGE_PRODUCTS": "myorg/app=myorg:app, ghcr.io/x/y=x:y",
+    }
+    settings = load_settings(env=env, dotenv_path=tmp_path / "missing.env")
+    assert settings.nvd_api_key == "k"
+    assert settings.nvd_url == "https://nvd.example/cves"
+    assert settings.nvd_ttl_hours == 6.0
+    assert settings.image_products == ("myorg/app=myorg:app", "ghcr.io/x/y=x:y")

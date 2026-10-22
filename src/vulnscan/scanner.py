@@ -11,6 +11,7 @@ from vulnscan.invenio import (
     detect_invenio_webpack,
 )
 from vulnscan.models import (
+    CONTAINER,
     NPM,
     WORDPRESS,
     Finding,
@@ -18,6 +19,7 @@ from vulnscan.models import (
     merge_declarations,
     severity_rank,
 )
+from vulnscan.nvd import NVDClient, parse_image_products
 from vulnscan.osv import OSVClient
 from vulnscan.parsers import load_ignore_file, parse_project
 from vulnscan.wordfence import WordfenceClient
@@ -62,8 +64,14 @@ def scan(
     settings: Settings,
     client: OSVClient | None = None,
     wordpress_client: WordfenceClient | None = None,
+    nvd_client: NVDClient | None = None,
 ) -> ScanResult:
-    """Scan the configured project. Raises OSVError / WordfenceError if a source fails."""
+    """Scan the configured project.
+
+    PyPI, Packagist and npm packages go to OSV, WordPress packages to Wordfence and
+    container images to NVD. Raises OSVError, WordfenceError or NVDError if a source
+    fails.
+    """
     if client is None:
         client = OSVClient(base_url=settings.osv_base_url, timeout=settings.request_timeout)
     deps, warnings = parse_project(
@@ -83,7 +91,8 @@ def scan(
             )
 
     wordpress_deps = [d for d in deps if d.ecosystem == WORDPRESS]
-    other_deps = [d for d in deps if d.ecosystem != WORDPRESS]
+    image_deps = [d for d in deps if d.ecosystem == CONTAINER]
+    other_deps = [d for d in deps if d.ecosystem not in (WORDPRESS, CONTAINER)]
 
     found = client.find_vulnerabilities(
         other_deps, include_unknown_versions=settings.query_unknown_versions
@@ -112,6 +121,23 @@ def scan(
                 )
             )
             warnings.extend(getattr(wordpress_client, "warnings", []))
+
+    if image_deps:
+        if nvd_client is None:
+            nvd_client = NVDClient(
+                api_key=settings.nvd_api_key,
+                base_url=settings.nvd_url,
+                timeout=settings.request_timeout,
+                cache_dir=settings.cache_dir,
+                ttl_hours=settings.nvd_ttl_hours,
+                image_products=parse_image_products(settings.image_products),
+            )
+        found.update(
+            nvd_client.find_vulnerabilities(
+                image_deps, include_unknown_versions=settings.query_unknown_versions
+            )
+        )
+        warnings.extend(getattr(nvd_client, "warnings", []))
 
     findings = [Finding(dep, vulns) for dep, vulns in found.items() if vulns]
     findings.sort(key=lambda f: (severity_rank(f.worst_severity), f.dependency.name.lower()))

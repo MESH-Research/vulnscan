@@ -28,6 +28,7 @@ from typing import Protocol
 from vulnscan.config import Settings
 from vulnscan.feeds import entry_guid
 from vulnscan.models import (
+    CONTAINER,
     NPM,
     PACKAGIST,
     PYPI,
@@ -55,7 +56,13 @@ SCAN_ERRORS = (OSVError, WordfenceError)
 VersionsFn = Callable[[Dependency], list[str]]
 
 
-_REGISTRY_NAMES = {PYPI: "PyPI", PACKAGIST: "Packagist", WORDPRESS: "wordpress.org", NPM: "npm"}
+_REGISTRY_NAMES = {
+    PYPI: "PyPI",
+    PACKAGIST: "Packagist",
+    WORDPRESS: "wordpress.org",
+    NPM: "npm",
+    CONTAINER: "the container registry",
+}
 
 
 def registry_name(ecosystem: str) -> str:

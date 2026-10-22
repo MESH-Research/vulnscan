@@ -21,6 +21,7 @@ from vulnscan.notify import (
     run_watch,
 )
 from vulnscan.ntfy import NtfyClient
+from vulnscan.nvd import NVDError
 from vulnscan.osv import OSVError
 from vulnscan.registry import RegistryClient, RegistryError
 from vulnscan.remediate import RemediationError, apply_remediation, plan_remediation
@@ -28,7 +29,7 @@ from vulnscan.reports import render_markdown, render_text
 from vulnscan.scanner import scan
 from vulnscan.wordfence import WordfenceError
 
-SCAN_ERRORS = (OSVError, WordfenceError)
+SCAN_ERRORS = (OSVError, WordfenceError, NVDError)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,9 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vulnscan",
         description=(
-            "Scan a Python, PHP, WordPress or Node.js project's dependencies for known "
-            "security advisories (direct ones by default, see --transitive). Without "
-            "flags, opens the interactive TUI."
+            "Scan a Python, PHP, WordPress or Node.js project's dependencies, and the "
+            "container images its Dockerfiles and Compose files use, for known security "
+            "advisories (direct ones by default, see --transitive). Without flags, opens "
+            "the interactive TUI."
         ),
         epilog=(
             "Settings come from VULNSCAN_* environment variables or a .env file. "
