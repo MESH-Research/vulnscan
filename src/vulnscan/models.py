@@ -14,6 +14,8 @@ PYPI = "PyPI"
 PACKAGIST = "Packagist"
 WORDPRESS = "WordPress"
 NPM = "npm"
+CONTAINER = "Docker"
+"""Container images declared in Dockerfiles and Compose files."""
 
 SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
 _SEVERITY_ALIASES = {"MODERATE": "MEDIUM", "IMPORTANT": "HIGH"}

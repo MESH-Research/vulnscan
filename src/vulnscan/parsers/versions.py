@@ -9,7 +9,7 @@ from dataclasses import replace
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
-from vulnscan.models import NPM, PACKAGIST, WORDPRESS, Dependency, normalize_name
+from vulnscan.models import CONTAINER, NPM, PACKAGIST, WORDPRESS, Dependency, normalize_name
 from vulnscan.versioncmp import (  # noqa: F401  (re-exported for callers)
     compare_versions,
     normalize_version,
@@ -154,7 +154,13 @@ def minimum_version_from_npm(constraint: str) -> str | None:
 
 
 def resolve_dependency(dep: Dependency, lock_versions: Mapping[tuple[str, str], str]) -> Dependency:
-    """Fill in an exact version from a lock file, a pin, or the constraint's lower bound."""
+    """Fill in an exact version from a lock file, a pin, or the constraint's lower bound.
+
+    Container images carry their version in the tag and have no lock file, so they are
+    returned unchanged.
+    """
+    if dep.ecosystem == CONTAINER:
+        return dep
     locked = lock_versions.get(dep.key)
     if not locked and dep.ecosystem == WORDPRESS:
         # WordPress packages are recorded in composer.lock under their Composer name.
