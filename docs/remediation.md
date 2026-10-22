@@ -2,8 +2,8 @@
 
 Select a vulnerable dependency in the TUI and press `u`, or run
 `--remediate PACKAGE` from the command line. vulnscan looks up the versions
-published for the package (PyPI, Packagist, npm or wordpress.org) and offers
-two choices:
+published for the package (PyPI, Packagist, npm or wordpress.org, or the tags
+on a container image's registry) and offers two choices:
 
 - **Nearest safe version**: the smallest upgrade above the current version
   that is outside every known advisory's affected range. This keeps you as
@@ -54,6 +54,29 @@ Every rewrite is computed before any file is written. If one of the
 declaring files cannot be edited (it has changed since the scan, or its
 format is unsupported) nothing is written and the error names the file.
 
+## Container images
+
+For an image the "constraint" is its tag, and the candidates are the tags on
+its registry (Docker Hub, ghcr.io, quay.io or any registry speaking the
+standard Docker Registry API) that carry the same variant suffix and are at
+least as specific as the current tag. On `php:8.2.19-fpm-bookworm` the
+candidates are the other `*-fpm-bookworm` tags, so the upgrade is
+`php:8.2.20-fpm-bookworm` and never a `-cli` or `-alpine` image.
+
+| Before | After |
+|--------|------|
+| `FROM php:8.2.19-fpm-bookworm` | `FROM php:8.2.20-fpm-bookworm` |
+| `image: traefik:v2.10.7` | `image: traefik:v2.11.3` |
+| `FROM php:8.2.19@sha256:…` | `FROM php:8.2.20` (the digest pinned the old content) |
+| `ARG PHP_VERSION=8.2.19` + `FROM php:${PHP_VERSION}-fpm` | `ARG PHP_VERSION=8.2.20` |
+| `image: traefik:${TRAEFIK_TAG:-v2.10.7}` | `image: traefik:${TRAEFIK_TAG:-v2.11.3}` |
+
+Every `FROM` and every service `image:` naming that image at that tag is
+rewritten, across all the Dockerfiles and Compose files that declare it. A tag
+that comes from a variable with no default in the file (`${TRAEFIK_TAG}` set
+only in `.env` or the environment) is left alone and the error names the
+variable, so you can change it where it is defined.
+
 ## After the edit
 
 Lock files are not touched. The status bar (or the command line output)
@@ -63,7 +86,8 @@ tells you the command to run next for each manifest, such as
 `uv lock && uv sync`, `poetry lock && poetry install`, `pipenv lock &&
 pipenv sync`, `pip install -e .` for a `setup.cfg`, or `pip install -r
 base.txt` (with the directory to run it in when the manifest is not at the
-project root).
+project root). For a Dockerfile it asks you to rebuild the image; for a
+Compose file, to run `docker compose pull && docker compose up -d`.
 Press `r` afterwards to rescan.
 
 In the TUI the dependency's row and its advisories turn green with a ✔

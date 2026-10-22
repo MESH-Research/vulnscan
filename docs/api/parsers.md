@@ -14,6 +14,10 @@
 
 ::: vulnscan.parsers.node
 
+## vulnscan.parsers.containers
+
+::: vulnscan.parsers.containers
+
 ## vulnscan.parsers.lockfiles
 
 ::: vulnscan.parsers.lockfiles

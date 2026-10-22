@@ -11,6 +11,7 @@ discover manifests ──> parse ──> resolve versions ──> merge declarat
    VULNSCAN_IGNORE_DIRS,                         ▼                       ▼
    composer install paths                   OSV.dev (PyPI,       Wordfence (WordPress
                                             Packagist, npm)      core/plugins/themes)
+                                                 │             NVD (container images)
                                                  └───────────┬───────────┘
                                                              ▼
                                                     Finding per dependency
@@ -28,6 +29,11 @@ dot-directories, anything a `composer.json` installs into, and the user's
 ignore patterns. Each manifest goes to the parser registered for its name
 in `parsers/__init__.py`; parsers return `Dependency` records with the
 constraint as written and no version yet.
+
+Dockerfiles and Compose files are parsed by `parsers/containers.py`: every
+`FROM` and service `image:` becomes a dependency in the `Docker` ecosystem
+whose constraint is the tag and whose version is read from it, with `ARG`
+defaults, `${VAR:-default}` interpolation and an adjacent `.env` resolved.
 
 `resolve_dependency` then fills in the version from, in order of
 preference, a lock file in the same directory (`composer.lock`,
@@ -49,15 +55,20 @@ and `declared_in_text` give the list and a human-readable form, and
 `apply_remediation` iterates the same list when rewriting. The package is
 treated as a dev dependency only if every declaration is.
 
-## Advisory sources (`vulnscan.osv`, `vulnscan.wordfence`)
+## Advisory sources (`vulnscan.osv`, `vulnscan.wordfence`, `vulnscan.nvd`)
 
-Both clients expose `find_vulnerabilities(deps, include_unknown_versions)`
+All three clients expose `find_vulnerabilities(deps, include_unknown_versions)`
 and return `{Dependency: [Vulnerability, ...]}`. `OSVClient` uses the batch
 query endpoint, follows pagination, and fetches each advisory's full record
 for the details, severity and ranges. `WordfenceClient` downloads the
 production feed once, slims it to the fields vulnscan needs, caches it on
 disk, and answers lookups by slug and version range from the cache. Its
 throttling rules are described under [Configuration](configuration.md#wordfence).
+`NVDClient` maps an image name to a CPE `vendor:product` (built-in table plus
+`VULNSCAN_IMAGE_PRODUCTS`), asks NVD for the CVEs matching that product at the
+tag's version, turns each record's CPE match ranges into `VersionRange`s and
+fixed versions, filters the answer again against those ranges, and caches it
+per image version on disk.
 
 `Vulnerability.affects(version, ecosystem)` evaluates the affected ranges
 with ecosystem-aware version comparison (`vulnscan.versioncmp`), which is
@@ -69,7 +80,7 @@ safe.
 `scan(settings)` is the orchestration: parse, drop dev dependencies if
 configured, merge declarations, warn about custom sources, query each
 source, and return a `ScanResult` with findings sorted by worst severity
-then name. The OSV and Wordfence clients can be passed in, which is how
+then name. The OSV, Wordfence and NVD clients can be passed in, which is how
 the tests inject fakes; the TUI instead injects a whole scan function.
 
 ## Outputs

@@ -31,7 +31,8 @@ Then, for example, `vulnscan.feeds.write_feeds(result, settings)`,
 | [`vulnscan.scanner`](scanner.md) | `scan` orchestration |
 | [`vulnscan.osv`](osv.md) | OSV.dev client |
 | [`vulnscan.wordfence`](wordfence.md) | Wordfence Intelligence client and cache |
-| [`vulnscan.registry`](registry.md) | Available versions from PyPI, Packagist and wordpress.org |
+| [`vulnscan.nvd`](nvd.md) | NVD client for container images, with the image-to-CPE map and cache |
+| [`vulnscan.registry`](registry.md) | Available versions from PyPI, Packagist, wordpress.org, npm and container registries |
 | [`vulnscan.remediate`](remediate.md) | Upgrade planning and manifest rewriting |
 | [`vulnscan.outdated`](outdated.md) | Newer-release detection for the `--outdated` mode |
 | [`vulnscan.feeds`](feeds.md) | RSS and Atom |
