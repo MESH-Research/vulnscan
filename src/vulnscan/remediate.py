@@ -24,8 +24,27 @@ from vulnscan.invenio import (
     package_root_for_webpack,
     resolve_overlay,
 )
-from vulnscan.models import NPM, PACKAGIST, PYPI, WORDPRESS, Dependency, Finding, normalize_name
+from vulnscan.models import (
+    CONTAINER,
+    NPM,
+    PACKAGIST,
+    PYPI,
+    WORDPRESS,
+    Dependency,
+    Finding,
+    normalize_name,
+)
 from vulnscan.parsers import is_requirements_file, load_ignore_file, matches_ignore
+from vulnscan.parsers.containers import (
+    compose_images,
+    dockerfile_images,
+    is_compose_file,
+    is_dockerfile,
+    parse_image_reference,
+    substitute_variables,
+    tag_for_version,
+    version_from_tag,
+)
 from vulnscan.parsers.webpack import (
     THEME_NAME,
     extract_theme_dependencies,
@@ -435,7 +454,13 @@ def follow_up_hint(
     where = manifest.parent.as_posix()
     where = "" if where in ("", ".") else f" (in {where})"
     name = manifest.name.lower()
-    if name == "composer.json":
+    if dep.ecosystem == CONTAINER and is_compose_file(manifest):
+        command = "docker compose pull && docker compose up -d"
+    elif dep.ecosystem == CONTAINER and is_dockerfile(manifest):
+        return (
+            f"Rebuild the image from {manifest.as_posix()} (docker build / docker compose build)."
+        )
+    elif name == "composer.json":
         command = f"composer update {dep.name} --with-dependencies"
     elif name == "package.json":
         if (directory / "pnpm-lock.yaml").is_file():
@@ -749,6 +774,216 @@ def plan_invenio_npm_writes(
     return required, companion, errors
 
 
+# --- container images -------------------------------------------------------------------------
+
+_IMAGE_VARIABLE = re.compile(r"\$(?:\{(?P<braced>[^}]*)\}|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))")
+
+
+def _split_tag(reference: str) -> tuple[str, str, str]:
+    """``(name part, tag, digest)`` of a literal reference as written."""
+    digest = ""
+    if "@" in reference:
+        reference, digest = reference.split("@", 1)
+    colon = reference.rfind(":")
+    if colon > reference.rfind("/"):
+        return reference[:colon], reference[colon + 1 :], digest
+    return reference, "", digest
+
+
+def _new_tag(dep: Dependency, new_version: str) -> str:
+    """The tag naming ``new_version`` in the same style as the dependency's current tag."""
+    _current, variant = version_from_tag(dep.constraint)
+    tag = tag_for_version(new_version, variant)
+    if dep.constraint.startswith("v") and not new_version.startswith("v"):
+        tag = "v" + tag
+    return tag
+
+
+def _replace_version(value: str, dep: Dependency, new_version: str) -> str | None:
+    """Rewrite the version inside ``value`` (an ARG default or inline default), or None."""
+    if dep.constraint and dep.constraint in value:
+        return value.replace(dep.constraint, _new_tag(dep, new_version), 1)
+    if not dep.version:
+        return None
+    match = re.search(r"(?<![\w.])v?" + re.escape(dep.version) + r"(?![\w.])", value)
+    if match is None:
+        return None
+    prefix = "v" if match.group(0).startswith("v") else ""
+    return value[: match.start()] + prefix + new_version + value[match.end() :]
+
+
+def _rewrite_reference_text(
+    raw: str, dep: Dependency, new_version: str, lookup_arg, source_file: str
+) -> tuple[str | None, list[tuple[str, str]]]:
+    """How to rewrite one reference as written.
+
+    Returns the new reference text (None when the reference itself is unchanged) and
+    ``(variable, new default)`` pairs for ``ARG`` lines that must change instead.
+    """
+    if "$" not in raw:
+        name_part, _tag, _digest = _split_tag(raw)
+        return f"{name_part}:{_new_tag(dep, new_version)}", []
+    text = raw
+    arg_edits: list[tuple[str, str]] = []
+    for match in list(_IMAGE_VARIABLE.finditer(raw)):
+        if match.group("bare") is not None:
+            name, default = match.group("bare"), None
+        else:
+            inner = match.group("braced")
+            name, default = inner, None
+            for sep in (":-", "-"):
+                if sep in inner:
+                    name, default = inner.split(sep, 1)
+                    break
+        if default is not None:
+            replaced = _replace_version(default, dep, new_version)
+            if replaced is not None:
+                text = text.replace(match.group(0), match.group(0).replace(default, replaced, 1), 1)
+                return text, arg_edits
+        current = lookup_arg(name)
+        if current is None:
+            continue
+        replaced = _replace_version(current, dep, new_version)
+        if replaced is not None:
+            arg_edits.append((name, replaced))
+            return None, arg_edits
+    raise RemediationError(
+        f"{dep.name} in {source_file} takes its tag from a variable ({raw}) whose value is "
+        "not set in that file; update the variable where it is defined"
+    )
+
+
+def _replace_token(segment: str, token: str, replacement: str) -> str:
+    """Replace whitespace-delimited occurrences of ``token`` in ``segment``."""
+    return re.sub(r"(?<!\S)" + re.escape(token) + r"(?!\S)", lambda _m: replacement, segment)
+
+
+def _logical_lines(text: str) -> list[tuple[int, int, str]]:
+    """``(start, end, joined)`` for each Dockerfile instruction, continuation lines merged."""
+    spans: list[tuple[int, int, str]] = []
+    offset = 0
+    start = None
+    joined = ""
+    for raw in text.splitlines(keepends=True):
+        line = raw.rstrip("\r\n")
+        stripped = line.strip()
+        if start is None:
+            if not stripped or stripped.startswith("#"):
+                offset += len(raw)
+                continue
+            start = offset
+        if stripped.endswith("\\"):
+            joined += stripped[:-1] + " "
+            offset += len(raw)
+            continue
+        if stripped.startswith("#"):
+            offset += len(raw)
+            continue
+        joined += stripped
+        spans.append((start, offset + len(line), joined))
+        start, joined = None, ""
+        offset += len(raw)
+    return spans
+
+
+def _edit_dockerfile(
+    text: str, dep: Dependency, new_version: str, source_file: str
+) -> tuple[str, str, str]:
+    """Rewrite the tag of every ``FROM`` naming the dependency, or the ``ARG`` it comes from.
+
+    A ``@sha256:`` digest on the rewritten reference is dropped, since it pinned the old
+    tag's content.
+    """
+    args: dict[str, str] = {}
+    arg_lines: dict[str, tuple[int, int, str]] = {}
+    for start, end, joined in _logical_lines(text):
+        head, _, rest = joined.partition(" ")
+        if head.upper() == "ARG":
+            name, eq, value = rest.strip().partition("=")
+            if eq:
+                args[name.strip()] = value.strip().strip("\"'")
+                arg_lines[name.strip()] = (start, end, joined)
+    wanted = [
+        raw
+        for raw, expanded in dockerfile_images(text)
+        if (ref := parse_image_reference(expanded)) is not None
+        and ref.name == normalize_name(dep.name, CONTAINER)
+        and ref.tag == dep.constraint
+    ]
+    if not wanted:
+        raise RemediationError(f"{dep.name}:{dep.constraint} not found in {source_file}")
+    edits: list[tuple[int, int, str]] = []
+    arg_edits: dict[str, str] = {}
+    for start, end, joined in _logical_lines(text):
+        head, _, rest = joined.partition(" ")
+        if head.upper() != "FROM":
+            continue
+        segment = text[start:end]
+        for raw in wanted:
+            if not re.search(r"(?<!\S)" + re.escape(raw) + r"(?!\S)", segment):
+                continue
+            replacement, for_args = _rewrite_reference_text(
+                raw, dep, new_version, args.get, source_file
+            )
+            for name, value in for_args:
+                arg_edits[name] = value
+            if replacement is not None:
+                segment = _replace_token(segment, raw, replacement)
+        if segment != text[start:end]:
+            edits.append((start, end, segment))
+    for name, value in arg_edits.items():
+        start, end, _joined = arg_lines[name]
+        segment = text[start:end]
+        old_value = args[name]
+        edits.append((start, end, segment.replace(old_value, value, 1)))
+    new_text = text
+    for start, end, segment in sorted(edits, reverse=True):
+        new_text = new_text[:start] + segment + new_text[end:]
+    return new_text, dep.constraint, _new_tag(dep, new_version)
+
+
+def _edit_compose(
+    text: str, dep: Dependency, new_version: str, source_file: str
+) -> tuple[str, str, str]:
+    """Rewrite every service ``image:`` naming the dependency, keeping quotes and comments."""
+    targets = set(compose_images(text))
+    lines = text.splitlines(keepends=True)
+    changed = False
+    for i, raw in enumerate(lines):
+        match = re.match(r"^(\s*image\s*:\s*)(.*?)(\s*)$", raw.rstrip("\r\n"))
+        if not match:
+            continue
+        value = match.group(2)
+        quote = value[0] if value[:1] in ("'", '"') else ""
+        if quote:
+            close = value.find(quote, 1)
+            scalar, trailer = value[1:close], value[close + 1 :]
+        else:
+            scalar, _, comment = value.partition(" #")
+            scalar = scalar.strip()
+            trailer = value[len(scalar) :]
+        if scalar not in targets:
+            continue
+        # Defaults are expanded; variables without one become a placeholder so the
+        # image name still parses and the missing value can be reported by name.
+        ref = parse_image_reference(_IMAGE_VARIABLE.sub("unset", substitute_variables(scalar, {})))
+        if ref is None or ref.name != normalize_name(dep.name, CONTAINER):
+            continue
+        if ref.tag != dep.constraint and "unset" not in ref.tag:
+            continue
+        replacement, _args = _rewrite_reference_text(
+            scalar, dep, new_version, lambda _name: None, source_file
+        )
+        if replacement is None:
+            continue
+        newline = raw[len(raw.rstrip("\r\n")) :]
+        lines[i] = f"{match.group(1)}{quote}{replacement}{quote}{trailer}{match.group(3)}{newline}"
+        changed = True
+    if not changed:
+        raise RemediationError(f"{dep.name}:{dep.constraint} not found in {source_file}")
+    return "".join(lines), dep.constraint, _new_tag(dep, new_version)
+
+
 def _editor_for(path: Path, dep: Dependency, source_file: str):
     name = path.name.lower()
     if name == "composer.json" and dep.ecosystem in (PACKAGIST, WORDPRESS):
@@ -761,6 +996,10 @@ def _editor_for(path: Path, dep: Dependency, source_file: str):
         return _edit_pipfile
     if name == "setup.cfg" or is_requirements_file(path):
         return _edit_requirement_lines
+    if dep.ecosystem == CONTAINER and is_dockerfile(path):
+        return _edit_dockerfile
+    if dep.ecosystem == CONTAINER and is_compose_file(path):
+        return _edit_compose
     raise RemediationError(f"Don't know how to edit {source_file}")
 
 
