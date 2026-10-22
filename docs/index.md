@@ -12,10 +12,12 @@ whenever something new turns up.
 - Reads `composer.json`, `package.json`, `pyproject.toml`,
   `requirements*.txt` (and `requirements/*.txt`), `Pipfile` and `setup.cfg`,
   and the lock files next to them, to learn exactly which version of each
-  direct dependency you run.
+  direct dependency you run; and reads the images in your Dockerfiles and
+  Compose files, so the PHP, Traefik or Postgres you deploy counts too.
 - Looks those versions up on [OSV.dev](https://osv.dev) (PyPI, Packagist,
-  npm) and [Wordfence Intelligence](https://www.wordfence.com/threat-intel/)
-  (WordPress core, plugins and themes).
+  npm), [Wordfence Intelligence](https://www.wordfence.com/threat-intel/)
+  (WordPress core, plugins and themes) and the [NVD](https://nvd.nist.gov)
+  (container images).
 - Shows the results in a terminal interface where every advisory can be read
   in full, or writes them out non-interactively for cron.
 - Lists every manifest that declares a vulnerable package, and upgrades the

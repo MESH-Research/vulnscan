@@ -8,8 +8,21 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from vulnscan.models import PACKAGIST, Dependency
+from vulnscan.models import CONTAINER, PACKAGIST, Dependency
 from vulnscan.parsers.composer import classify_composer_package, parse_composer_json
+from vulnscan.parsers.containers import (
+    CI_DIRECTORIES,
+    OS_IMAGES,
+    canonical_image_name,
+    is_compose_file,
+    is_dockerfile,
+    is_github_workflow,
+    is_gitlab_ci_file,
+    parse_compose_file,
+    parse_dockerfile,
+    parse_github_workflow,
+    parse_gitlab_ci,
+)
 from vulnscan.parsers.lockfiles import LockedPackage, load_lock_packages, load_lock_versions
 from vulnscan.parsers.node import parse_package_json
 from vulnscan.parsers.python import (
@@ -94,6 +107,14 @@ def _parser_for(path: Path) -> Parser | None:
         return _EXACT_NAMES[lowered]
     if is_requirements_file(path):
         return parse_requirements_txt
+    if is_dockerfile(path):
+        return parse_dockerfile
+    if is_compose_file(path):
+        return parse_compose_file
+    if is_github_workflow(path):
+        return parse_github_workflow
+    if is_gitlab_ci_file(path):
+        return parse_gitlab_ci
     return None
 
 
@@ -146,17 +167,25 @@ def is_manifest(path: Path) -> bool:
     """Whether ``path`` is a manifest vulnscan can parse, judged by its file name.
 
     Recognised: ``composer.json``, ``package.json``, ``pyproject.toml``, ``Pipfile``,
-    ``setup.cfg`` and requirements files (see :func:`is_requirements_file`).
+    ``setup.cfg``, requirements files (see :func:`is_requirements_file`), Dockerfiles and
+    Containerfiles (see :func:`~vulnscan.parsers.containers.is_dockerfile`) and Compose
+    files (see :func:`~vulnscan.parsers.containers.is_compose_file`).
     """
     return _parser_for(path) is not None
+
+
+def _is_ci_directory(rel_path: str) -> bool:
+    """Whether a project-relative hidden directory leads to CI configuration."""
+    return any(ci == rel_path or ci.startswith(rel_path + "/") for ci in CI_DIRECTORIES)
 
 
 def discover_manifests(root: Path, ignore_dirs: tuple[str, ...] = ()) -> list[Path]:
     """Find every manifest under ``root``, walking directories and file names in sorted order.
 
-    Skipped: VCS, virtualenv, build and vendor directories, hidden directories,
-    WordPress core, directories Composer installs into, and any directory matching
-    ``ignore_dirs`` or ``<root>/.vulnscanignore``. A file ``root`` yields ``[root]`` when
+    Skipped: VCS, virtualenv, build and vendor directories, hidden directories (except
+    the CI configuration directories ``.github/workflows`` and ``.gitlab/ci``), WordPress
+    core, directories Composer installs into, and any directory matching ``ignore_dirs``
+    or ``<root>/.vulnscanignore``. A file ``root`` yields ``[root]`` when
     it is itself a manifest, otherwise an empty list.
     """
     if root.is_file():
@@ -174,11 +203,12 @@ def discover_manifests(root: Path, ignore_dirs: tuple[str, ...] = ()) -> list[Pa
         except ValueError:
             prefix = ""
         prefix = "" if prefix in ("", ".") else prefix + "/"
+        inside_hidden = prefix.startswith(".")
         dirnames[:] = sorted(
             d
             for d in dirnames
             if d not in ignored_names
-            and not d.startswith(".")
+            and ((not d.startswith(".") and not inside_hidden) or _is_ci_directory(prefix + d))
             and (here / d).resolve() not in ignored_paths
             and not matches_ignore(prefix + d, patterns)
         )
@@ -233,14 +263,28 @@ def parse_project(
         for dep in parse_manifest(manifest, root):
             resolved = resolve_dependency(dep, locks)
             if resolved.version is None:
-                warnings.append(
-                    f"{resolved.name} ({resolved.source_file}): could not determine a version "
-                    f"from constraint {resolved.constraint!r}; not queried"
-                )
+                warning = _unknown_version_warning(resolved)
+                if warning:
+                    warnings.append(warning)
             deps.append(resolved)
     if include_transitive:
         deps.extend(_transitive_dependencies(root, list(lock_cache), deps))
     return deps, warnings
+
+
+def _unknown_version_warning(dep: Dependency) -> str | None:
+    """Why a dependency will not be queried; ``None`` for OS base images, which never are."""
+    if dep.ecosystem == CONTAINER:
+        if canonical_image_name(dep.name) in OS_IMAGES:
+            return None
+        return (
+            f"{dep.name} ({dep.source_file}): tag {dep.constraint or 'latest'!r} does not name "
+            "a version; pin a versioned tag so the image can be checked"
+        )
+    return (
+        f"{dep.name} ({dep.source_file}): could not determine a version from constraint "
+        f"{dep.constraint!r}; not queried"
+    )
 
 
 def _transitive_dependency(

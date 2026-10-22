@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from vulnscan.models import (
+    CONTAINER,
     NPM,
     PACKAGIST,
     PYPI,
@@ -847,3 +848,219 @@ def test_apply_pin_creates_the_whole_pnpm_section_when_missing(tmp_path: Path):
         "pnpm": {"overrides": {"cookie": "^0.6.0"}},
     }
     assert '"pnpm": {\n    "overrides": {\n      "cookie": "^0.6.0"\n    }\n  }' in text
+
+
+# --- container images -----------------------------------------------------------------------
+
+
+def image(name, tag, version, source_file, **kw):
+    return Dependency(name, CONTAINER, tag, version, "pinned", source_file, kind="image", **kw)
+
+
+def test_plan_remediation_for_an_image_uses_registry_tags():
+    dep = image("php", "8.2.19-fpm", "8.2.19", "Dockerfile")
+    vuln = vuln_with_ranges(VersionRange(lower="8.2.0", upper="8.2.20"))
+    plan = plan_remediation(Finding(dep, [vuln]), ["8.2.9", "8.2.19", "8.2.20", "8.3.8"])
+    assert plan.nearest_safe == "8.2.20"
+    assert plan.latest == "8.3.8"
+    assert plan.latest_is_safe
+
+
+def test_apply_to_dockerfile_rewrites_the_tag_and_keeps_the_variant(tmp_path: Path):
+    original = (
+        "# syntax=docker/dockerfile:1\n"
+        "FROM php:8.2.19-fpm-bookworm AS base\n"
+        "RUN echo php:8.2.19-fpm-bookworm > /note\n"
+        "FROM --platform=linux/amd64 node:20-alpine\n"
+    )
+    (tmp_path / "Dockerfile").write_text(original)
+    result = apply_remediation(
+        tmp_path, image("php", "8.2.19-fpm-bookworm", "8.2.19", "Dockerfile"), "8.2.20"
+    )
+    assert (tmp_path / "Dockerfile").read_text() == original.replace(
+        "FROM php:8.2.19-fpm-bookworm", "FROM php:8.2.20-fpm-bookworm"
+    )
+    assert result.old_constraint == "8.2.19-fpm-bookworm"
+    assert result.new_constraint == "8.2.20-fpm-bookworm"
+    assert "docker" in result.hint.lower() and "build" in result.hint.lower()
+
+
+def test_apply_to_dockerfile_rewrites_every_stage_and_drops_a_digest(tmp_path: Path):
+    (tmp_path / "Dockerfile").write_text(
+        "FROM php:8.2.19@sha256:abc AS a\nFROM docker.io/library/php:8.2.19 AS b\n"
+    )
+    apply_remediation(tmp_path, image("php", "8.2.19", "8.2.19", "Dockerfile"), "8.2.20")
+    assert (tmp_path / "Dockerfile").read_text() == (
+        "FROM php:8.2.20 AS a\nFROM docker.io/library/php:8.2.20 AS b\n"
+    )
+
+
+def test_apply_to_dockerfile_rewrites_an_arg_default(tmp_path: Path):
+    (tmp_path / "Dockerfile").write_text(
+        "ARG PHP_VERSION=8.2.19\nARG VARIANT=fpm\nFROM php:${PHP_VERSION}-$VARIANT\n"
+    )
+    result = apply_remediation(
+        tmp_path, image("php", "8.2.19-fpm", "8.2.19", "Dockerfile"), "8.2.20"
+    )
+    assert (tmp_path / "Dockerfile").read_text() == (
+        "ARG PHP_VERSION=8.2.20\nARG VARIANT=fpm\nFROM php:${PHP_VERSION}-$VARIANT\n"
+    )
+    assert result.old_constraint == "8.2.19-fpm"
+    assert result.new_constraint == "8.2.20-fpm"
+
+
+def test_apply_to_dockerfile_rewrites_an_inline_arg_default(tmp_path: Path):
+    (tmp_path / "Dockerfile").write_text("FROM traefik:${TRAEFIK_TAG:-v2.10.7}\n")
+    apply_remediation(tmp_path, image("traefik", "v2.10.7", "2.10.7", "Dockerfile"), "2.11.3")
+    assert (tmp_path / "Dockerfile").read_text() == "FROM traefik:${TRAEFIK_TAG:-v2.11.3}\n"
+
+
+def test_apply_to_dockerfile_missing_image_raises(tmp_path: Path):
+    (tmp_path / "Dockerfile").write_text("FROM nginx:1.25.4\n")
+    with pytest.raises(RemediationError):
+        apply_remediation(tmp_path, image("php", "8.2.19", "8.2.19", "Dockerfile"), "8.2.20")
+
+
+def test_apply_to_compose_rewrites_quoted_and_bare_images(tmp_path: Path):
+    original = (
+        "services:\n"
+        "  proxy:\n"
+        "    image: traefik:v2.10.7   # edge router\n"
+        "  other:\n"
+        '    image: "traefik:v2.10.7"\n'
+        "  db:\n"
+        "    image: postgres:16.2\n"
+    )
+    (tmp_path / "docker-compose.yml").write_text(original)
+    result = apply_remediation(
+        tmp_path, image("traefik", "v2.10.7", "2.10.7", "docker-compose.yml"), "2.11.3"
+    )
+    assert (tmp_path / "docker-compose.yml").read_text() == original.replace(
+        "traefik:v2.10.7", "traefik:v2.11.3"
+    )
+    assert result.old_constraint == "v2.10.7"
+    assert result.new_constraint == "v2.11.3"
+    assert "docker compose" in result.hint
+
+
+def test_apply_to_compose_rewrites_an_interpolation_default(tmp_path: Path):
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n  proxy:\n    image: traefik:${TRAEFIK_TAG:-v2.10.7}\n"
+    )
+    apply_remediation(tmp_path, image("traefik", "v2.10.7", "2.10.7", "compose.yaml"), "2.11.3")
+    assert (tmp_path / "compose.yaml").read_text() == (
+        "services:\n  proxy:\n    image: traefik:${TRAEFIK_TAG:-v2.11.3}\n"
+    )
+
+
+def test_apply_to_compose_variable_without_default_raises(tmp_path: Path):
+    (tmp_path / ".env").write_text("TRAEFIK_TAG=v2.10.7\n")
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n  proxy:\n    image: traefik:${TRAEFIK_TAG}\n"
+    )
+    with pytest.raises(RemediationError) as info:
+        apply_remediation(tmp_path, image("traefik", "v2.10.7", "2.10.7", "compose.yaml"), "2.11.3")
+    assert "TRAEFIK_TAG" in str(info.value)
+
+
+def test_apply_to_image_declared_in_dockerfile_and_compose(tmp_path: Path):
+    (tmp_path / "Dockerfile").write_text("FROM php:8.2.19-fpm\n")
+    (tmp_path / "docker-compose.yml").write_text("services:\n  app:\n    image: php:8.2.19-fpm\n")
+    d = image(
+        "php",
+        "8.2.19-fpm",
+        "8.2.19",
+        "Dockerfile",
+        declarations=(
+            Declaration("Dockerfile", "8.2.19-fpm"),
+            Declaration("docker-compose.yml", "8.2.19-fpm"),
+        ),
+    )
+    result = apply_remediation(tmp_path, d, "8.2.20")
+    assert (tmp_path / "Dockerfile").read_text() == "FROM php:8.2.20-fpm\n"
+    assert (tmp_path / "docker-compose.yml").read_text() == (
+        "services:\n  app:\n    image: php:8.2.20-fpm\n"
+    )
+    assert [c.source_file for c in result.changes] == ["Dockerfile", "docker-compose.yml"]
+
+
+def test_follow_up_hint_for_container_files(tmp_path: Path):
+    d = image("php", "8.2.19", "8.2.19", "deploy/Dockerfile")
+    hint = follow_up_hint(tmp_path, d)
+    assert "docker" in hint.lower() and "build" in hint.lower()
+    c = image("traefik", "v2.10.7", "2.10.7", "deploy/docker-compose.yml")
+    hint = follow_up_hint(tmp_path, c)
+    assert "docker compose" in hint and "pull" in hint
+
+
+def test_apply_to_github_workflow_rewrites_container_services_and_docker_uses(tmp_path: Path):
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    original = (
+        "jobs:\n"
+        "  test:\n"
+        "    container: php:8.2.19-cli\n"
+        "    services:\n"
+        "      db:\n"
+        "        image: 'php:8.2.19-cli'\n"
+        "      other: php:8.2.19-cli  # same image\n"
+        "    steps:\n"
+        "      - uses: docker://php:8.2.19-cli\n"
+        "      - run: echo php:8.2.19-cli\n"
+        "    env:\n"
+        "      NOTE: php:8.2.19-cli\n"
+    )
+    (workflows / "ci.yml").write_text(original)
+    result = apply_remediation(
+        tmp_path, image("php", "8.2.19-cli", "8.2.19", ".github/workflows/ci.yml"), "8.2.20"
+    )
+    expected = original.replace("php:8.2.19-cli", "php:8.2.20-cli")
+    expected = expected.replace("run: echo php:8.2.20-cli", "run: echo php:8.2.19-cli")
+    expected = expected.replace("NOTE: php:8.2.20-cli", "NOTE: php:8.2.19-cli")
+    assert (workflows / "ci.yml").read_text() == expected
+    assert result.new_constraint == "8.2.20-cli"
+    assert "commit" in result.hint.lower()
+
+
+def test_apply_to_gitlab_ci_rewrites_image_name_and_service_entries(tmp_path: Path):
+    original = (
+        "image: php:8.2.19-cli\n"
+        "default:\n"
+        "  image:\n"
+        "    name: php:8.2.19-cli\n"
+        "    entrypoint: ['']\n"
+        "test:\n"
+        "  services:\n"
+        "    - php:8.2.19-cli\n"
+        '    - name: "php:8.2.19-cli"\n'
+        "      alias: db\n"
+        "  script:\n"
+        "    - docker run php:8.2.19-cli\n"
+    )
+    (tmp_path / ".gitlab-ci.yml").write_text(original)
+    result = apply_remediation(
+        tmp_path, image("php", "8.2.19-cli", "8.2.19", ".gitlab-ci.yml"), "8.2.20"
+    )
+    expected = original.replace("php:8.2.19-cli", "php:8.2.20-cli").replace(
+        "docker run php:8.2.20-cli", "docker run php:8.2.19-cli"
+    )
+    assert (tmp_path / ".gitlab-ci.yml").read_text() == expected
+    assert result.new_constraint == "8.2.20-cli"
+    assert "commit" in result.hint.lower()
+
+
+def test_apply_to_gitlab_ci_variable_tag_raises_naming_the_variable(tmp_path: Path):
+    (tmp_path / ".gitlab-ci.yml").write_text(
+        "variables:\n  PHP_TAG: 8.2.19-cli\nimage: php:$PHP_TAG\n"
+    )
+    with pytest.raises(RemediationError) as info:
+        apply_remediation(
+            tmp_path, image("php", "8.2.19-cli", "8.2.19", ".gitlab-ci.yml"), "8.2.20"
+        )
+    assert "PHP_TAG" in str(info.value)
+
+
+def test_apply_to_ci_file_missing_image_raises(tmp_path: Path):
+    (tmp_path / ".gitlab-ci.yml").write_text("image: nginx:1.25.4\n")
+    with pytest.raises(RemediationError):
+        apply_remediation(tmp_path, image("php", "8.2.19", "8.2.19", ".gitlab-ci.yml"), "8.2.20")

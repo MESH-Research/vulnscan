@@ -645,3 +645,17 @@ def test_remediate_flag_explains_transitive_dependency_without_a_manifest(
     assert "transitive" in err
     assert "httpx" in err
     assert "certifi>=2026.10.19" in err
+
+
+def test_nvd_error_fails_cleanly(tmp_path: Path, monkeypatch, capsys):
+    from vulnscan.nvd import NVDError
+
+    def failing(settings):
+        raise NVDError("NVD rate limit hit")
+
+    monkeypatch.setattr(cli, "scan", failing)
+    code = cli.main(
+        ["--update-feeds", "--path", str(tmp_path), "--feed-dir", str(tmp_path / "out")]
+    )
+    assert code == 1
+    assert "NVD rate limit hit" in capsys.readouterr().err

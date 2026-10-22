@@ -59,6 +59,33 @@ The first scan therefore takes a minute or two; later scans are fast. Records
 derived from Wordfence carry their copyright notice and licence in the feeds,
 reports and TUI, as the licence requires.
 
+## NVD (container images)
+
+| Variable                   | Default                                            | Purpose                                                                        |
+| -------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `VULNSCAN_NVD_API_KEY`     | empty                                              | Optional API key; raises the limit from 5 to 50 requests per 30 seconds        |
+| `VULNSCAN_NVD_URL`         | `https://services.nvd.nist.gov/rest/json/cves/2.0` | API base URL                                                                   |
+| `VULNSCAN_NVD_TTL_HOURS`   | `24`                                               | How long a cached answer for one image version stays fresh                     |
+| `VULNSCAN_IMAGE_PRODUCTS`  | empty                                              | Extra `image=vendor:product` mappings, comma separated (see below)             |
+
+Container images found in Dockerfiles and Compose files are checked against the
+NVD by CPE name: the image name is mapped to a `vendor:product` pair (`php` to
+`php:php`, `traefik` to `traefik:traefik`, `nginx` to `f5:nginx`) and NVD is asked
+which CVEs apply to the version in the tag. Each answer is cached under
+`VULNSCAN_CACHE_DIR/nvd/` for the TTL, requests are spaced to stay inside the
+public rate limit, and a failed refresh falls back to the stale cache with a
+warning. Only when nothing is cached does a failure abort the scan.
+
+Images vulnscan does not know produce a warning naming the setting to use.
+Give it the vendor and product exactly as they appear in NVD's CPE names, for
+example:
+
+```
+VULNSCAN_IMAGE_PRODUCTS=myorg/app=myorg:app,ghcr.io/example/tool=example:tool
+```
+
+An entry for a built-in image overrides the built-in mapping.
+
 ## Notifications
 
 | Variable                                        | Default              | Purpose                                                                |

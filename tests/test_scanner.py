@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from vulnscan.config import Settings
-from vulnscan.models import NPM, PYPI, Dependency, Vulnerability
+from vulnscan.models import CONTAINER, NPM, PYPI, Dependency, Vulnerability
 from vulnscan.osv import OSVError
 from vulnscan.scanner import scan
 
@@ -327,3 +327,104 @@ def test_scan_leaves_transitive_packages_out_by_default(tmp_path: Path):
     result = scan(settings_for(tmp_path), client=client)
     assert {d.name for d in result.dependencies} == {"requests"}
     assert result.findings == []
+
+
+# --- container images -----------------------------------------------------------------------
+
+
+class FakeNVDClient(FakeClient):
+    def __init__(self, table: dict, warnings: list[str] | None = None):
+        super().__init__(table)
+        self.warnings = warnings or []
+
+
+def write_container_project(tmp_path: Path):
+    (tmp_path / "Dockerfile").write_text("FROM php:8.2.19-fpm\n")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  proxy:\n    image: traefik:v2.10.7\n  app:\n    image: php:8.2.19-fpm\n"
+    )
+    (tmp_path / "requirements.txt").write_text("requests==2.30.0\n")
+
+
+def test_scan_routes_container_images_to_the_nvd_client(tmp_path: Path):
+    write_container_project(tmp_path)
+    osv = FakeClient({("requests", "2.30.0"): [vuln("GHSA-R", "LOW")]})
+    nvd = FakeNVDClient(
+        {
+            ("php", "8.2.19"): [vuln("CVE-2024-4577", "CRITICAL")],
+            ("traefik", "2.10.7"): [vuln("CVE-2024-45410", "HIGH")],
+        },
+        warnings=["nvd note"],
+    )
+    result = scan(settings_for(tmp_path), client=osv, nvd_client=nvd)
+    assert [d.name for d in osv.seen] == ["requests"]
+    assert sorted(d.name for d in nvd.seen) == ["php", "traefik"]
+    assert [(f.dependency.name, f.worst_severity) for f in result.findings] == [
+        ("php", "CRITICAL"),
+        ("traefik", "HIGH"),
+        ("requests", "LOW"),
+    ]
+    php = result.findings[0].dependency
+    assert php.ecosystem == CONTAINER
+    assert php.source_files == ["Dockerfile", "docker-compose.yml"]
+    assert "nvd note" in result.warnings
+
+
+def test_scan_builds_nvd_client_from_settings(tmp_path: Path, monkeypatch):
+    import vulnscan.scanner as scanner_module
+
+    created = {}
+
+    class Recording(FakeNVDClient):
+        def __init__(self, api_key, base_url, timeout, cache_dir, ttl_hours, image_products):
+            super().__init__({})
+            created.update(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout,
+                cache_dir=cache_dir,
+                ttl_hours=ttl_hours,
+                image_products=image_products,
+            )
+
+    monkeypatch.setattr(scanner_module, "NVDClient", Recording)
+    write_container_project(tmp_path)
+    settings = settings_for(
+        tmp_path,
+        nvd_api_key="k",
+        nvd_url="https://nvd.example/cves",
+        nvd_ttl_hours=6.0,
+        cache_dir=tmp_path / "cache",
+        image_products=("myorg/app=myorg:app",),
+        request_timeout=9.0,
+    )
+    scan(settings, client=FakeClient({}))
+    assert created == {
+        "api_key": "k",
+        "base_url": "https://nvd.example/cves",
+        "timeout": 9.0,
+        "cache_dir": tmp_path / "cache",
+        "ttl_hours": 6.0,
+        "image_products": {"myorg/app": "myorg:app"},
+    }
+
+
+def test_scan_does_not_build_nvd_client_without_images(tmp_path: Path, monkeypatch):
+    import vulnscan.scanner as scanner_module
+
+    def boom(*args, **kwargs):
+        raise AssertionError("should not be constructed")
+
+    monkeypatch.setattr(scanner_module, "NVDClient", boom)
+    write_project(tmp_path)
+    scan(settings_for(tmp_path), client=FakeClient({}))
+
+
+def test_scan_propagates_nvd_errors(tmp_path: Path):
+    from vulnscan.nvd import NVDError
+
+    write_container_project(tmp_path)
+    nvd = FakeNVDClient({})
+    nvd.error = NVDError("NVD down")
+    with pytest.raises(NVDError):
+        scan(settings_for(tmp_path), client=FakeClient({}), nvd_client=nvd)

@@ -106,10 +106,40 @@ Or list patterns in a `.vulnscanignore` file in the project root. See
 | PHP (Packagist) | `composer.json` | `composer.lock` |
 | WordPress | `composer.json` entries for `wp-plugin/*`, `wp-theme/*`, `wpackagist-plugin/*`, `wpackagist-theme/*`, `roots/wordpress`, `johnpbloch/wordpress`, and any package the lock file types as `wordpress-plugin`, `wordpress-muplugin`, `wordpress-theme` or `wordpress-core` | `composer.lock` |
 | Node.js (npm) | `package.json` (`dependencies`, `optionalDependencies`, `devDependencies`; `npm:` aliases followed; git, path, tarball and workspace specs skipped; `peerDependencies` ignored) | `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock` (classic and Berry), `pnpm-lock.yaml` (root importer) |
+| Container images (Docker) | `Dockerfile`, `Containerfile`, `Dockerfile.<x>`, `<x>.Dockerfile` (every `FROM`, with `ARG` defaults substituted; build-stage references and `scratch` skipped); `docker-compose*.yml`/`.yaml` and `compose*.yml`/`.yaml` (every service `image:`, with `${VAR:-default}` and a `.env` beside the file resolved); `.github/workflows/*.yml` (job `container:`, `services:` and `uses: docker://` steps; `${{ }}` expressions skipped); `.gitlab-ci.yml`, `*.gitlab-ci.yml` and `.gitlab/ci/*.yml` (top-level, `default:` and job `image:` and `services:`, with `$VAR` resolved from the file's `variables:`) | none: the version is the image tag |
 
 Lock files resolve the versions of direct dependencies; for `yarn.lock`, a
 package that appears at several versions is taken at the first one listed.
 With `--transitive` the other packages they record are scanned too.
+
+## Container images
+
+A container image is a dependency like any other: `FROM php:8.2.19-fpm-bookworm`
+is PHP 8.2.19 declared in `Dockerfile`, `image: traefik:v2.10` in a Compose
+file is Traefik 2.10, and `container: php:8.2.19-cli` in a GitHub Actions job
+or `image: php:8.2.19-cli` in `.gitlab-ci.yml` is the PHP your tests run on.
+The same image at the same tag in several of these files is one finding that
+lists every file. The tag supplies the version: a full `major.minor.patch`
+counts as pinned, a shorter series such as `8.2` or `v2.10` as a floating
+constraint whose lower bound is checked (so advisories against any `8.2.x` are
+reported until you pin a patched tag), and a tag with no number (`latest`,
+`bookworm-slim`) as unknown, with a warning asking you to pin one.
+
+Advisories for images come from the [NVD](https://nvd.nist.gov). vulnscan maps
+well-known images (`php`, `python`, `node`, `nginx`, `httpd`, `traefik`,
+`caddy`, `postgres`, `mysql`, `mariadb`, `mongo`, `redis`, `rabbitmq`,
+`elasticsearch`, `grafana/grafana`, `quay.io/keycloak/keycloak`,
+`hashicorp/vault`, `wordpress`, `nextcloud`, `gitlab/gitlab-ce` and others) to
+the CPE vendor and product NVD records CVEs against. An image outside that list
+is reported once as a warning; add your own mapping with
+`VULNSCAN_IMAGE_PRODUCTS=myorg/app=vendor:product`. Operating-system bases
+(`debian`, `ubuntu`, `alpine`, `busybox` and the like) are listed but not
+queried. Because NVD describes the software, not the image build, a CVE that
+only applies on Windows or in a feature you do not use can still be reported;
+read the advisory text before acting.
+
+Pressing `u` on an image, or `--remediate php`, rewrites the tag wherever it is
+declared (see [Upgrading dependencies](remediation.md#container-images)).
 
 ## Transitive dependencies
 

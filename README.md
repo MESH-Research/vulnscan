@@ -19,21 +19,28 @@
 
 Point vulnscan at a Python, PHP, WordPress or Node.js project and it tells you
 which of your direct dependencies have known security advisories, which versions
-fix them, and every manifest in which each one is declared. It can rewrite those
-manifests for you, publish the results as RSS and Atom feeds or as Markdown and
+fix them, and every manifest in which each one is declared. It reads the
+container images in your Dockerfiles and Compose files too, so a flaw in the
+PHP interpreter, Traefik or Postgres you run shows up alongside one in a
+library. It can rewrite those manifests and image tags for you, publish the results as RSS and Atom feeds or as Markdown and
 plain-text reports, and push a notification to your phone or a Microsoft Teams
 channel the first time a new advisory appears.
 
 - **Sources:** [OSV.dev](https://osv.dev) for PyPI, Packagist and npm packages
-  (no key needed) and
+  (no key needed);
   [Wordfence Intelligence](https://www.wordfence.com/threat-intel/) for
-  WordPress core, plugins and themes installed through Composer (free API key).
+  WordPress core, plugins and themes installed through Composer (free API key);
+  the [NVD](https://nvd.nist.gov) for the software inside container images
+  (no key needed; an optional free key raises the rate limit).
 - **Manifests:** `composer.json`; `package.json`; `pyproject.toml` (PEP 621, PEP
   735 dependency groups, Poetry); `requirements*.txt` and `requirements/*.txt`
   with `-r` includes; `Pipfile`; `setup.cfg`; Invenio `webpack.py` theme
-  bundles. Installed versions come from `composer.lock`, `package-lock.json`,
+  bundles; `Dockerfile` / `Containerfile` (every `FROM`, with `ARG` defaults
+  substituted); `docker-compose*.yml` and `compose*.yml` (every service
+  `image:`); GitHub Actions workflows (`container:`, `services:`,
+  `uses: docker://`); GitLab CI (`image:`, `services:`, `default:`). Installed versions come from `composer.lock`, `package-lock.json`,
   `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `uv.lock`, `poetry.lock`
-  and `Pipfile.lock`.
+  and `Pipfile.lock`; image versions come from the tag.
 - **Interfaces:** an interactive terminal UI; non-interactive modes for cron; a
   continuous watch mode that notifies [ntfy](https://ntfy.sh) and/or Microsoft
   Teams.
@@ -280,6 +287,10 @@ comments.
 | `VULNSCAN_WORDFENCE_URL`                            | `https://www.wordfence.com/api/intelligence/v3`   | Wordfence API base URL                                                                 |
 | `VULNSCAN_WORDFENCE_TTL_HOURS`                      | `24`                                              | How long the cached Wordfence feed stays fresh                                         |
 | `VULNSCAN_WORDFENCE_MIN_INTERVAL_MINUTES`           | `30`                                              | Minimum gap between Wordfence requests                                                 |
+| `VULNSCAN_NVD_API_KEY`                              | empty                                             | NVD API key (optional; raises the rate limit for container image lookups)              |
+| `VULNSCAN_NVD_URL`                                  | `https://services.nvd.nist.gov/rest/json/cves/2.0` | NVD API base URL                                                                      |
+| `VULNSCAN_NVD_TTL_HOURS`                            | `24`                                              | How long a cached NVD answer stays fresh                                               |
+| `VULNSCAN_IMAGE_PRODUCTS`                           | empty                                             | Extra `image=vendor:product` CPE mappings for container images, comma separated        |
 | `VULNSCAN_CACHE_DIR`                                | `$XDG_CACHE_HOME/vulnscan` or `~/.cache/vulnscan` | Cache location                                                                         |
 | `VULNSCAN_INTERVAL_MINUTES`                         | `60`                                              | Minutes between scans in `--ntfy` / `--msteams` mode (`--interval`)                    |
 | `VULNSCAN_NTFY_SERVER`                              | `https://ntfy.sh`                                 | ntfy server                                                                            |
@@ -308,13 +319,51 @@ minute or two; later scans are fast. Records derived from Wordfence carry their
 copyright notice and licence in the feeds, reports and TUI, as the licence
 requires.
 
+### Container images
+
+Every `FROM` in a Dockerfile, every service `image:` in a Compose file, every
+job `container:`, service and `uses: docker://` step in a GitHub Actions
+workflow, and every `image:` and `services:` entry in a GitLab CI file is a
+dependency in the **Docker** ecosystem, named after the image (`php`,
+`traefik`, `ghcr.io/astral-sh/uv`) with the tag as its constraint. The version
+is read from the tag: `8.2.19-fpm-bookworm` is PHP 8.2.19 (pinned), `v2.10`
+is Traefik 2.10 (a floating series, treated like a `>=2.10.0` constraint), and
+`latest` or `bookworm-slim` names no version, so the image is listed with a
+warning asking you to pin a tag. `ARG` defaults in Dockerfiles and `${VAR:-default}`
+interpolation in Compose files (plus a `.env` beside the file) and `$VAR`
+references to a GitLab `variables:` block are resolved; references to earlier
+build stages, `scratch` and GitHub `${{ }}` expressions are skipped.
+
+Advisories come from the NVD, which records CVEs against the software a tag
+names (PHP, Traefik, nginx, Postgres, MySQL, Redis, Node, Python, Grafana,
+Keycloak and so on; see `IMAGE_PRODUCTS` in `vulnscan/nvd.py` for the built-in
+list). An image vulnscan does not recognise is reported once as a warning; map it
+yourself with `VULNSCAN_IMAGE_PRODUCTS=myorg/app=vendor:product,...` using the
+CPE vendor and product names NVD uses. Plain operating-system bases (`debian`,
+`alpine`, `ubuntu`) are listed but never queried, since their tags name a
+distribution release rather than a piece of software.
+
+Upgrading an image rewrites the tag in every Dockerfile, Compose file and CI
+configuration that declares it, keeping the variant suffix (`8.2.19-fpm-bookworm` becomes
+`8.2.20-fpm-bookworm`) and editing the `ARG` or `${VAR:-default}` the tag came
+from when it was not written literally. A `@sha256:` digest on the rewritten
+reference is dropped. Candidate versions are the tags on the image's registry
+(Docker Hub, ghcr.io, quay.io or any registry speaking the standard API) that
+share the same variant suffix.
+
+NVD allows 5 requests per 30 seconds without a key, so vulnscan spaces its
+requests, caches each answer for `VULNSCAN_NVD_TTL_HOURS` and falls back to a
+stale cache with a warning if a refresh fails. A free key from
+[nvd.nist.gov/developers/request-an-api-key](https://nvd.nist.gov/developers/request-an-api-key)
+in `VULNSCAN_NVD_API_KEY` allows 50 requests per 30 seconds.
+
 ## How versions are determined
 
 For each dependency, in order of preference: the version in an adjacent lock
 file, an exact pin in the manifest (`==1.2.3`, `1.2.3`), or the lower bound of
-the constraint (`>=1.2`, `^1.2`, `~=1.2`). Dependencies with no lower bound at
-all are listed as warnings and not queried unless
-`VULNSCAN_QUERY_UNKNOWN_VERSIONS` is enabled. Packages installed from a custom
+the constraint (`>=1.2`, `^1.2`, `~=1.2`); for a container image, the version
+in its tag. Dependencies with no lower bound at all are listed as warnings and
+not queried unless `VULNSCAN_QUERY_UNKNOWN_VERSIONS` is enabled. Packages installed from a custom
 source (a VCS or `package` repository rather than Packagist or wordpress.org)
 are still looked up by name but flagged in the warnings, because no advisory
 database can be relied on to cover them. In `package.json`, dependencies given

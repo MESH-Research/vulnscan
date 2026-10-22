@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from vulnscan.models import NPM, PACKAGIST, PYPI, WORDPRESS, Dependency
+from vulnscan.models import CONTAINER, NPM, PACKAGIST, PYPI, WORDPRESS, Dependency
 from vulnscan.registry import RegistryClient, RegistryError
 
 
@@ -245,3 +245,129 @@ def test_npm_missing_package_raises():
     dep = Dependency("nope", NPM, "", None, "unknown", "package.json")
     with pytest.raises(RegistryError):
         make_client(npm_handler).available_versions(dep)
+
+
+# --- container images -----------------------------------------------------------------------
+
+
+def docker_handler(request: httpx.Request) -> httpx.Response:
+    """Docker Hub style: a 401 challenge, an anonymous token, then one page of tags."""
+    host = request.url.host
+    if host == "auth.docker.io":
+        assert request.url.params["service"] == "registry.docker.io"
+        assert request.url.params["scope"] == "repository:library/php:pull"
+        return httpx.Response(200, json={"token": "anon-token"})
+    if host == "registry-1.docker.io":
+        if request.headers.get("Authorization") != "Bearer anon-token":
+            return httpx.Response(
+                401,
+                headers={
+                    "WWW-Authenticate": 'Bearer realm="https://auth.docker.io/token",'
+                    'service="registry.docker.io",scope="repository:library/php:pull"'
+                },
+                json={"errors": [{"code": "UNAUTHORIZED"}]},
+            )
+        assert request.url.path == "/v2/library/php/tags/list"
+        return httpx.Response(
+            200,
+            json={
+                "name": "library/php",
+                "tags": [
+                    "latest",
+                    "8.2-fpm-bookworm",
+                    "8.2.19-fpm-bookworm",
+                    "8.2.20-fpm-bookworm",
+                    "8.2.20-fpm",
+                    "8.2.20RC1-fpm-bookworm",
+                    "8.3.8-fpm-bookworm",
+                    "8.3.9-fpm-bookworm",
+                    "8.2.9-fpm-bookworm",
+                    "8.4.0-rc1-fpm-bookworm",
+                    "8.2.20-cli",
+                    "fpm-bookworm",
+                ],
+            },
+        )
+    return httpx.Response(404)
+
+
+def test_docker_hub_tags_filtered_to_the_same_variant_and_sorted():
+    dep = Dependency(
+        "php", CONTAINER, "8.2.19-fpm-bookworm", "8.2.19", "pinned", "Dockerfile", kind="image"
+    )
+    assert make_client(docker_handler).available_versions(dep) == [
+        "8.2.9",
+        "8.2.19",
+        "8.2.20",
+        "8.3.8",
+        "8.3.9",
+    ]
+
+
+def test_docker_hub_tags_for_an_untagged_variant():
+    dep = Dependency("php", CONTAINER, "8.2-fpm", "8.2", "constraint", "Dockerfile", kind="image")
+    assert make_client(docker_handler).available_versions(dep) == ["8.2.20"]
+
+
+def ghcr_handler(request: httpx.Request) -> httpx.Response:
+    """ghcr.io style: token endpoint on the same host and Link-header pagination."""
+    assert request.url.host == "ghcr.io"
+    if request.url.path == "/token":
+        return httpx.Response(200, json={"token": "ghcr-token"})
+    if request.headers.get("Authorization") != "Bearer ghcr-token":
+        return httpx.Response(
+            401,
+            headers={
+                "WWW-Authenticate": 'Bearer realm="https://ghcr.io/token",service="ghcr.io",'
+                'scope="repository:astral-sh/uv:pull"'
+            },
+        )
+    assert request.url.path == "/v2/astral-sh/uv/tags/list"
+    if request.url.params.get("last") == "0.5.8":
+        return httpx.Response(200, json={"name": "astral-sh/uv", "tags": ["0.5.9", "0.6.0"]})
+    return httpx.Response(
+        200,
+        headers={"Link": '</v2/astral-sh/uv/tags/list?n=1000&last=0.5.8>; rel="next"'},
+        json={"name": "astral-sh/uv", "tags": ["latest", "0.5.7", "0.5.8", "0.5.8-bookworm"]},
+    )
+
+
+def test_ghcr_tags_follow_link_pagination():
+    dep = Dependency(
+        "ghcr.io/astral-sh/uv", CONTAINER, "0.5.8", "0.5.8", "pinned", "Dockerfile", kind="image"
+    )
+    assert make_client(ghcr_handler).available_versions(dep) == [
+        "0.5.7",
+        "0.5.8",
+        "0.5.9",
+        "0.6.0",
+    ]
+
+
+def test_docker_registry_errors_raise():
+    def missing(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"errors": [{"code": "NAME_UNKNOWN"}]})
+
+    dep = Dependency("nope", CONTAINER, "1.0", "1.0", "constraint", "Dockerfile", kind="image")
+    with pytest.raises(RegistryError):
+        make_client(missing).available_versions(dep)
+
+    def no_token(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "auth.docker.io":
+            return httpx.Response(500)
+        return httpx.Response(
+            401,
+            headers={
+                "WWW-Authenticate": 'Bearer realm="https://auth.docker.io/token",'
+                'service="registry.docker.io",scope="repository:library/nope:pull"'
+            },
+        )
+
+    with pytest.raises(RegistryError):
+        make_client(no_token).available_versions(dep)
+
+
+def test_docker_image_without_a_version_led_tag_raises():
+    dep = Dependency("php", CONTAINER, "latest", None, "unknown", "Dockerfile", kind="image")
+    with pytest.raises(RegistryError):
+        make_client(docker_handler).available_versions(dep)
