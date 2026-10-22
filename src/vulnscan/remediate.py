@@ -36,10 +36,15 @@ from vulnscan.models import (
 )
 from vulnscan.parsers import is_requirements_file, load_ignore_file, matches_ignore
 from vulnscan.parsers.containers import (
+    DOCKER_URI_PREFIX,
     compose_images,
     dockerfile_images,
+    github_workflow_images,
+    gitlab_ci_images,
     is_compose_file,
     is_dockerfile,
+    is_github_workflow,
+    is_gitlab_ci_file,
     parse_image_reference,
     substitute_variables,
     tag_for_version,
@@ -454,6 +459,8 @@ def follow_up_hint(
     where = manifest.parent.as_posix()
     where = "" if where in ("", ".") else f" (in {where})"
     name = manifest.name.lower()
+    if dep.ecosystem == CONTAINER and (is_github_workflow(manifest) or is_gitlab_ci_file(manifest)):
+        return "Commit and push the change; the next pipeline run uses the new image."
     if dep.ecosystem == CONTAINER and is_compose_file(manifest):
         command = "docker compose pull && docker compose up -d"
     elif dep.ecosystem == CONTAINER and is_dockerfile(manifest):
@@ -942,28 +949,23 @@ def _edit_dockerfile(
     return new_text, dep.constraint, _new_tag(dep, new_version)
 
 
-def _edit_compose(
-    text: str, dep: Dependency, new_version: str, source_file: str
+def _edit_yaml_images(
+    text: str, dep: Dependency, new_version: str, source_file: str, images_fn
 ) -> tuple[str, str, str]:
-    """Rewrite every service ``image:`` naming the dependency, keeping quotes and comments."""
-    targets = set(compose_images(text))
+    """Rewrite the image references ``images_fn`` finds in a YAML file, line by line.
+
+    Only the lines the parser identified as images change, so a look-alike value
+    elsewhere (an environment variable, a script line) is left alone. Quotes and
+    comments on the line are kept.
+    """
     lines = text.splitlines(keepends=True)
     changed = False
-    for i, raw in enumerate(lines):
-        match = re.match(r"^(\s*image\s*:\s*)(.*?)(\s*)$", raw.rstrip("\r\n"))
-        if not match:
+    for written in images_fn(text):
+        number = getattr(written, "line", -1)
+        if number < 0 or number >= len(lines):
             continue
-        value = match.group(2)
-        quote = value[0] if value[:1] in ("'", '"') else ""
-        if quote:
-            close = value.find(quote, 1)
-            scalar, trailer = value[1:close], value[close + 1 :]
-        else:
-            scalar, _, comment = value.partition(" #")
-            scalar = scalar.strip()
-            trailer = value[len(scalar) :]
-        if scalar not in targets:
-            continue
+        prefix = DOCKER_URI_PREFIX if written.startswith(DOCKER_URI_PREFIX) else ""
+        scalar = written[len(prefix) :]
         # Defaults are expanded; variables without one become a placeholder so the
         # image name still parses and the missing value can be reported by name.
         ref = parse_image_reference(_IMAGE_VARIABLE.sub("unset", substitute_variables(scalar, {})))
@@ -976,12 +978,36 @@ def _edit_compose(
         )
         if replacement is None:
             continue
-        newline = raw[len(raw.rstrip("\r\n")) :]
-        lines[i] = f"{match.group(1)}{quote}{replacement}{quote}{trailer}{match.group(3)}{newline}"
+        raw = lines[number]
+        at = raw.rfind(str(written))
+        if at < 0:
+            continue
+        lines[number] = raw[:at] + prefix + replacement + raw[at + len(written) :]
         changed = True
     if not changed:
         raise RemediationError(f"{dep.name}:{dep.constraint} not found in {source_file}")
     return "".join(lines), dep.constraint, _new_tag(dep, new_version)
+
+
+def _edit_compose(
+    text: str, dep: Dependency, new_version: str, source_file: str
+) -> tuple[str, str, str]:
+    """Rewrite every service ``image:`` naming the dependency, keeping quotes and comments."""
+    return _edit_yaml_images(text, dep, new_version, source_file, compose_images)
+
+
+def _edit_github_workflow(
+    text: str, dep: Dependency, new_version: str, source_file: str
+) -> tuple[str, str, str]:
+    """Rewrite job ``container``, ``services`` and ``uses: docker://`` images."""
+    return _edit_yaml_images(text, dep, new_version, source_file, github_workflow_images)
+
+
+def _edit_gitlab_ci(
+    text: str, dep: Dependency, new_version: str, source_file: str
+) -> tuple[str, str, str]:
+    """Rewrite ``image``, ``image.name`` and ``services`` entries."""
+    return _edit_yaml_images(text, dep, new_version, source_file, gitlab_ci_images)
 
 
 def _editor_for(path: Path, dep: Dependency, source_file: str):
@@ -1000,6 +1026,10 @@ def _editor_for(path: Path, dep: Dependency, source_file: str):
         return _edit_dockerfile
     if dep.ecosystem == CONTAINER and is_compose_file(path):
         return _edit_compose
+    if dep.ecosystem == CONTAINER and is_github_workflow(path):
+        return _edit_github_workflow
+    if dep.ecosystem == CONTAINER and is_gitlab_ci_file(path):
+        return _edit_gitlab_ci
     raise RemediationError(f"Don't know how to edit {source_file}")
 
 

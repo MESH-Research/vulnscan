@@ -11,12 +11,17 @@ from pathlib import Path
 from vulnscan.models import CONTAINER, PACKAGIST, Dependency
 from vulnscan.parsers.composer import classify_composer_package, parse_composer_json
 from vulnscan.parsers.containers import (
+    CI_DIRECTORIES,
     OS_IMAGES,
     canonical_image_name,
     is_compose_file,
     is_dockerfile,
+    is_github_workflow,
+    is_gitlab_ci_file,
     parse_compose_file,
     parse_dockerfile,
+    parse_github_workflow,
+    parse_gitlab_ci,
 )
 from vulnscan.parsers.lockfiles import LockedPackage, load_lock_packages, load_lock_versions
 from vulnscan.parsers.node import parse_package_json
@@ -106,6 +111,10 @@ def _parser_for(path: Path) -> Parser | None:
         return parse_dockerfile
     if is_compose_file(path):
         return parse_compose_file
+    if is_github_workflow(path):
+        return parse_github_workflow
+    if is_gitlab_ci_file(path):
+        return parse_gitlab_ci
     return None
 
 
@@ -165,12 +174,18 @@ def is_manifest(path: Path) -> bool:
     return _parser_for(path) is not None
 
 
+def _is_ci_directory(rel_path: str) -> bool:
+    """Whether a project-relative hidden directory leads to CI configuration."""
+    return any(ci == rel_path or ci.startswith(rel_path + "/") for ci in CI_DIRECTORIES)
+
+
 def discover_manifests(root: Path, ignore_dirs: tuple[str, ...] = ()) -> list[Path]:
     """Find every manifest under ``root``, walking directories and file names in sorted order.
 
-    Skipped: VCS, virtualenv, build and vendor directories, hidden directories,
-    WordPress core, directories Composer installs into, and any directory matching
-    ``ignore_dirs`` or ``<root>/.vulnscanignore``. A file ``root`` yields ``[root]`` when
+    Skipped: VCS, virtualenv, build and vendor directories, hidden directories (except
+    the CI configuration directories ``.github/workflows`` and ``.gitlab/ci``), WordPress
+    core, directories Composer installs into, and any directory matching ``ignore_dirs``
+    or ``<root>/.vulnscanignore``. A file ``root`` yields ``[root]`` when
     it is itself a manifest, otherwise an empty list.
     """
     if root.is_file():
@@ -188,11 +203,12 @@ def discover_manifests(root: Path, ignore_dirs: tuple[str, ...] = ()) -> list[Pa
         except ValueError:
             prefix = ""
         prefix = "" if prefix in ("", ".") else prefix + "/"
+        inside_hidden = prefix.startswith(".")
         dirnames[:] = sorted(
             d
             for d in dirnames
             if d not in ignored_names
-            and not d.startswith(".")
+            and ((not d.startswith(".") and not inside_hidden) or _is_ci_directory(prefix + d))
             and (here / d).resolve() not in ignored_paths
             and not matches_ignore(prefix + d, patterns)
         )

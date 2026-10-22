@@ -6,10 +6,16 @@ from vulnscan.models import CONTAINER, Declaration, Dependency
 from vulnscan.parsers import discover_manifests, is_manifest, parse_manifest, parse_project
 from vulnscan.parsers.containers import (
     ImageReference,
+    github_workflow_images,
+    gitlab_ci_images,
     is_compose_file,
     is_dockerfile,
+    is_github_workflow,
+    is_gitlab_ci_file,
     parse_compose_file,
     parse_dockerfile,
+    parse_github_workflow,
+    parse_gitlab_ci,
     parse_image_reference,
     registry_and_repository,
     tag_for_version,
@@ -413,3 +419,181 @@ def test_image_declarations_format_like_other_manifests():
     )
     assert dep.declared_in_text == "Dockerfile as 8.2-fpm; deploy/docker-compose.yml as 8.2-fpm"
     assert dep.key == ("Docker", "php")
+
+
+# --- GitHub Actions workflows ----------------------------------------------------------------
+
+
+def test_is_github_workflow(tmp_path: Path):
+    workflows = tmp_path / ".github" / "workflows"
+    assert is_github_workflow(workflows / "ci.yml")
+    assert is_github_workflow(workflows / "release.yaml")
+    assert is_manifest(workflows / "ci.yml")
+    assert not is_github_workflow(workflows / "README.md")
+    assert not is_github_workflow(tmp_path / ".github" / "dependabot.yml")
+    assert not is_github_workflow(tmp_path / "workflows" / "ci.yml")
+    assert not is_manifest(tmp_path / "ci.yml")
+
+
+def test_github_workflow_images_from_containers_services_and_docker_uses():
+    text = (
+        "name: CI\n"
+        "on: [push]\n"
+        "jobs:\n"
+        "  test:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    container: php:8.2.19-cli\n"
+        "    services:\n"
+        "      postgres:\n"
+        "        image: postgres:16.2\n"
+        "        env:\n"
+        "          image: not-an-image:1\n"
+        "      redis: redis:7.2.4\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - uses: docker://alpine:3.19\n"
+        "        with:\n"
+        "          args: echo\n"
+        "      - run: docker run nginx:1.25\n"
+        "  build:\n"
+        "    container:\n"
+        "      image: ghcr.io/astral-sh/uv:0.5.9\n"
+        "      options: --user root\n"
+        "  expr:\n"
+        "    container: ${{ matrix.image }}\n"
+    )
+    assert github_workflow_images(text) == [
+        "php:8.2.19-cli",
+        "postgres:16.2",
+        "redis:7.2.4",
+        "docker://alpine:3.19",
+        "ghcr.io/astral-sh/uv:0.5.9",
+        "${{ matrix.image }}",
+    ]
+
+
+def test_parse_github_workflow(tmp_path: Path):
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "jobs:\n"
+        "  test:\n"
+        "    container: php:8.2.19-cli\n"
+        "    services:\n"
+        "      db: postgres:16.2\n"
+        "    steps:\n"
+        "      - uses: docker://alpine:3.19\n"
+        "  expr:\n"
+        "    container: ${{ matrix.image }}\n"
+    )
+    deps = parse_github_workflow(workflows / "ci.yml", tmp_path)
+    assert dep_tuples(deps) == [
+        ("php", "8.2.19-cli", "8.2.19", "pinned"),
+        ("postgres", "16.2", "16.2", "constraint"),
+        ("alpine", "3.19", "3.19", "constraint"),
+    ]
+    assert all(d.ecosystem == CONTAINER and d.kind == "image" for d in deps)
+    assert deps[0].source_file == ".github/workflows/ci.yml"
+    assert parse_github_workflow(workflows / "missing.yml", tmp_path) == []
+
+
+# --- GitLab CI -------------------------------------------------------------------------------
+
+
+def test_is_gitlab_ci_file(tmp_path: Path):
+    assert is_gitlab_ci_file(tmp_path / ".gitlab-ci.yml")
+    assert is_gitlab_ci_file(tmp_path / "deploy.gitlab-ci.yml")
+    assert is_gitlab_ci_file(tmp_path / ".gitlab" / "ci" / "test.yml")
+    assert is_gitlab_ci_file(tmp_path / ".gitlab" / "ci" / "build.yaml")
+    assert is_manifest(tmp_path / ".gitlab-ci.yml")
+    assert not is_gitlab_ci_file(tmp_path / ".gitlab" / "issue_templates" / "bug.yml")
+    assert not is_gitlab_ci_file(tmp_path / "ci.yml")
+
+
+def test_gitlab_ci_images_from_jobs_default_and_services():
+    text = (
+        "image: php:8.2.19-cli\n"
+        "stages: [test, deploy]\n"
+        "variables:\n"
+        "  POSTGRES_TAG: '16.2'\n"
+        "default:\n"
+        "  image:\n"
+        "    name: ruby:3.3.1\n"
+        "    entrypoint: ['']\n"
+        "  services:\n"
+        "    - redis:7.2.4\n"
+        "test:\n"
+        "  image: node:20.12.2\n"
+        "  services:\n"
+        "    - name: postgres:$POSTGRES_TAG\n"
+        "      alias: db\n"
+        "    - mysql:8.0.36\n"
+        "  script:\n"
+        "    - npm test\n"
+        "deploy:\n"
+        "  stage: deploy\n"
+        "  script:\n"
+        "    - docker run nginx:1.25\n"
+        ".hidden:\n"
+        "  image: hidden:1.0\n"
+        "workflow:\n"
+        "  rules:\n"
+        "    - if: $CI_COMMIT_BRANCH\n"
+    )
+    assert gitlab_ci_images(text) == [
+        "php:8.2.19-cli",
+        "ruby:3.3.1",
+        "redis:7.2.4",
+        "node:20.12.2",
+        "postgres:$POSTGRES_TAG",
+        "mysql:8.0.36",
+        "hidden:1.0",
+    ]
+
+
+def test_parse_gitlab_ci_substitutes_variables(tmp_path: Path):
+    (tmp_path / ".gitlab-ci.yml").write_text(
+        "variables:\n"
+        "  POSTGRES_TAG: '16.2'\n"
+        "  REGISTRY: ghcr.io\n"
+        "image: ${REGISTRY}/org/app:1.0.0\n"
+        "test:\n"
+        "  services:\n"
+        "    - postgres:$POSTGRES_TAG\n"
+        "    - thing:$UNSET_TAG\n"
+        "    - $CI_REGISTRY_IMAGE:latest\n"
+    )
+    deps = parse_gitlab_ci(tmp_path / ".gitlab-ci.yml", tmp_path)
+    assert dep_tuples(deps) == [
+        ("ghcr.io/org/app", "1.0.0", "1.0.0", "pinned"),
+        ("postgres", "16.2", "16.2", "constraint"),
+    ]
+    assert deps[0].source_file == ".gitlab-ci.yml"
+    assert parse_gitlab_ci(tmp_path / "missing.yml", tmp_path) == []
+
+
+def test_discover_manifests_enters_ci_directories_only(tmp_path: Path):
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    (tmp_path / ".github" / "workflows" / "ci.yml").write_text("jobs: {}\n")
+    (tmp_path / ".github" / "actions" / "x").mkdir(parents=True)
+    (tmp_path / ".github" / "actions" / "x" / "package.json").write_text("{}")
+    (tmp_path / ".github" / "dependabot.yml").write_text("version: 2\n")
+    (tmp_path / ".gitlab" / "ci").mkdir(parents=True)
+    (tmp_path / ".gitlab" / "ci" / "test.yml").write_text("test:\n  image: php:8.2\n")
+    (tmp_path / ".gitlab-ci.yml").write_text("image: php:8.2\n")
+    (tmp_path / ".circleci").mkdir()
+    (tmp_path / ".circleci" / "config.yml").write_text("")
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / "Dockerfile").write_text("FROM php:8.2\n")
+    found = sorted(p.relative_to(tmp_path).as_posix() for p in discover_manifests(tmp_path))
+    assert found == [".github/workflows/ci.yml", ".gitlab-ci.yml", ".gitlab/ci/test.yml"]
+
+
+def test_parse_project_merges_an_image_across_build_and_ci_files(tmp_path: Path):
+    (tmp_path / "Dockerfile").write_text("FROM php:8.2.19-cli\n")
+    (tmp_path / ".gitlab-ci.yml").write_text("image: php:8.2.19-cli\n")
+    deps, _warnings = parse_project(tmp_path)
+    assert [(d.name, d.source_file) for d in deps] == [
+        ("php", ".gitlab-ci.yml"),
+        ("php", "Dockerfile"),
+    ]

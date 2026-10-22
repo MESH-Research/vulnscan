@@ -106,7 +106,7 @@ Or list patterns in a `.vulnscanignore` file in the project root. See
 | PHP (Packagist) | `composer.json` | `composer.lock` |
 | WordPress | `composer.json` entries for `wp-plugin/*`, `wp-theme/*`, `wpackagist-plugin/*`, `wpackagist-theme/*`, `roots/wordpress`, `johnpbloch/wordpress`, and any package the lock file types as `wordpress-plugin`, `wordpress-muplugin`, `wordpress-theme` or `wordpress-core` | `composer.lock` |
 | Node.js (npm) | `package.json` (`dependencies`, `optionalDependencies`, `devDependencies`; `npm:` aliases followed; git, path, tarball and workspace specs skipped; `peerDependencies` ignored) | `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock` (classic and Berry), `pnpm-lock.yaml` (root importer) |
-| Container images (Docker) | `Dockerfile`, `Containerfile`, `Dockerfile.<x>`, `<x>.Dockerfile` (every `FROM`, with `ARG` defaults substituted; build-stage references and `scratch` skipped); `docker-compose*.yml`/`.yaml` and `compose*.yml`/`.yaml` (every service `image:`, with `${VAR:-default}` and a `.env` beside the file resolved) | none: the version is the image tag |
+| Container images (Docker) | `Dockerfile`, `Containerfile`, `Dockerfile.<x>`, `<x>.Dockerfile` (every `FROM`, with `ARG` defaults substituted; build-stage references and `scratch` skipped); `docker-compose*.yml`/`.yaml` and `compose*.yml`/`.yaml` (every service `image:`, with `${VAR:-default}` and a `.env` beside the file resolved); `.github/workflows/*.yml` (job `container:`, `services:` and `uses: docker://` steps; `${{ }}` expressions skipped); `.gitlab-ci.yml`, `*.gitlab-ci.yml` and `.gitlab/ci/*.yml` (top-level, `default:` and job `image:` and `services:`, with `$VAR` resolved from the file's `variables:`) | none: the version is the image tag |
 
 Lock files resolve the versions of direct dependencies; for `yarn.lock`, a
 package that appears at several versions is taken at the first one listed.
@@ -115,8 +115,11 @@ With `--transitive` the other packages they record are scanned too.
 ## Container images
 
 A container image is a dependency like any other: `FROM php:8.2.19-fpm-bookworm`
-is PHP 8.2.19 declared in `Dockerfile`, and `image: traefik:v2.10` in a Compose
-file is Traefik 2.10. The tag supplies the version: a full `major.minor.patch`
+is PHP 8.2.19 declared in `Dockerfile`, `image: traefik:v2.10` in a Compose
+file is Traefik 2.10, and `container: php:8.2.19-cli` in a GitHub Actions job
+or `image: php:8.2.19-cli` in `.gitlab-ci.yml` is the PHP your tests run on.
+The same image at the same tag in several of these files is one finding that
+lists every file. The tag supplies the version: a full `major.minor.patch`
 counts as pinned, a shorter series such as `8.2` or `v2.10` as a floating
 constraint whose lower bound is checked (so advisories against any `8.2.x` are
 reported until you pin a patched tag), and a tag with no number (`latest`,

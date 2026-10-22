@@ -71,8 +71,11 @@ candidates are the other `*-fpm-bookworm` tags, so the upgrade is
 | `ARG PHP_VERSION=8.2.19` + `FROM php:${PHP_VERSION}-fpm` | `ARG PHP_VERSION=8.2.20` |
 | `image: traefik:${TRAEFIK_TAG:-v2.10.7}` | `image: traefik:${TRAEFIK_TAG:-v2.11.3}` |
 
-Every `FROM` and every service `image:` naming that image at that tag is
-rewritten, across all the Dockerfiles and Compose files that declare it. A tag
+Every `FROM`, service `image:`, GitHub Actions `container:`/`services:`/
+`uses: docker://` and GitLab CI `image:`/`services:` entry naming that image at
+that tag is rewritten, across all the files that declare it. In YAML files
+only the lines the parser identified as images change, so a look-alike value
+in an environment variable or a script line is left alone. A tag
 that comes from a variable with no default in the file (`${TRAEFIK_TAG}` set
 only in `.env` or the environment) is left alone and the error names the
 variable, so you can change it where it is defined.
@@ -87,7 +90,8 @@ tells you the command to run next for each manifest, such as
 pipenv sync`, `pip install -e .` for a `setup.cfg`, or `pip install -r
 base.txt` (with the directory to run it in when the manifest is not at the
 project root). For a Dockerfile it asks you to rebuild the image; for a
-Compose file, to run `docker compose pull && docker compose up -d`.
+Compose file, to run `docker compose pull && docker compose up -d`; for a CI
+configuration, to commit and push.
 Press `r` afterwards to rescan.
 
 In the TUI the dependency's row and its advisories turn green with a ✔

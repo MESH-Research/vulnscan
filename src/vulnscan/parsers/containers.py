@@ -16,6 +16,7 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from vulnscan.models import CONTAINER, Dependency
+from vulnscan.parsers.yamlish import load_yamlish
 
 DOCKER_HUB_REGISTRY = "registry-1.docker.io"
 
@@ -306,7 +307,6 @@ def parse_dockerfile(path: Path, root: Path) -> list[Dependency]:
 # --- Compose -----------------------------------------------------------------------------------
 
 _COMPOSE_NAMES = re.compile(r"^(docker-compose|compose)(\.[^.]+)*\.ya?ml$", re.IGNORECASE)
-_COMPOSE_IMAGE = re.compile(r"^(\s*)image\s*:\s*(.*)$")
 
 
 def is_compose_file(path: Path) -> bool:
@@ -314,51 +314,31 @@ def is_compose_file(path: Path) -> bool:
     return bool(_COMPOSE_NAMES.match(path.name))
 
 
-def _strip_yaml_scalar(value: str) -> str:
-    text = value.strip()
-    if text[:1] in ("'", '"') and text.count(text[0]) >= 2:
-        return text[1 : text.index(text[0], 1)]
-    return text.split(" #", 1)[0].strip() if " #" in text else text
-
-
-def _indent(line: str) -> int:
-    return len(line) - len(line.lstrip(" \t"))
+def _image_value(spec: object, key: str = "image") -> str | None:
+    """A written image reference from a scalar or a mapping holding it under ``key``."""
+    if isinstance(spec, str):
+        return spec or None
+    if isinstance(spec, dict) and isinstance(spec.get(key), str):
+        return spec[key] or None
+    return None
 
 
 def compose_images(text: str) -> list[str]:
     """The ``image:`` value of every service, as written, in file order.
 
-    Only keys directly under a service are read, so an ``image`` key nested in a
-    service's ``environment`` block is ignored. The file is scanned by indentation
-    rather than parsed as YAML.
+    Only the ``image`` key directly under a service is read, so an ``image`` key nested
+    in a service's ``environment`` block is ignored.
     """
+    data = load_yamlish(text)
+    services = data.get("services") if isinstance(data, dict) else None
+    if not isinstance(services, dict):
+        return []
     images: list[str] = []
-    in_services = False
-    service_indent: int | None = None
-    child_indent: int | None = None
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        indent = _indent(raw)
-        if indent == 0:
-            in_services = bool(re.match(r"^services\s*:\s*$", stripped))
-            service_indent = child_indent = None
-            continue
-        if not in_services:
-            continue
-        if service_indent is None or indent <= service_indent:
-            service_indent, child_indent = indent, None
-            continue
-        if child_indent is None:
-            child_indent = indent
-        if indent != child_indent:
-            continue
-        match = _COMPOSE_IMAGE.match(raw)
-        if match:
-            value = _strip_yaml_scalar(match.group(2))
-            if value:
-                images.append(value)
+    for service in services.values():
+        if isinstance(service, dict):
+            image = _image_value(service.get("image"))
+            if image:
+                images.append(image)
     return images
 
 
@@ -372,6 +352,18 @@ def _compose_environment(path: Path) -> dict[str, str]:
         return {}
 
 
+def _parse_written_images(
+    path: Path, root: Path, images: list[str], values: Mapping[str, str]
+) -> list[Dependency]:
+    deps: list[Dependency] = []
+    source_file = _relative(path, root)
+    for raw in images:
+        ref = parse_image_reference(substitute_variables(raw, values))
+        if ref is not None:
+            deps.append(_dependency(ref, source_file))
+    return deps
+
+
 def parse_compose_file(path: Path, root: Path) -> list[Dependency]:
     """One dependency per ``image:`` a Compose file's services run.
 
@@ -383,11 +375,153 @@ def parse_compose_file(path: Path, root: Path) -> list[Dependency]:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
-    values = _compose_environment(path)
-    source_file = _relative(path, root)
-    deps: list[Dependency] = []
-    for raw in compose_images(text):
-        ref = parse_image_reference(substitute_variables(raw, values))
-        if ref is not None:
-            deps.append(_dependency(ref, source_file))
-    return deps
+    return _parse_written_images(path, root, compose_images(text), _compose_environment(path))
+
+
+# --- CI configuration ----------------------------------------------------------------------
+
+GITHUB_WORKFLOWS_DIR = ".github/workflows"
+GITLAB_CI_DIR = ".gitlab/ci"
+CI_DIRECTORIES = (GITHUB_WORKFLOWS_DIR, GITLAB_CI_DIR)
+"""Dot-directories that discovery enters, although hidden directories are otherwise skipped."""
+
+DOCKER_URI_PREFIX = "docker://"
+_GITLAB_RESERVED = {
+    "default",
+    "include",
+    "stages",
+    "variables",
+    "workflow",
+    "cache",
+    "before_script",
+    "after_script",
+    "image",
+    "services",
+    "pages",
+    "spec",
+}
+
+
+def _is_yaml(path: Path) -> bool:
+    return path.name.lower().endswith((".yml", ".yaml"))
+
+
+def is_github_workflow(path: Path) -> bool:
+    """A ``.yml``/``.yaml`` file inside a ``.github/workflows`` directory."""
+    parts = path.parts
+    return (
+        _is_yaml(path)
+        and len(parts) >= 3
+        and parts[-3].lower() == ".github"
+        and parts[-2].lower() == "workflows"
+    )
+
+
+def is_gitlab_ci_file(path: Path) -> bool:
+    """``.gitlab-ci.yml``, ``<x>.gitlab-ci.yml`` or a ``.yml`` inside ``.gitlab/ci``."""
+    lowered = path.name.lower()
+    if lowered == ".gitlab-ci.yml" or lowered.endswith((".gitlab-ci.yml", ".gitlab-ci.yaml")):
+        return True
+    parts = path.parts
+    return (
+        _is_yaml(path)
+        and len(parts) >= 3
+        and parts[-3].lower() == ".gitlab"
+        and parts[-2].lower() == "ci"
+    )
+
+
+def github_workflow_images(text: str) -> list[str]:
+    """Job ``container`` and ``services`` images and ``uses: docker://`` steps, as written."""
+    data = load_yamlish(text)
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    if not isinstance(jobs, dict):
+        return []
+    images: list[str] = []
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        container = _image_value(job.get("container"))
+        if container:
+            images.append(container)
+        services = job.get("services")
+        if isinstance(services, dict):
+            for service in services.values():
+                image = _image_value(service)
+                if image:
+                    images.append(image)
+        steps = job.get("steps")
+        for step in steps if isinstance(steps, list) else []:
+            uses = step.get("uses") if isinstance(step, dict) else None
+            if isinstance(uses, str) and uses.startswith(DOCKER_URI_PREFIX):
+                images.append(uses)
+    return images
+
+
+def _gitlab_section_images(section: dict) -> list[str]:
+    images: list[str] = []
+    image = _image_value(section.get("image"), key="name")
+    if image:
+        images.append(image)
+    services = section.get("services")
+    for service in services if isinstance(services, list) else []:
+        entry = _image_value(service, key="name")
+        if entry:
+            images.append(entry)
+    return images
+
+
+def gitlab_ci_images(text: str) -> list[str]:
+    """Top-level, ``default`` and per-job ``image`` and ``services`` entries, as written."""
+    data = load_yamlish(text)
+    if not isinstance(data, dict):
+        return []
+    images = _gitlab_section_images(data)
+    default = data.get("default")
+    if isinstance(default, dict):
+        images.extend(_gitlab_section_images(default))
+    for key, job in data.items():
+        if key in _GITLAB_RESERVED or not isinstance(job, dict):
+            continue
+        images.extend(_gitlab_section_images(job))
+    return images
+
+
+def _gitlab_variables(text: str) -> dict[str, str]:
+    data = load_yamlish(text)
+    variables = data.get("variables") if isinstance(data, dict) else None
+    if not isinstance(variables, dict):
+        return {}
+    values: dict[str, str] = {}
+    for name, value in variables.items():
+        if isinstance(value, str):
+            values[name] = value
+        elif isinstance(value, dict) and isinstance(value.get("value"), str):
+            values[name] = value["value"]
+    return values
+
+
+def parse_github_workflow(path: Path, root: Path) -> list[Dependency]:
+    """One dependency per container image a GitHub Actions workflow runs jobs or services in.
+
+    ``${{ }}`` expressions cannot be resolved, so images given that way are skipped.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    images = [i.removeprefix(DOCKER_URI_PREFIX) for i in github_workflow_images(text)]
+    return _parse_written_images(path, root, images, {})
+
+
+def parse_gitlab_ci(path: Path, root: Path) -> list[Dependency]:
+    """One dependency per image a GitLab CI configuration runs jobs or services in.
+
+    ``$VAR`` references are resolved from the file's own ``variables:`` block; anything
+    else (predefined ``$CI_*`` variables, project settings) stays unresolved and is skipped.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    return _parse_written_images(path, root, gitlab_ci_images(text), _gitlab_variables(text))

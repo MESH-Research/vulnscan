@@ -991,3 +991,76 @@ def test_follow_up_hint_for_container_files(tmp_path: Path):
     c = image("traefik", "v2.10.7", "2.10.7", "deploy/docker-compose.yml")
     hint = follow_up_hint(tmp_path, c)
     assert "docker compose" in hint and "pull" in hint
+
+
+def test_apply_to_github_workflow_rewrites_container_services_and_docker_uses(tmp_path: Path):
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    original = (
+        "jobs:\n"
+        "  test:\n"
+        "    container: php:8.2.19-cli\n"
+        "    services:\n"
+        "      db:\n"
+        "        image: 'php:8.2.19-cli'\n"
+        "      other: php:8.2.19-cli  # same image\n"
+        "    steps:\n"
+        "      - uses: docker://php:8.2.19-cli\n"
+        "      - run: echo php:8.2.19-cli\n"
+        "    env:\n"
+        "      NOTE: php:8.2.19-cli\n"
+    )
+    (workflows / "ci.yml").write_text(original)
+    result = apply_remediation(
+        tmp_path, image("php", "8.2.19-cli", "8.2.19", ".github/workflows/ci.yml"), "8.2.20"
+    )
+    expected = original.replace("php:8.2.19-cli", "php:8.2.20-cli")
+    expected = expected.replace("run: echo php:8.2.20-cli", "run: echo php:8.2.19-cli")
+    expected = expected.replace("NOTE: php:8.2.20-cli", "NOTE: php:8.2.19-cli")
+    assert (workflows / "ci.yml").read_text() == expected
+    assert result.new_constraint == "8.2.20-cli"
+    assert "commit" in result.hint.lower()
+
+
+def test_apply_to_gitlab_ci_rewrites_image_name_and_service_entries(tmp_path: Path):
+    original = (
+        "image: php:8.2.19-cli\n"
+        "default:\n"
+        "  image:\n"
+        "    name: php:8.2.19-cli\n"
+        "    entrypoint: ['']\n"
+        "test:\n"
+        "  services:\n"
+        "    - php:8.2.19-cli\n"
+        '    - name: "php:8.2.19-cli"\n'
+        "      alias: db\n"
+        "  script:\n"
+        "    - docker run php:8.2.19-cli\n"
+    )
+    (tmp_path / ".gitlab-ci.yml").write_text(original)
+    result = apply_remediation(
+        tmp_path, image("php", "8.2.19-cli", "8.2.19", ".gitlab-ci.yml"), "8.2.20"
+    )
+    expected = original.replace("php:8.2.19-cli", "php:8.2.20-cli").replace(
+        "docker run php:8.2.20-cli", "docker run php:8.2.19-cli"
+    )
+    assert (tmp_path / ".gitlab-ci.yml").read_text() == expected
+    assert result.new_constraint == "8.2.20-cli"
+    assert "commit" in result.hint.lower()
+
+
+def test_apply_to_gitlab_ci_variable_tag_raises_naming_the_variable(tmp_path: Path):
+    (tmp_path / ".gitlab-ci.yml").write_text(
+        "variables:\n  PHP_TAG: 8.2.19-cli\nimage: php:$PHP_TAG\n"
+    )
+    with pytest.raises(RemediationError) as info:
+        apply_remediation(
+            tmp_path, image("php", "8.2.19-cli", "8.2.19", ".gitlab-ci.yml"), "8.2.20"
+        )
+    assert "PHP_TAG" in str(info.value)
+
+
+def test_apply_to_ci_file_missing_image_raises(tmp_path: Path):
+    (tmp_path / ".gitlab-ci.yml").write_text("image: nginx:1.25.4\n")
+    with pytest.raises(RemediationError):
+        apply_remediation(tmp_path, image("php", "8.2.19", "8.2.19", ".gitlab-ci.yml"), "8.2.20")

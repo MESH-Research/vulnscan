@@ -37,7 +37,8 @@ channel the first time a new advisory appears.
   with `-r` includes; `Pipfile`; `setup.cfg`; Invenio `webpack.py` theme
   bundles; `Dockerfile` / `Containerfile` (every `FROM`, with `ARG` defaults
   substituted); `docker-compose*.yml` and `compose*.yml` (every service
-  `image:`). Installed versions come from `composer.lock`, `package-lock.json`,
+  `image:`); GitHub Actions workflows (`container:`, `services:`,
+  `uses: docker://`); GitLab CI (`image:`, `services:`, `default:`). Installed versions come from `composer.lock`, `package-lock.json`,
   `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `uv.lock`, `poetry.lock`
   and `Pipfile.lock`; image versions come from the tag.
 - **Interfaces:** an interactive terminal UI; non-interactive modes for cron; a
@@ -320,15 +321,18 @@ requires.
 
 ### Container images
 
-Every `FROM` in a Dockerfile and every service `image:` in a Compose file is a
+Every `FROM` in a Dockerfile, every service `image:` in a Compose file, every
+job `container:`, service and `uses: docker://` step in a GitHub Actions
+workflow, and every `image:` and `services:` entry in a GitLab CI file is a
 dependency in the **Docker** ecosystem, named after the image (`php`,
 `traefik`, `ghcr.io/astral-sh/uv`) with the tag as its constraint. The version
 is read from the tag: `8.2.19-fpm-bookworm` is PHP 8.2.19 (pinned), `v2.10`
 is Traefik 2.10 (a floating series, treated like a `>=2.10.0` constraint), and
 `latest` or `bookworm-slim` names no version, so the image is listed with a
 warning asking you to pin a tag. `ARG` defaults in Dockerfiles and `${VAR:-default}`
-interpolation in Compose files (plus a `.env` beside the file) are resolved;
-references to earlier build stages and `scratch` are skipped.
+interpolation in Compose files (plus a `.env` beside the file) and `$VAR`
+references to a GitLab `variables:` block are resolved; references to earlier
+build stages, `scratch` and GitHub `${{ }}` expressions are skipped.
 
 Advisories come from the NVD, which records CVEs against the software a tag
 names (PHP, Traefik, nginx, Postgres, MySQL, Redis, Node, Python, Grafana,
@@ -339,8 +343,8 @@ CPE vendor and product names NVD uses. Plain operating-system bases (`debian`,
 `alpine`, `ubuntu`) are listed but never queried, since their tags name a
 distribution release rather than a piece of software.
 
-Upgrading an image rewrites the tag in every Dockerfile and Compose file that
-declares it, keeping the variant suffix (`8.2.19-fpm-bookworm` becomes
+Upgrading an image rewrites the tag in every Dockerfile, Compose file and CI
+configuration that declares it, keeping the variant suffix (`8.2.19-fpm-bookworm` becomes
 `8.2.20-fpm-bookworm`) and editing the `ARG` or `${VAR:-default}` the tag came
 from when it was not written literally. A `@sha256:` digest on the rewritten
 reference is dropped. Candidate versions are the tags on the image's registry

@@ -30,10 +30,16 @@ ignore patterns. Each manifest goes to the parser registered for its name
 in `parsers/__init__.py`; parsers return `Dependency` records with the
 constraint as written and no version yet.
 
-Dockerfiles and Compose files are parsed by `parsers/containers.py`: every
-`FROM` and service `image:` becomes a dependency in the `Docker` ecosystem
-whose constraint is the tag and whose version is read from it, with `ARG`
-defaults, `${VAR:-default}` interpolation and an adjacent `.env` resolved.
+Dockerfiles, Compose files, GitHub Actions workflows and GitLab CI files are
+parsed by `parsers/containers.py`: every `FROM`, service `image:`, job
+`container:` and CI `services:` entry becomes a dependency in the `Docker`
+ecosystem whose constraint is the tag and whose version is read from it,
+with `ARG` defaults, `${VAR:-default}` interpolation, an adjacent `.env` and
+GitLab `variables:` resolved. The YAML files are read by `parsers/yamlish.py`,
+a small block-style reader whose string values remember their line, which is
+what lets remediation rewrite exactly the lines that hold images. Discovery
+enters `.github/workflows` and `.gitlab/ci` although other hidden directories
+are skipped.
 
 `resolve_dependency` then fills in the version from, in order of
 preference, a lock file in the same directory (`composer.lock`,
