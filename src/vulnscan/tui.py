@@ -11,6 +11,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Header, Label, Markdown, OptionList, Static
@@ -614,7 +615,12 @@ class VulnScanApp(App[None]):
             snapshot = list(self._transfers.values())
             requests, received = self._session_requests, self._session_bytes
         text = render_activity(snapshot, now, session_requests=requests, session_bytes=received)
-        panel = self.query_one("#activity", Static)
+        try:
+            panel = self.query_one("#activity", Static)
+        except NoMatches:
+            # The interval timer can fire once more while the app is shutting down and
+            # the screen has already been torn down; there is nothing left to paint.
+            return
         if text:
             panel.update(text)
             panel.display = True
