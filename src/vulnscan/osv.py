@@ -11,6 +11,9 @@ import httpx
 
 from vulnscan import __version__, debuglog
 from vulnscan.models import (
+    NPM,
+    PACKAGIST,
+    PYPI,
     Dependency,
     VersionRange,
     Vulnerability,
@@ -22,6 +25,8 @@ from vulnscan.models import (
 from vulnscan.parsers.versions import normalize_version
 
 BATCH_SIZE = 1000
+OSV_ECOSYSTEMS = frozenset({PYPI, NPM, PACKAGIST})
+"""Ecosystems vulnscan asks OSV about. WordPress goes to Wordfence, images to the NVD."""
 
 log = logging.getLogger("vulnscan.osv")
 
@@ -265,8 +270,20 @@ class OSVClient:
     def find_vulnerabilities(
         self, deps: Iterable[Dependency], include_unknown_versions: bool = False
     ) -> dict[Dependency, list[Vulnerability]]:
-        """Map each affected dependency to its (deduplicated) advisories."""
-        queryable = [d for d in deps if d.version or include_unknown_versions]
+        """Map each affected dependency to its (deduplicated) advisories.
+
+        Dependencies in ecosystems OSV does not index (container images, WordPress)
+        are left out rather than sent, because OSV rejects the whole batch otherwise.
+        """
+        wanted = [d for d in deps if d.version or include_unknown_versions]
+        skipped = [d for d in wanted if d.ecosystem not in OSV_ECOSYSTEMS]
+        if skipped:
+            log.info(
+                "OSV: not asking about %d packages in ecosystems it does not index (%s)",
+                len(skipped),
+                ", ".join(sorted({d.ecosystem for d in skipped})),
+            )
+        queryable = [d for d in wanted if d.ecosystem in OSV_ECOSYSTEMS]
         if not queryable:
             log.info("OSV: nothing to query")
             return {}

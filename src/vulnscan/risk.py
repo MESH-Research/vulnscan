@@ -16,7 +16,7 @@ from vulnscan.models import (
     normalize_name,
     normalize_severity,
 )
-from vulnscan.osv import OSVClient
+from vulnscan.osv import OSV_ECOSYSTEMS, OSVClient
 from vulnscan.registry import RegistryClient, RegistryError, ReleaseInfo
 
 
@@ -104,7 +104,10 @@ def score_versions(
     """Score each dependency's exact ``version`` for advisory/malware/fresh/yanked risks.
 
     Dependencies without a version are skipped. Registry lookup failures omit freshness
-    and yank signals for that package (OSV advisories are still queried).
+    and yank signals for that package (OSV advisories are still queried). Only
+    ecosystems OSV indexes are asked about advisories; container images and WordPress
+    packages are scored from registry metadata alone here, their advisory sources being
+    the NVD and Wordfence.
 
     Args:
         deps: Dependencies with exact versions to score.
@@ -133,7 +136,8 @@ def score_versions(
             unique[key] = replace(dep, version=dep.version)
 
     stubs = list(unique.values())
-    found = osv.find_vulnerabilities(stubs, include_unknown_versions=False)
+    osv_stubs = [s for s in stubs if s.ecosystem in OSV_ECOSYSTEMS]
+    found = osv.find_vulnerabilities(osv_stubs, include_unknown_versions=False) if osv_stubs else {}
 
     release_cache: dict[tuple[str, str], dict[str, ReleaseInfo] | None] = {}
 

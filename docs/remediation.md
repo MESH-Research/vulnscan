@@ -28,9 +28,13 @@ and the upgrade dialog carry a `Warning:` line, and `--remediate` prints
 `warning: … was published within the freshness window`. Waiting a day before
 taking a brand-new release is the cheapest defence against a hijacked
 package. WordPress candidates are checked against Wordfence for advisories
-only, since wordpress.org publishes no release times. If the registry cannot
-be reached the scan warns `could not list versions for forward-check` and
-the plan is built from the advisory ranges alone.
+only, since wordpress.org publishes no release times. Container image
+candidates are checked against the NVD, which answers one version per
+rate-limited request, so only the nearest candidate and the latest tag are
+checked there. OSV is asked only about the ecosystems it indexes (PyPI, npm,
+Packagist). If the registry cannot be reached the scan warns `could not list
+versions for forward-check` and the plan is built from the advisory ranges
+alone.
 
 The same scoring drives `--preflight`, which applies it to everything a fresh
 resolve would install; see

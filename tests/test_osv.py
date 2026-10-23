@@ -362,3 +362,37 @@ def test_parse_osv_vulnerability_records_affected_ranges_and_versions():
     assert vuln.affects("2.31.0", PYPI) is False
     assert vuln.affects("3.0.5", PYPI) is True
     assert vuln.affects("3.0.6", PYPI) is False
+
+
+def _image(version="8.2.19") -> Dependency:
+    from vulnscan.models import CONTAINER
+
+    return Dependency("php", CONTAINER, version, version, "pinned", "Dockerfile", kind="image")
+
+
+def _plugin() -> Dependency:
+    from vulnscan.models import WORDPRESS
+
+    return Dependency(
+        "wp-plugin/x", WORDPRESS, "1.0", "1.0", "lock", "composer.json", kind="plugin", slug="x"
+    )
+
+
+def test_find_vulnerabilities_only_asks_osv_about_ecosystems_it_indexes():
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.extend(q["package"]["ecosystem"] for q in body["queries"])
+        return httpx.Response(200, json={"results": [{} for _ in body["queries"]]})
+
+    found = make_client(handler).find_vulnerabilities([_image(), dep(), _plugin()])
+    assert sent == ["PyPI"]
+    assert _image() not in found and _plugin() not in found
+
+
+def test_find_vulnerabilities_makes_no_request_when_nothing_is_indexed_by_osv():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("OSV must not be contacted for container images")
+
+    assert make_client(handler).find_vulnerabilities([_image()]) == {}

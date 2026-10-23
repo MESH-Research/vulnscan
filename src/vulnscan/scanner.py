@@ -88,18 +88,22 @@ def _local_candidate_versions(finding: Finding, versions: list[str]) -> list[str
     return out
 
 
-def _wordpress_scores(
+def _advisory_scores(
     finding: Finding,
     versions: list[str],
-    wordpress_client: WordfenceClient,
+    client: WordfenceClient | NVDClient,
 ) -> dict[str, VersionScore]:
-    """Score WordPress candidate versions via Wordfence (blocking advisories only)."""
+    """Score candidate versions through a source other than OSV (advisories only).
+
+    Wordfence answers for WordPress packages and the NVD for container images; neither
+    publishes release times, so freshness and yank status are not available.
+    """
     scores: dict[str, VersionScore] = {}
     dep = finding.dependency
     stubs = [replace(dep, version=v) for v in versions]
     if not stubs:
         return scores
-    found = wordpress_client.find_vulnerabilities(stubs, include_unknown_versions=False)
+    found = client.find_vulnerabilities(stubs, include_unknown_versions=False)
     for stub in stubs:
         version = stub.version or ""
         risks: list[VersionRisk] = []
@@ -125,9 +129,16 @@ def enrich_findings(
     osv: OSVClient,
     registry: RegistryClient | None = None,
     wordpress_client: WordfenceClient | None = None,
+    nvd_client: NVDClient | None = None,
     webpack_merge: object | None = None,
 ) -> list[str]:
-    """Attach forward-checked ``upgrade_plan`` to each finding. Returns extra warnings."""
+    """Attach forward-checked ``upgrade_plan`` to each finding. Returns extra warnings.
+
+    Candidates are scored by the source that covers the ecosystem: OSV plus registry
+    metadata for PyPI, npm and Packagist, Wordfence for WordPress, the NVD for
+    container images. The NVD is rate limited and answers one version per request, so
+    only the nearest candidate and the latest release are checked for an image.
+    """
     warnings: list[str] = []
     if not findings:
         return warnings
@@ -150,7 +161,11 @@ def enrich_findings(
         scores_by_version: dict[str, VersionScore] = {}
         if dep.ecosystem == WORDPRESS:
             if wordpress_client is not None and candidates:
-                scores_by_version = _wordpress_scores(finding, candidates, wordpress_client)
+                scores_by_version = _advisory_scores(finding, candidates, wordpress_client)
+        elif dep.ecosystem == CONTAINER:
+            if nvd_client is not None and candidates:
+                chosen = list(dict.fromkeys([candidates[0], candidates[-1]]))
+                scores_by_version = _advisory_scores(finding, chosen, nvd_client)
         elif candidates:
             from vulnscan.risk import score_for
 
@@ -311,6 +326,7 @@ def scan(
             osv=client,
             registry=registry,
             wordpress_client=wordpress_client,
+            nvd_client=nvd_client,
             webpack_merge=webpack_merge,
         )
     )

@@ -125,3 +125,26 @@ def test_score_versions_malware_mal_id():
     score = score_for(scores, dep, "1.0.0")
     assert score is not None
     assert any(r.kind == RiskKind.MALWARE for r in score.risks)
+
+
+def test_score_versions_never_sends_container_images_to_osv():
+    from vulnscan.models import CONTAINER
+    from vulnscan.registry import RegistryError
+
+    class RefusingOSV:
+        def find_vulnerabilities(self, deps, include_unknown_versions=False):
+            offenders = [d.name for d in deps if d.ecosystem != PYPI]
+            assert not offenders, f"sent to OSV although it cannot index them: {offenders}"
+            return {}
+
+    class OfflineRegistry:
+        def release_info(self, dep):
+            raise RegistryError("offline")
+
+    image = Dependency("php", CONTAINER, "8.2.20", "8.2.20", "pinned", "Dockerfile", kind="image")
+    package = Dependency("demo", PYPI, "==1.0.0", "1.0.0", "pinned", "requirements.txt")
+    scores = score_versions([image, package], osv=RefusingOSV(), registry=OfflineRegistry())
+    image_score = score_for(scores, image, "8.2.20")
+    assert image_score is not None
+    assert image_score.risks == ()
+    assert score_for(scores, package, "1.0.0") is not None
