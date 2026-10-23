@@ -68,6 +68,8 @@ nav:
       - registry: api/registry.md
       - remediate: api/remediate.md
       - outdated: api/outdated.md
+      - risk: api/risk.md
+      - preflight: api/preflight.md
       - feeds: api/feeds.md
       - reports: api/reports.md
       - notify: api/notify.md

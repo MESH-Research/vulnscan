@@ -21,7 +21,11 @@ whenever something new turns up.
 - Shows the results in a terminal interface where every advisory can be read
   in full, or writes them out non-interactively for cron.
 - Lists every manifest that declares a vulnerable package, and upgrades the
-  constraint in all of them in one go.
+  constraint in all of them in one go, after checking that the version it
+  offers is not itself vulnerable, malicious, yanked or only hours old.
+- Resolves each manifest from scratch in a temporary directory on request
+  (`--preflight`) and scores what the next update would pull in, with a JSON
+  report and exit codes for CI.
 - Keeps a watch on a project and pushes each advisory the first time it is
   seen to [ntfy](https://ntfy.sh) (your phone) and/or a Microsoft Teams
   channel, with the fix version, whether it is published, severity, CVE
@@ -30,7 +34,9 @@ whenever something new turns up.
 ## Where to start
 
 - [Installation](installation.md)
-- [Usage](usage.md) for the TUI and the command line modes
+- [Usage](usage.md) for the TUI and the command line modes, including
+  [preflight](usage.md#preflight-what-the-next-resolve-would-pull-in) and
+  [diagnosing problems](usage.md#diagnosing-problems)
 - [Notifications](notifications.md) for continuous monitoring with ntfy or Teams
 - [Configuration](configuration.md) for every setting
 - [How it works](architecture.md) and the [API reference](api/index.md)

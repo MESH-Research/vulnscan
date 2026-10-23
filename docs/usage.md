@@ -77,7 +77,9 @@ uv run vulnscan --remediate requests --path /path/to/project
 uv run vulnscan --remediate wp-plugin/elementor --strategy latest --path /path/to/project
 ```
 
-See [Upgrading dependencies](remediation.md).
+See [Upgrading dependencies](remediation.md). Every candidate version is
+forward-checked before it is offered; see
+[Forward check](remediation.md#forward-check).
 
 ## Continuous monitoring with notifications
 
@@ -167,6 +169,73 @@ a confirmation dialog) or running `--remediate` inserts a constraint into the
 manifest next to the lock file instead; see
 [Upgrading dependencies](remediation.md#transitive-dependencies).
 
+## Preflight: what the next resolve would pull in
+
+```
+uv run vulnscan --preflight --path /path/to/project                    # interactive
+uv run vulnscan --preflight --json - --path /path/to/project           # machine-readable, for CI
+uv run vulnscan --preflight --text --update-feeds --strict-fresh --path /path/to/project
+```
+
+A scan reports on the versions you have. `--preflight` reports on the versions
+you would get: for each manifest it copies the registry constraints into an
+empty temporary project, runs a fresh resolve there without your lock files,
+compares the would-be versions with the current tree and scores every package
+that would change or that carries a risk. The project is never modified and no
+lock file of yours is written.
+
+| Manifest                                                                                              | Resolver                                                                                                              | Label             |
+| ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `pyproject.toml` (PEP 621, PEP 735 groups, Poetry), `requirements*.txt`, `setup.cfg`, `Pipfile`       | `uv lock`                                                                                                             | `uv`              |
+| `package.json`                                                                                        | `npm install --package-lock-only --ignore-scripts`, or `pnpm install --lockfile-only --ignore-scripts` when `packageManager` names pnpm | `npm`             |
+| Invenio theme bundles (see [Invenio / webpack.py](invenio.md#preflight-preflight))                                        | one virtual assets `package.json`, resolved the same way                                                              | `invenio-assets`  |
+| `composer.json`                                                                                       | `composer update --no-install --no-interaction --ignore-platform-reqs --no-scripts --no-plugins`                      | `composer`        |
+
+The resolver must be installed (`uv`, `npm` or `pnpm`, `composer`). A manifest
+whose resolve fails is reported as a warning with the tool's output, and when
+none succeeds the run fails. Path, editable, git, URL and workspace
+dependencies cannot be fetched from a registry: local path packages contribute
+their own PyPI requirements, the rest are dropped with a warning.
+`[build-system].requires`, uv constraint and override dependencies and
+`[[tool.uv.index]]` entries are honoured. Container images and `webpack.py`
+are skipped. Because the resolve is complete, the result covers the transitive
+packages it would install, not only the direct ones.
+
+Each would-be version is checked for four kinds of risk:
+
+- **advisory**: an OSV advisory affects that exact version;
+- **malware**: the advisory is a malicious-package report (OSV `MAL-` ids and
+  records marked as such);
+- **yanked**: the release has been withdrawn (PyPI yanked files, npm
+  unpublished versions);
+- **fresh**: it was published less than `VULNSCAN_FRESH_HOURS` ago (default
+  24), the window in which a hijacked package does the most damage. PyPI,
+  npm and Packagist give publish times; wordpress.org and container
+  registries do not, so their versions are never fresh.
+
+Alone, `--preflight` opens the TUI with a **Preflight** table: package,
+ecosystem, build process, current version, would-be version, risks and
+declaring file; `f` writes the preflight feeds and `r` resolves again. With
+`--json`, `--text`, `--markdown` or `--update-feeds` it runs non-interactively
+and writes `preflight.json`, `preflight.txt`, `preflight.md` or
+`preflight.rss.xml` / `preflight.atom.xml` in the feed directory (`-` sends
+JSON, text or Markdown to stdout). The JSON carries `schema_version`,
+`resolve_ok`, a `summary` of counts, each package with its `current`,
+`would_be`, `build_process` and `risks`, the `ignored` packages and the
+`warnings`.
+
+The exit code is 0 when nothing blocks, 1 when a package carries an advisory,
+malware or yanked risk or no manifest could be resolved, and, with
+`--strict-fresh` (or `VULNSCAN_STRICT_FRESH=true`), 2 when freshness is the
+only problem. Exclude packages you accept with `--preflight-ignore NAME`
+(repeatable or comma separated; a `pypi:`, `npm:`, `packagist:` or
+`wordpress:` prefix and shell wildcards are allowed), with
+`VULNSCAN_PREFLIGHT_IGNORE`, or with a `.vulnscan-preflight-ignore` file in the
+project root, one pattern per line with `#` comments. Excluded packages are
+still listed, under *ignored*, but never affect the exit code; a pattern that
+matches nothing is a warning. `--preflight` cannot be combined with `--ntfy`,
+`--msteams`, `--test` or `--remediate`.
+
 ## A package declared in several files
 
 Projects often declare the same package more than once: a
@@ -221,5 +290,5 @@ their control flow at `INFO`.
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | The scan failed (advisory source unreachable), the package to remediate was not found, or no suitable version exists |
-| 2 | Invalid configuration, such as `--ntfy` without a topic or `--msteams` without a webhook URL |
+| 1 | The scan failed (advisory source unreachable), the package to remediate was not found, or no suitable version exists; in `--preflight`, a package carries an advisory, malware or yanked risk, or no manifest could be resolved |
+| 2 | Invalid configuration, such as `--ntfy` without a topic or `--msteams` without a webhook URL; in `--preflight --strict-fresh`, freshness is the only risk found |

@@ -32,6 +32,27 @@ warnings, and the Wordfence attribution when WordPress data was used. Pass
 a filename, or `-` for stdout; with no argument they go to
 `VULNSCAN_MARKDOWN_FILE` / `VULNSCAN_TEXT_FILE` in the feed directory.
 
+## Preflight feeds and reports
+
+`--preflight --update-feeds` writes a second pair of feeds,
+`VULNSCAN_PREFLIGHT_RSS_FILE` and `VULNSCAN_PREFLIGHT_ATOM_FILE`
+(`preflight.rss.xml` and `preflight.atom.xml`), with their own first-seen
+state file (`VULNSCAN_PREFLIGHT_STATE_FILE`). Each entry is one (package,
+risk) pair, or a bump-only entry for a package that would change version
+without any risk; its categories are the risk kind (or `bump`), the ecosystem
+and the package name. The feeds are not written when no manifest could be
+resolved, for the same reason the advisory feeds survive a failed scan. They
+carry the same `VULNSCAN_FEED_TITLE` and `VULNSCAN_FEED_DESCRIPTION` as the
+advisory feeds.
+
+`--preflight --text` and `--preflight --markdown` write
+`VULNSCAN_PREFLIGHT_TEXT_FILE` and `VULNSCAN_PREFLIGHT_MARKDOWN_FILE`
+(`preflight.txt`, `preflight.md`): the resolve outcome, the counts of bumps
+and of each risk kind, one line per package of interest (`name (ecosystem,
+process): current → would-be [risks]`), the ignored packages and the
+warnings. `--preflight --json` writes `preflight.json`, the form meant for
+CI; see [Preflight](usage.md#preflight-what-the-next-resolve-would-pull-in).
+
 ## Warnings
 
 Every output lists the scan's warnings: no manifests found at all,

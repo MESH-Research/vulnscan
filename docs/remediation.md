@@ -6,13 +6,35 @@ published for the package (PyPI, Packagist, npm or wordpress.org, or the tags
 on a container image's registry) and offers two choices:
 
 - **Nearest safe version**: the smallest upgrade above the current version
-  that is outside every known advisory's affected range. This keeps you as
-  close as possible to what you have: `symfony/http-kernel` 5.4.0 goes to
-  5.4.20, not 6.x.
+  that is outside every known advisory's affected range and passes the
+  forward check below. This keeps you as close as possible to what you have:
+  `symfony/http-kernel` 5.4.0 goes to 5.4.20, not 6.x.
 - **Latest release**: the newest stable version. If even that is still
   affected by an open advisory, the option says so.
 
 Pre-release and yanked versions are never offered.
+
+## Forward check
+
+Before a version is offered it is checked as if it were already installed:
+OSV is asked about that exact version and the registry about its release
+metadata (`vulnscan.risk`). A candidate that carries its own advisory, that
+is the subject of a malicious-package report, or that has been yanked
+(PyPI) or unpublished (npm) is skipped, and the plan explains the first such
+skip, for example `skipped 2.31.0 (advisory: GHSA-…)`. A candidate published
+less than `VULNSCAN_FRESH_HOURS` ago (default 24) is still offered but
+marked: the **Nearest safe** column reads `2.32.4 ~fresh`, the detail pane
+and the upgrade dialog carry a `Warning:` line, and `--remediate` prints
+`warning: … was published within the freshness window`. Waiting a day before
+taking a brand-new release is the cheapest defence against a hijacked
+package. WordPress candidates are checked against Wordfence for advisories
+only, since wordpress.org publishes no release times. If the registry cannot
+be reached the scan warns `could not list versions for forward-check` and
+the plan is built from the advisory ranges alone.
+
+The same scoring drives `--preflight`, which applies it to everything a fresh
+resolve would install; see
+[Preflight](usage.md#preflight-what-the-next-resolve-would-pull-in).
 
 ## Routine updates
 

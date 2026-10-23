@@ -17,7 +17,7 @@ from the repository to `.env` and adjust.
 | `VULNSCAN_INVENIO_WEBPACK`         | `auto`                | Use Invenio `webpack.py` npm sources and remediation strategies: `auto`, `on`, or `off` (`--invenio-webpack`). See [Invenio / webpack.py](invenio.md)               |
 | `VULNSCAN_INVENIO_WEBPACK_OVERLAY` | empty                 | Site overlay `webpack.py` file used as the root project requirements bundle (`--invenio-webpack-overlay`). When empty, the `site/*/webpack.py` theme bundle is used |
 | `VULNSCAN_OSV_URL`                 | `https://api.osv.dev` | OSV API base URL                                                                                                                                                    |
-| `VULNSCAN_TIMEOUT`                 | `30`                  | HTTP timeout in seconds, for every service (OSV, Wordfence, the package registries, ntfy, Teams)                                                                    |
+| `VULNSCAN_TIMEOUT`                 | `30`                  | HTTP timeout in seconds, for every service (OSV, Wordfence, NVD, the package registries, ntfy, Teams)                                                               |
 
 ## Output
 
@@ -85,6 +85,20 @@ VULNSCAN_IMAGE_PRODUCTS=myorg/app=myorg:app,ghcr.io/example/tool=example:tool
 ```
 
 An entry for a built-in image overrides the built-in mapping.
+
+## Forward check and preflight
+
+| Variable                                                        | Default                                    | Purpose                                                                                                                                                                                  |
+| --------------------------------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VULNSCAN_FRESH_HOURS`                                          | `24`                                       | A version published more recently than this is flagged as `fresh`, both when an upgrade is offered and in `--preflight`                                                                 |
+| `VULNSCAN_STRICT_FRESH`                                         | `false`                                    | Make `--preflight` exit 2 when freshness is the only risk found (`--strict-fresh`)                                                                                                       |
+| `VULNSCAN_PREFLIGHT_IGNORE`                                     | empty                                      | Packages excluded from preflight scoring, comma separated: `name` or `ecosystem:name`, wildcards allowed (`--preflight-ignore`). A `.vulnscan-preflight-ignore` file is always read too |
+| `VULNSCAN_PREFLIGHT_RSS_FILE` / `VULNSCAN_PREFLIGHT_ATOM_FILE`  | `preflight.rss.xml` / `preflight.atom.xml` | Preflight feed filenames inside the feed directory                                                                                                                                       |
+| `VULNSCAN_PREFLIGHT_STATE_FILE`                                 | `preflight-state.json`                     | Records when each preflight feed entry was first seen                                                                                                                                    |
+| `VULNSCAN_PREFLIGHT_MARKDOWN_FILE` / `VULNSCAN_PREFLIGHT_TEXT_FILE` | `preflight.md` / `preflight.txt`       | Preflight report filenames inside the feed directory                                                                                                                                     |
+
+The JSON report goes to `preflight.json` in the feed directory unless
+`--json FILE` names another file. See [Preflight](usage.md#preflight-what-the-next-resolve-would-pull-in).
 
 ## Notifications
 
