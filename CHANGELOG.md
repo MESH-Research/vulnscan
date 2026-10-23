@@ -1,3 +1,14 @@
+## 1.11.0 (2026-10-23)
+
+### Feat
+
+- **tui**: show every HTTP request with a progress bar in an activity panel
+- **cli**: add --debug log with curl commands for every API request
+
+### Fix
+
+- **scanner**: keep container images out of OSV batches in the forward check
+
 ## 1.10.0 (2026-10-23)
 
 ### Feat
