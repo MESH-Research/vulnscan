@@ -654,7 +654,16 @@ def _mock_lock_pyproject(
 
     if not all_deps and not collected.constraints and not collected.overrides:
         warnings.append(f"preflight: {rel}: no registry PyPI deps left to mock-lock")
-        return _MockLockResult(ok=False, ecosystem=PYPI, versions={}, build_process=BUILD_UV, detail="empty"), warnings
+        return (
+            _MockLockResult(
+                ok=False,
+                ecosystem=PYPI,
+                versions={},
+                build_process=BUILD_UV,
+                detail="empty",
+            ),
+            warnings,
+        )
 
     with tempfile.TemporaryDirectory(prefix="vulnscan-preflight-py-") as tmp:
         temp = Path(tmp)
@@ -678,7 +687,13 @@ def _mock_lock_pyproject(
                 + (f": {detail[:400]}" if detail else "")
             )
             return (
-                _MockLockResult(ok=False, ecosystem=PYPI, versions={}, build_process=BUILD_UV, detail=detail),
+                _MockLockResult(
+                    ok=False,
+                    ecosystem=PYPI,
+                    versions={},
+                    build_process=BUILD_UV,
+                    detail=detail,
+                ),
                 warnings,
             )
         versions = {
@@ -686,7 +701,15 @@ def _mock_lock_pyproject(
             for key, ver in load_lock_versions(temp).items()
             if key[0] == PYPI
         }
-    return _MockLockResult(ok=True, ecosystem=PYPI, versions=versions, build_process=BUILD_UV), warnings
+    return (
+        _MockLockResult(
+            ok=True,
+            ecosystem=PYPI,
+            versions=versions,
+            build_process=BUILD_UV,
+        ),
+        warnings,
+    )
 
 
 def _npm_non_registry(spec: object) -> bool:
@@ -799,10 +822,27 @@ def _mock_lock_package_json(
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         warnings.append(f"preflight: {rel}: cannot read package.json ({exc})")
-        return _MockLockResult(ok=False, ecosystem=NPM, versions={}, build_process=BUILD_NPM, detail=str(exc)), warnings
+        return (
+            _MockLockResult(
+                ok=False,
+                ecosystem=NPM,
+                versions={},
+                build_process=BUILD_NPM,
+                detail=str(exc),
+            ),
+            warnings,
+        )
     if not isinstance(data, dict):
         warnings.append(f"preflight: {rel}: package.json root must be an object")
-        return _MockLockResult(ok=False, ecosystem=NPM, versions={}, build_process=BUILD_NPM), warnings
+        return (
+            _MockLockResult(
+                ok=False,
+                ecosystem=NPM,
+                versions={},
+                build_process=BUILD_NPM,
+            ),
+            warnings,
+        )
 
     cleaned = {
         "name": data.get("name") or "preflight-mock",
@@ -890,7 +930,16 @@ def _mock_lock_requirements(
     requirements = [_requirement_line(d) for d in declared if d.ecosystem == PYPI]
     if not requirements:
         warnings.append(f"preflight: {rel}: no PyPI requirements to mock-lock")
-        return _MockLockResult(ok=False, ecosystem=PYPI, versions={}, build_process=BUILD_UV, detail="empty"), warnings
+        return (
+            _MockLockResult(
+                ok=False,
+                ecosystem=PYPI,
+                versions={},
+                build_process=BUILD_UV,
+                detail="empty",
+            ),
+            warnings,
+        )
 
     with tempfile.TemporaryDirectory(prefix="vulnscan-preflight-req-") as tmp:
         temp = Path(tmp)
@@ -910,7 +959,13 @@ def _mock_lock_requirements(
                 + (f": {detail[:400]}" if detail else "")
             )
             return (
-                _MockLockResult(ok=False, ecosystem=PYPI, versions={}, build_process=BUILD_UV, detail=detail),
+                _MockLockResult(
+                    ok=False,
+                    ecosystem=PYPI,
+                    versions={},
+                    build_process=BUILD_UV,
+                    detail=detail,
+                ),
                 warnings,
             )
         versions = {
@@ -918,7 +973,15 @@ def _mock_lock_requirements(
             for key, ver in load_lock_versions(temp).items()
             if key[0] == PYPI
         }
-    return _MockLockResult(ok=True, ecosystem=PYPI, versions=versions, build_process=BUILD_UV), warnings
+    return (
+        _MockLockResult(
+            ok=True,
+            ecosystem=PYPI,
+            versions=versions,
+            build_process=BUILD_UV,
+        ),
+        warnings,
+    )
 
 
 def _mock_lock_setup_or_pipfile(
