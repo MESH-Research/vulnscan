@@ -247,8 +247,7 @@ def build_preflight_entries(report, state: dict[str, str], now: datetime) -> lis
         if not risks and pkg.would_bump:
             # bump-only informational entry
             guid = (
-                f"urn:vulnscan:preflight:{project}:{dep.ecosystem}:"
-                f"{dep.name}:{pkg.would_be}:bump"
+                f"urn:vulnscan:preflight:{project}:{dep.ecosystem}:{dep.name}:{pkg.would_be}:bump"
             )
             if guid not in state:
                 state[guid] = now.isoformat()
@@ -274,8 +273,7 @@ def build_preflight_entries(report, state: dict[str, str], now: datetime) -> lis
         for risk in risks:
             rid = risk.advisory_id or str(risk.kind)
             guid = (
-                f"urn:vulnscan:preflight:{project}:{dep.ecosystem}:"
-                f"{dep.name}:{pkg.would_be}:{rid}"
+                f"urn:vulnscan:preflight:{project}:{dep.ecosystem}:{dep.name}:{pkg.would_be}:{rid}"
             )
             if guid not in state:
                 state[guid] = now.isoformat()

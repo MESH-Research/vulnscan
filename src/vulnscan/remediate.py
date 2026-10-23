@@ -184,7 +184,7 @@ def plan_remediation(
     latest = ordered[-1]
     warnings: list[str] = []
     nearest = safe[0] if safe else None
-    for version in ([nearest, latest] if nearest or latest else []):
+    for version in [nearest, latest] if nearest or latest else []:
         if version is None or scores is None:
             continue
         score = scores.get(version)
@@ -198,9 +198,12 @@ def plan_remediation(
             score = scores.get(version)
             if score is not None and getattr(score, "has_blocking", False):
                 blocking = getattr(score, "blocking", lambda: ())()
-                detail = ", ".join(
-                    f"{getattr(r, 'kind', 'risk')}: {getattr(r, 'detail', r)}" for r in blocking
-                ) or "blocking risk"
+                detail = (
+                    ", ".join(
+                        f"{getattr(r, 'kind', 'risk')}: {getattr(r, 'detail', r)}" for r in blocking
+                    )
+                    or "blocking risk"
+                )
                 warnings.append(f"skipped {version} ({detail})")
                 break
     return RemediationPlan(

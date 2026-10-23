@@ -399,6 +399,7 @@ def test_docker_image_without_a_version_led_tag_raises():
     with pytest.raises(RegistryError):
         make_client(docker_handler).available_versions(dep)
 
+
 def test_pypi_release_info_times_and_yanked():
     from datetime import UTC, datetime
 
@@ -430,4 +431,3 @@ def test_npm_release_info_times_and_unpublished():
     assert info["4.19.0"].yanked is False  # deprecated ≠ yanked
     gone = Dependency("gone", NPM, "1.0.0", "1.0.0", "pinned", "package.json")
     assert make_client(handler).release_info(gone)["1.0.0"].yanked is True
-

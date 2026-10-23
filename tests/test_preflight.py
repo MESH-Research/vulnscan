@@ -144,12 +144,10 @@ def test_run_preflight_drops_uv_path_sources(tmp_path: Path):
     )
     assert report.resolve_ok
     assert any(
-        "dropping path/editable/git sources" in w and "local-thing" in w
-        for w in report.warnings
+        "dropping path/editable/git sources" in w and "local-thing" in w for w in report.warnings
     )
     assert any(
-        "has no pyproject.toml or setup.cfg" in w and "local-thing" in w
-        for w in report.warnings
+        "has no pyproject.toml or setup.cfg" in w and "local-thing" in w for w in report.warnings
     )
     assert any(p.dependency.name == "demo-pkg" for p in report.packages)
     assert not any(p.dependency.name == "local-thing" for p in report.packages)
@@ -597,4 +595,3 @@ def test_run_preflight_uv_packages_set_build_process(tmp_path: Path):
     )
     bumped = next(p for p in report.packages if p.dependency.name == "demo-pkg")
     assert bumped.build_process == "uv"
-

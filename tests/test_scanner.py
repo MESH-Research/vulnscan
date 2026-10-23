@@ -29,7 +29,6 @@ def settings_for(tmp_path: Path, **kwargs) -> Settings:
     return Settings(**base)
 
 
-
 class EmptyRegistry:
     """Avoid forward-check network / extra OSV queries in unit tests."""
 

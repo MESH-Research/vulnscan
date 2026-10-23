@@ -47,8 +47,6 @@ def test_plan_picks_nearest_safe_and_latest():
     assert plan.latest_is_safe is True
 
 
-
-
 def test_plan_skips_forward_blocked_candidate():
     """Local-clear version that is malware-blocked is skipped; next clear version wins."""
     from vulnscan.risk import RiskKind, VersionRisk, VersionScore

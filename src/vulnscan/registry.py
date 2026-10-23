@@ -312,7 +312,5 @@ class RegistryClient:
             return self._npm_release_info(dep)
         if dep.ecosystem == CONTAINER:
             # Tags have no reliable publish/yank metadata in the registry API we use.
-            return {
-                v: ReleaseInfo(published_at=None, yanked=False) for v in self._docker(dep)
-            }
+            return {v: ReleaseInfo(published_at=None, yanked=False) for v in self._docker(dep)}
         raise RegistryError(f"No registry known for ecosystem {dep.ecosystem!r}")

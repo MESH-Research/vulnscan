@@ -51,6 +51,7 @@ def _load_toml(path: Path) -> dict:
         return {}
     return data if isinstance(data, dict) else {}
 
+
 RunFn = Callable[[Sequence[str], Path], subprocess.CompletedProcess[str]]
 
 _SKIP_MANIFEST_NAMES = frozenset(
@@ -198,9 +199,7 @@ def is_excluded(dep: Dependency, patterns: Sequence[str]) -> bool:
             continue
         if eco is not None and eco.lower() != dep.ecosystem.lower():
             continue
-        name_match = (
-            normalize_name(name_pat, dep.ecosystem) if "*" not in name_pat else name_pat
-        )
+        name_match = normalize_name(name_pat, dep.ecosystem) if "*" not in name_pat else name_pat
         if fnmatch(canon, name_match):
             return True
         if fnmatch(dep.name, name_pat) or fnmatch(canon, name_pat):
@@ -329,9 +328,7 @@ def _path_poetry_sources(data: dict, manifest_dir: Path) -> list[tuple[str, Path
                 continue
             seen.add(key)
             path = Path(raw.strip())
-            resolved = (
-                (manifest_dir / path).resolve() if not path.is_absolute() else path.resolve()
-            )
+            resolved = (manifest_dir / path).resolve() if not path.is_absolute() else path.resolve()
             out.append((key, resolved))
     return out
 
@@ -479,9 +476,7 @@ def _collect_pyproject_float_requirements(
     collected = _FloatRequirements()
 
     if manifest.name == "setup.cfg":
-        collected.project_reqs = _collect_setup_cfg_requirements(
-            manifest, root, warnings=warn
-        )
+        collected.project_reqs = _collect_setup_cfg_requirements(manifest, root, warnings=warn)
         return collected
 
     data = _load_toml(manifest) or {}
@@ -644,8 +639,7 @@ def _mock_lock_pyproject(
     dropped = sorted(drop | poetry_paths)
     if dropped:
         warnings.append(
-            f"preflight: {rel}: dropping path/editable/git sources: "
-            + ", ".join(dropped)
+            f"preflight: {rel}: dropping path/editable/git sources: " + ", ".join(dropped)
         )
 
     collected = _collect_pyproject_float_requirements(manifest, root, warnings=warnings)
@@ -683,8 +677,7 @@ def _mock_lock_pyproject(
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
             warnings.append(
-                f"preflight: {rel}: uv lock failed"
-                + (f": {detail[:400]}" if detail else "")
+                f"preflight: {rel}: uv lock failed" + (f": {detail[:400]}" if detail else "")
             )
             return (
                 _MockLockResult(
@@ -696,11 +689,7 @@ def _mock_lock_pyproject(
                 ),
                 warnings,
             )
-        versions = {
-            key: ver
-            for key, ver in load_lock_versions(temp).items()
-            if key[0] == PYPI
-        }
+        versions = {key: ver for key, ver in load_lock_versions(temp).items() if key[0] == PYPI}
     return (
         _MockLockResult(
             ok=True,
@@ -775,9 +764,7 @@ def _mock_lock_npm_document(
     argv = _package_manager_argv(document)
     with tempfile.TemporaryDirectory(prefix="vulnscan-preflight-npm-") as tmp:
         temp = Path(tmp)
-        (temp / "package.json").write_text(
-            json.dumps(document, indent=2) + "\n", encoding="utf-8"
-        )
+        (temp / "package.json").write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
         _assert_safe_argv(argv)
         result = run_fn(argv, temp)
         if result.returncode != 0:
@@ -796,9 +783,7 @@ def _mock_lock_npm_document(
                 ),
                 warnings,
             )
-        versions = {
-            key: ver for key, ver in load_lock_versions(temp).items() if key[0] == NPM
-        }
+        versions = {key: ver for key, ver in load_lock_versions(temp).items() if key[0] == NPM}
     return (
         _MockLockResult(
             ok=True,
@@ -918,6 +903,7 @@ def _mock_lock_invenio_assets(
     warnings.extend(extra)
     return result, warnings
 
+
 def _mock_lock_requirements(
     manifest: Path,
     root: Path,
@@ -955,8 +941,7 @@ def _mock_lock_requirements(
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
             warnings.append(
-                f"preflight: {rel}: uv lock failed"
-                + (f": {detail[:400]}" if detail else "")
+                f"preflight: {rel}: uv lock failed" + (f": {detail[:400]}" if detail else "")
             )
             return (
                 _MockLockResult(
@@ -968,11 +953,7 @@ def _mock_lock_requirements(
                 ),
                 warnings,
             )
-        versions = {
-            key: ver
-            for key, ver in load_lock_versions(temp).items()
-            if key[0] == PYPI
-        }
+        versions = {key: ver for key, ver in load_lock_versions(temp).items() if key[0] == PYPI}
     return (
         _MockLockResult(
             ok=True,
@@ -991,7 +972,6 @@ def _mock_lock_setup_or_pipfile(
 ) -> tuple[_MockLockResult, list[str]]:
     """Extract PyPI deps from setup.cfg / Pipfile into a minimal mock pyproject."""
     return _mock_lock_requirements(manifest, root, run_fn)
-
 
 
 _COMPOSER_NON_REGISTRY_REPO_TYPES = frozenset({"path", "vcs", "git", "artifact", "pear"})
@@ -1074,14 +1054,7 @@ def _mock_lock_composer(
     if dropped_repos:
         warnings.append(
             f"preflight: {rel}: dropping non-registry composer repositories: "
-            + ", ".join(
-                sorted(
-                    {
-                        str(r.get("url") or r.get("type") or "?")
-                        for r in dropped_repos
-                    }
-                )
-            )
+            + ", ".join(sorted({str(r.get("url") or r.get("type") or "?") for r in dropped_repos}))
         )
 
     cleaned: dict = {
@@ -1157,9 +1130,7 @@ def _mock_lock_composer(
     ]
     with tempfile.TemporaryDirectory(prefix="vulnscan-preflight-composer-") as tmp:
         temp = Path(tmp)
-        (temp / "composer.json").write_text(
-            json.dumps(cleaned, indent=2) + "\n", encoding="utf-8"
-        )
+        (temp / "composer.json").write_text(json.dumps(cleaned, indent=2) + "\n", encoding="utf-8")
         _assert_safe_argv(argv)
         result = run_fn(argv, temp)
         if result.returncode != 0:
@@ -1179,9 +1150,7 @@ def _mock_lock_composer(
                 warnings,
             )
         versions = {
-            key: ver
-            for key, ver in load_lock_versions(temp).items()
-            if key[0] == PACKAGIST
+            key: ver for key, ver in load_lock_versions(temp).items() if key[0] == PACKAGIST
         }
     return (
         _MockLockResult(
@@ -1374,9 +1343,7 @@ def run_preflight(
         if not any(is_excluded(p.dependency, (pattern,)) for p in packages + ignored):
             warnings.append(f"preflight exclude {pattern!r} matched no package")
 
-    scores = score_versions(
-        to_score, osv=osv, registry=registry, fresh_hours=settings.fresh_hours
-    )
+    scores = score_versions(to_score, osv=osv, registry=registry, fresh_hours=settings.fresh_hours)
     from vulnscan.risk import score_for
 
     scored_packages: list[PreflightPackage] = []
@@ -1466,15 +1433,8 @@ def render_preflight_text(report: PreflightReport) -> str:
         "",
     ]
     for p in report.packages:
-        bump = (
-            f"{p.current or '?'} → {p.would_be}"
-            if p.would_bump
-            else f"{p.would_be} (unchanged)"
-        )
-        kinds = (
-            ",".join(sorted({str(r.kind) for r in (p.score.risks if p.score else ())}))
-            or "-"
-        )
+        bump = f"{p.current or '?'} → {p.would_be}" if p.would_bump else f"{p.would_be} (unchanged)"
+        kinds = ",".join(sorted({str(r.kind) for r in (p.score.risks if p.score else ())})) or "-"
         process = p.build_process or "-"
         lines.append(
             f"- {p.dependency.name} ({p.dependency.ecosystem}, {process}): {bump} [{kinds}]"

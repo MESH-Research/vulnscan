@@ -94,7 +94,6 @@ def _cells(values: list[str], remediated: bool) -> list[str | Text]:
     return [Text(v, style=REMEDIATED_STYLE) for v in values]
 
 
-
 def _nearest_safe_label(finding: Finding) -> str:
     """Forward-checked nearest safe for the deps table, with optional freshness marker."""
     plan = getattr(finding, "upgrade_plan", None)
@@ -596,7 +595,6 @@ class VulnScanApp(App[None]):
         self._upgrades = {o.dependency.key: o.options for o in outdated}
         return [by_key.get(o.dependency.key) or Finding(o.dependency, []) for o in outdated]
 
-
     def _apply_preflight(self, report) -> None:
         """Populate the tables from a preflight report."""
         self._stop_busy()
@@ -689,6 +687,7 @@ class VulnScanApp(App[None]):
             if len(report.warnings) > 20:
                 lines.append(f"- …and {len(report.warnings) - 20} more")
         self.query_one("#detail", Markdown).update(chr(10).join(lines))
+
     def _apply_result(
         self, result: ScanResult, outdated: list[OutdatedPackage] | None = None
     ) -> None:

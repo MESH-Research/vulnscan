@@ -436,7 +436,6 @@ def run_non_interactive(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
-
 def run_preflight_cli(settings: Settings, args: argparse.Namespace) -> int:
     """Run pin-float preflight; write JSON/text/markdown/feeds as requested."""
     from vulnscan.preflight import (

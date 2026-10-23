@@ -44,9 +44,7 @@ def _nearest_safe_cell(finding: Finding, result: ScanResult) -> str:
         if not nearest:
             return "none"
         warnings = getattr(plan, "warnings", ()) or ()
-        fresh = any(
-            nearest in w and "published within the freshness" in w for w in warnings
-        )
+        fresh = any(nearest in w and "published within the freshness" in w for w in warnings)
         return f"{nearest} ~fresh" if fresh else nearest
     if finding.webpack_merge_block:
         return "none"
