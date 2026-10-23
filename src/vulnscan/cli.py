@@ -8,7 +8,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from vulnscan import __version__
+from vulnscan import __version__, debuglog
 from vulnscan.config import Settings, load_settings
 from vulnscan.feeds import write_feeds
 from vulnscan.models import Finding, ScanResult, normalize_name
@@ -30,6 +30,18 @@ from vulnscan.scanner import scan
 from vulnscan.wordfence import WordfenceError
 
 SCAN_ERRORS = (OSVError, WordfenceError, NVDError)
+
+log = logging.getLogger("vulnscan.cli")
+
+
+def _error(message: str, exc: BaseException | None = None) -> None:
+    """Print ``error: message`` to stderr and record it in the debug log.
+
+    The traceback is included only when the debug log is at its most verbose level.
+    """
+    print(f"error: {message}", file=sys.stderr)
+    with_traceback = exc is not None and log.isEnabledFor(logging.DEBUG)
+    log.error(message, exc_info=exc if with_traceback else None)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -182,6 +194,20 @@ def build_parser() -> argparse.ArgumentParser:
         "(VULNSCAN_INVENIO_WEBPACK_OVERLAY)",
     )
     parser.add_argument("--env-file", help="path to a .env file (default: ./.env)")
+    parser.add_argument(
+        "-d",
+        "--debug",
+        action="count",
+        default=0,
+        help="write a diagnostic log (VULNSCAN_DEBUG): -d records every HTTP request and "
+        "response with a curl command that repeats it; -dd adds control flow; -ddd adds "
+        "library internals and tracebacks",
+    )
+    parser.add_argument(
+        "--debug-log",
+        metavar="FILE",
+        help=f"where --debug writes (VULNSCAN_DEBUG_LOG; default: ./{debuglog.DEFAULT_LOG_FILE})",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -216,7 +242,7 @@ def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
     try:
         result = scan(settings)
     except SCAN_ERRORS as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        _error(str(exc), exc)
         return 1
     finding = find_finding(result, args.remediate)
     if finding is None:
@@ -234,7 +260,7 @@ def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
                 finding, fetch_versions(settings, dep), webpack_merge=result.webpack_merge
             )
         except RegistryError as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            _error(str(exc), exc)
             return 1
     for warning in getattr(plan, "warnings", ()):
         print(f"warning: {warning}", file=sys.stderr)
@@ -260,7 +286,7 @@ def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
             webpack_merge=result.webpack_merge,
         )
     except RemediationError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        _error(str(exc), exc)
         return 1
     for change in outcome.authoritative_changes or outcome.changes:
         if change.added:
@@ -340,10 +366,7 @@ def run_notifications(settings: Settings, args: argparse.Namespace) -> int:
         targets.append(Target(build_msteams_client(settings), settings.msteams_state_path))
     if args.test:
         return run_test_messages(settings, targets)
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    _configure_watch_logging()
     control = WatchControl()
     if not args.once:
         install_signal_handlers(control)
@@ -356,6 +379,39 @@ def run_notifications(settings: Settings, args: argparse.Namespace) -> int:
         resend_first=args.resend,
         once=args.once,
     )
+
+
+class _StderrHandler(logging.StreamHandler):
+    """A stream handler that always writes to the current ``sys.stderr``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    @property
+    def stream(self):  # type: ignore[override]
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, value) -> None:
+        pass
+
+
+def _configure_watch_logging() -> None:
+    """Report watch-mode progress on stderr, without disturbing the debug log.
+
+    The handler is attached to the ``vulnscan.notify`` logger only, so a debug log at
+    any level still receives those records through propagation, and the control-flow
+    and HTTP records of the other modules never reach the terminal.
+    """
+    notify_log = logging.getLogger("vulnscan.notify")
+    if any(isinstance(h, _StderrHandler) for h in notify_log.handlers):
+        return
+    handler = _StderrHandler()
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    notify_log.addHandler(handler)
+    if notify_log.getEffectiveLevel() > logging.INFO:
+        notify_log.setLevel(logging.INFO)
 
 
 def run_tui(settings: Settings, outdated: bool = False, preflight: bool = False) -> None:
@@ -413,7 +469,7 @@ def run_non_interactive(settings: Settings, args: argparse.Namespace) -> int:
     try:
         result = scan(settings)
     except SCAN_ERRORS as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        _error(str(exc), exc)
         print("Nothing was written.", file=sys.stderr)
         return 1
     to_stdout = "-" in (args.markdown, args.text)
@@ -512,13 +568,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "invenio_webpack_overlay": args.invenio_webpack_overlay,
                 "include_transitive": True if args.transitive else None,
                 "strict_fresh": True if args.strict_fresh else None,
+                "debug": min(args.debug, debuglog.MAX_LEVEL) if args.debug else None,
+                "debug_log": args.debug_log,
             },
         )
     except ValueError as exc:
         print(f"error: invalid configuration: {exc}", file=sys.stderr)
         return 2
+    if settings.debug:
+        debuglog.configure(
+            settings.debug,
+            settings.debug_log,
+            secrets=debuglog.secrets_from_settings(settings),
+            argv=sys.argv if argv is None else ["vulnscan", *argv],
+        )
+        log.info(
+            "settings: project %s, feed dir %s, cache %s, timeout %ss, transitive=%s, "
+            "include_dev=%s, osv %s, wordfence key %s, nvd key %s",
+            settings.project_path,
+            settings.feed_dir,
+            settings.cache_dir,
+            settings.request_timeout,
+            settings.include_transitive,
+            settings.include_dev,
+            settings.osv_base_url,
+            "set" if settings.wordfence_api_key else "unset",
+            "set" if settings.nvd_api_key else "unset",
+        )
     if not settings.project_path.exists():
-        print(f"error: project path does not exist: {settings.project_path}", file=sys.stderr)
+        _error(f"project path does not exist: {settings.project_path}")
         return 1
     non_interactive = (
         args.ntfy
@@ -543,18 +621,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     if args.ntfy or args.msteams:
+        log.info(
+            "mode: notifications (ntfy=%s, msteams=%s, once=%s)", args.ntfy, args.msteams, args.once
+        )
         return run_notifications(settings, args)
     if args.test:
         print("error: --test needs --ntfy and/or --msteams", file=sys.stderr)
         return 2
     if args.remediate:
+        log.info("mode: remediate %s (%s)", args.remediate, args.strategy)
         return run_remediate(settings, args)
     if args.preflight and non_interactive:
+        log.info("mode: preflight, non-interactive")
         return run_preflight_cli(settings, args)
     if args.preflight:
+        log.info("mode: preflight TUI")
         run_tui(settings, preflight=True)
         return 0
     if args.update_feeds or args.markdown is not None or args.text is not None:
+        log.info(
+            "mode: feeds/reports (feeds=%s, markdown=%r, text=%r)",
+            args.update_feeds,
+            args.markdown,
+            args.text,
+        )
         return run_non_interactive(settings, args)
+    log.info("mode: TUI (outdated=%s)", args.outdated)
     run_tui(settings, outdated=args.outdated)
     return 0

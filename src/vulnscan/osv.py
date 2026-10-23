@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime
 
 import httpx
 
-from vulnscan import __version__
+from vulnscan import __version__, debuglog
 from vulnscan.models import (
+    NPM,
+    PACKAGIST,
+    PYPI,
     Dependency,
     VersionRange,
     Vulnerability,
@@ -21,6 +25,10 @@ from vulnscan.models import (
 from vulnscan.parsers.versions import normalize_version
 
 BATCH_SIZE = 1000
+OSV_ECOSYSTEMS = frozenset({PYPI, NPM, PACKAGIST})
+"""Ecosystems vulnscan asks OSV about. WordPress goes to Wordfence, images to the NVD."""
+
+log = logging.getLogger("vulnscan.osv")
 
 
 class OSVError(Exception):
@@ -188,7 +196,7 @@ class OSVClient:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._http = httpx.Client(
+        self._http = debuglog.Client(
             base_url=self.base_url,
             timeout=timeout,
             transport=transport,
@@ -222,6 +230,13 @@ class OSVClient:
         for start in range(0, len(deps), BATCH_SIZE):
             chunk = deps[start : start + BATCH_SIZE]
             queries = [self._query_for(dep) for dep in chunk]
+            log.info(
+                "OSV querybatch: %d queries (%d-%d of %d)",
+                len(queries),
+                start + 1,
+                start + len(chunk),
+                len(deps),
+            )
             data = self._request("POST", "/v1/querybatch", {"queries": queries})
             for offset, result in enumerate(data.get("results") or []):
                 if offset >= len(chunk):
@@ -230,6 +245,7 @@ class OSVClient:
                 ids = [str(v["id"]) for v in result.get("vulns") or [] if v.get("id")]
                 token = result.get("next_page_token")
                 while token:
+                    log.info("OSV query: next page for %s", chunk[offset].name)
                     page = self._request(
                         "POST", "/v1/query", {**queries[offset], "page_token": token}
                     )
@@ -245,15 +261,31 @@ class OSVClient:
             OSVError: if the record cannot be retrieved.
         """
         if vuln_id not in self._raw_cache:
+            log.info("OSV: fetching advisory %s", vuln_id)
             self._raw_cache[vuln_id] = self._request("GET", f"/v1/vulns/{vuln_id}")
+        else:
+            log.debug("OSV: advisory %s served from memory", vuln_id)
         return parse_osv_vulnerability(self._raw_cache[vuln_id], package_name, ecosystem)
 
     def find_vulnerabilities(
         self, deps: Iterable[Dependency], include_unknown_versions: bool = False
     ) -> dict[Dependency, list[Vulnerability]]:
-        """Map each affected dependency to its (deduplicated) advisories."""
-        queryable = [d for d in deps if d.version or include_unknown_versions]
+        """Map each affected dependency to its (deduplicated) advisories.
+
+        Dependencies in ecosystems OSV does not index (container images, WordPress)
+        are left out rather than sent, because OSV rejects the whole batch otherwise.
+        """
+        wanted = [d for d in deps if d.version or include_unknown_versions]
+        skipped = [d for d in wanted if d.ecosystem not in OSV_ECOSYSTEMS]
+        if skipped:
+            log.info(
+                "OSV: not asking about %d packages in ecosystems it does not index (%s)",
+                len(skipped),
+                ", ".join(sorted({d.ecosystem for d in skipped})),
+            )
+        queryable = [d for d in wanted if d.ecosystem in OSV_ECOSYSTEMS]
         if not queryable:
+            log.info("OSV: nothing to query")
             return {}
         found: dict[Dependency, list[Vulnerability]] = {}
         for dep, ids in zip(queryable, self.query_batch(queryable), strict=True):

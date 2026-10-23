@@ -41,13 +41,22 @@ fakes and manifests are written into pytest's `tmp_path`.
 src/vulnscan/
   cli.py          argument parsing and the non-interactive modes
   config.py       Settings from VULNSCAN_* variables and .env
+  debuglog.py     the --debug log: HTTP exchanges as curl commands, control flow
+  activity.py     live HTTP transfer snapshots for the TUI's activity panel
   models.py       Dependency, Declaration, Vulnerability, Finding, ScanResult
   parsers/        manifest discovery, manifest and lock-file parsers
   osv.py          OSV.dev client
   wordfence.py    Wordfence Intelligence client and cache
-  registry.py     available versions from PyPI, Packagist, npm, wordpress.org
-  scanner.py      parse -> resolve -> query -> findings
+  nvd.py          NVD client for container images, image-to-CPE map and cache
+  registry.py     available versions and release metadata from PyPI, Packagist,
+                  npm, wordpress.org and container registries
+  scanner.py      parse -> resolve -> query -> findings, plus the forward check
+  risk.py         scoring of exact versions (advisory, malware, fresh, yanked)
+  preflight.py    --preflight: mock-lock each manifest and score the result
   remediate.py    upgrade planning and manifest rewriting
+  outdated.py     newer-release detection for --outdated
+  invenio.py      Invenio webpack.py merge index and virtual assets package.json
+  versioncmp.py   ecosystem-aware version comparison
   feeds.py        RSS and Atom
   reports.py      Markdown and plain text
   notify.py       notification building, sent state and the watch loop

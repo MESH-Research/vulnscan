@@ -50,8 +50,8 @@ Python manifests are still mock-locked individually.
 
 Exclude local forks of upstream modules you do not control using
 `.vulnscanignore` (paths relative to the project root). Otherwise, dependencies
-in any local submodules  
-under e.g. `site/kcworks/dependencies/` stay discoverable.
+in any local submodules under, say, `site/kcworks/dependencies/` stay
+discoverable.
 
 ## Remediating npm packages
 

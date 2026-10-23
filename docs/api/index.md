@@ -35,11 +35,15 @@ Then, for example, `vulnscan.feeds.write_feeds(result, settings)`,
 | [`vulnscan.registry`](registry.md) | Available versions from PyPI, Packagist, wordpress.org, npm and container registries |
 | [`vulnscan.remediate`](remediate.md) | Upgrade planning and manifest rewriting |
 | [`vulnscan.outdated`](outdated.md) | Newer-release detection for the `--outdated` mode |
+| [`vulnscan.risk`](risk.md) | Scoring of exact versions for advisories, malware, freshness and yank status |
+| [`vulnscan.preflight`](preflight.md) | `--preflight`: mock-lock each manifest in isolation and score the result |
 | [`vulnscan.feeds`](feeds.md) | RSS and Atom |
 | [`vulnscan.reports`](reports.md) | Markdown and plain text |
 | [`vulnscan.notify`](notify.md) | Notification building, per-channel sent state, the watch loop |
 | [`vulnscan.ntfy`](ntfy.md) | ntfy channel |
 | [`vulnscan.msteams`](msteams.md) | Microsoft Teams channel (Adaptive Cards) |
 | [`vulnscan.cli`](cli.md) | Command line entry point |
+| [`vulnscan.activity`](activity.md) | Live `Transfer` snapshots of every HTTP request, for the TUI's activity panel |
+| [`vulnscan.debuglog`](debuglog.md) | The `--debug` log: HTTP exchanges as `curl` commands, control flow, internals |
 | [`vulnscan.tui`](tui.md) | Textual application |
 | [`vulnscan.versioncmp`](versioncmp.md) | Ecosystem-aware version comparison |

@@ -7,3 +7,4 @@ feeds/
 .ruff_cache/
 dist/
 site/
+debug.log

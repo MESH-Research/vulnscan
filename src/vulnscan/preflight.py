@@ -16,6 +16,7 @@ base templates) and resolve that.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import tempfile
@@ -40,6 +41,8 @@ from vulnscan.parsers import (
 )
 from vulnscan.registry import RegistryClient
 from vulnscan.risk import RiskKind, VersionScore, score_versions
+
+log = logging.getLogger("vulnscan.preflight")
 
 
 def _load_toml(path: Path) -> dict:
@@ -215,6 +218,22 @@ def _default_run(argv: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[
         capture_output=True,
         text=True,
     )
+
+
+def _logged_run(run_fn: RunFn) -> RunFn:
+    """Wrap a runner so every resolver invocation and its outcome reach the debug log."""
+
+    def run(argv: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+        log.info("preflight: running %s in %s", " ".join(argv), cwd)
+        result = run_fn(argv, cwd)
+        log.info("preflight: %s exited %d", argv[0], result.returncode)
+        if result.stdout:
+            log.debug("preflight: %s stdout:\n%s", argv[0], result.stdout.rstrip())
+        if result.stderr:
+            log.debug("preflight: %s stderr:\n%s", argv[0], result.stderr.rstrip())
+        return result
+
+    return run
 
 
 def _assert_safe_argv(argv: Sequence[str]) -> None:
@@ -1214,8 +1233,9 @@ def run_preflight(
         extra_ignores: Extra exclude specs (CLI ``--preflight-ignore``).
     """
     project = settings.project_path
-    run_fn = run or _default_run
+    run_fn = _logged_run(run or _default_run)
     warnings: list[str] = []
+    log.info("preflight: starting for %s", project)
     ignore_patterns = tuple(settings.preflight_ignore) + load_preflight_ignore_file(project)
     ignore_patterns = ignore_patterns + tuple(extra_ignores)
 
@@ -1238,6 +1258,12 @@ def run_preflight(
         project,
         settings.invenio_webpack,
         discovered_webpack=discovered_webpack,
+    )
+    log.info(
+        "preflight: %d manifests, invenio_mode=%s, ignore patterns %s",
+        len(manifests),
+        invenio_mode,
+        list(ignore_patterns),
     )
     would_versions: dict[tuple[str, str], str] = {}
     would_process: dict[tuple[str, str], str] = {}
@@ -1272,13 +1298,21 @@ def run_preflight(
                 "(Invenio mode uses virtual assets package.json)"
             )
             continue
+        log.info("preflight: mock-locking %s", _rel(manifest, project))
         result, mw = mock_lock_manifest(manifest, project, run_fn)
         warnings.extend(mw)
         if result is None:
             continue
+        log.info(
+            "preflight: %s %s with %d versions",
+            _rel(manifest, project),
+            "resolved" if result.ok else "failed",
+            len(result.versions),
+        )
         _absorb(result)
 
     resolve_ok = succeeded > 0
+    log.info("preflight: %d of %d mock locks succeeded", succeeded, attempted)
     if attempted == 0:
         warnings.append(
             "preflight: no resolvable manifests "

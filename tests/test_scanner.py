@@ -484,3 +484,34 @@ def test_scan_propagates_nvd_errors(tmp_path: Path):
             nvd_client=nvd,
             registry=EmptyRegistry(),
         )
+
+
+class ListingRegistry:
+    """Registry fake that lists versions for named packages and knows no release times."""
+
+    def __init__(self, versions: dict[str, list[str]]):
+        self.versions = versions
+
+    def available_versions(self, dep):
+        return list(self.versions.get(dep.name, []))
+
+    def release_info(self, dep):
+        return {}
+
+
+def test_forward_check_scores_container_candidates_through_nvd_not_osv(tmp_path: Path):
+    write_container_project(tmp_path)
+    osv = FakeClient({})
+    nvd = FakeNVDClient(
+        {
+            ("php", "8.2.19"): [vuln("CVE-OLD", "HIGH")],
+            ("php", "8.2.20"): [vuln("CVE-NEW", "HIGH")],
+        }
+    )
+    registry = ListingRegistry({"php": ["8.2.19", "8.2.20", "8.2.21"]})
+    result = scan(settings_for(tmp_path), client=osv, nvd_client=nvd, registry=registry)
+    assert all(d.ecosystem != CONTAINER for d in osv.seen)
+    assert ("php", "8.2.20") in {(d.name, d.version) for d in nvd.seen}
+    php = next(f for f in result.findings if f.dependency.name == "php")
+    assert php.upgrade_plan.nearest_safe == "8.2.21"
+    assert any("8.2.20" in w for w in php.upgrade_plan.warnings)

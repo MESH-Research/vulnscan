@@ -68,12 +68,16 @@ nav:
       - registry: api/registry.md
       - remediate: api/remediate.md
       - outdated: api/outdated.md
+      - risk: api/risk.md
+      - preflight: api/preflight.md
       - feeds: api/feeds.md
       - reports: api/reports.md
       - notify: api/notify.md
       - ntfy: api/ntfy.md
       - msteams: api/msteams.md
       - cli: api/cli.md
+      - debuglog: api/debuglog.md
+      - activity: api/activity.md
       - tui: api/tui.md
       - versioncmp: api/versioncmp.md
   - Design notes:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -31,6 +32,9 @@ from vulnscan.versioncmp import compare_versions, sort_versions
 from vulnscan.wordfence import WordfenceClient
 
 WORDFENCE_CACHE_FILENAME = "wordfence-production.json"
+
+
+log = logging.getLogger("vulnscan.scanner")
 
 
 def _plural(count: int, singular: str, plural: str) -> str:
@@ -84,18 +88,22 @@ def _local_candidate_versions(finding: Finding, versions: list[str]) -> list[str
     return out
 
 
-def _wordpress_scores(
+def _advisory_scores(
     finding: Finding,
     versions: list[str],
-    wordpress_client: WordfenceClient,
+    client: WordfenceClient | NVDClient,
 ) -> dict[str, VersionScore]:
-    """Score WordPress candidate versions via Wordfence (blocking advisories only)."""
+    """Score candidate versions through a source other than OSV (advisories only).
+
+    Wordfence answers for WordPress packages and the NVD for container images; neither
+    publishes release times, so freshness and yank status are not available.
+    """
     scores: dict[str, VersionScore] = {}
     dep = finding.dependency
     stubs = [replace(dep, version=v) for v in versions]
     if not stubs:
         return scores
-    found = wordpress_client.find_vulnerabilities(stubs, include_unknown_versions=False)
+    found = client.find_vulnerabilities(stubs, include_unknown_versions=False)
     for stub in stubs:
         version = stub.version or ""
         risks: list[VersionRisk] = []
@@ -121,9 +129,16 @@ def enrich_findings(
     osv: OSVClient,
     registry: RegistryClient | None = None,
     wordpress_client: WordfenceClient | None = None,
+    nvd_client: NVDClient | None = None,
     webpack_merge: object | None = None,
 ) -> list[str]:
-    """Attach forward-checked ``upgrade_plan`` to each finding. Returns extra warnings."""
+    """Attach forward-checked ``upgrade_plan`` to each finding. Returns extra warnings.
+
+    Candidates are scored by the source that covers the ecosystem: OSV plus registry
+    metadata for PyPI, npm and Packagist, Wordfence for WordPress, the NVD for
+    container images. The NVD is rate limited and answers one version per request, so
+    only the nearest candidate and the latest release are checked for an image.
+    """
     warnings: list[str] = []
     if not findings:
         return warnings
@@ -136,6 +151,7 @@ def enrich_findings(
         try:
             versions = registry.available_versions(dep)
         except RegistryError as exc:
+            log.info("forward-check: %s: registry lookup failed: %s", dep.name, exc)
             local_warnings.append(f"{dep.name}: could not list versions for forward-check: {exc}")
             finding.upgrade_plan = plan_remediation(finding, [], webpack_merge=webpack_merge)
             finding.candidate_warnings = tuple(local_warnings)
@@ -145,7 +161,11 @@ def enrich_findings(
         scores_by_version: dict[str, VersionScore] = {}
         if dep.ecosystem == WORDPRESS:
             if wordpress_client is not None and candidates:
-                scores_by_version = _wordpress_scores(finding, candidates, wordpress_client)
+                scores_by_version = _advisory_scores(finding, candidates, wordpress_client)
+        elif dep.ecosystem == CONTAINER:
+            if nvd_client is not None and candidates:
+                chosen = list(dict.fromkeys([candidates[0], candidates[-1]]))
+                scores_by_version = _advisory_scores(finding, chosen, nvd_client)
         elif candidates:
             from vulnscan.risk import score_for
 
@@ -167,6 +187,14 @@ def enrich_findings(
             versions,
             webpack_merge=webpack_merge,
             scores=scores_by_version or None,
+        )
+        log.info(
+            "forward-check: %s %s -> nearest safe %s, latest %s%s",
+            dep.name,
+            dep.version or "?",
+            plan.nearest_safe or "none",
+            plan.latest or "none",
+            "" if plan.latest_is_safe else " (latest still affected)",
         )
         finding.upgrade_plan = plan
         finding.candidate_warnings = tuple(plan.warnings)
@@ -194,14 +222,32 @@ def scan(
     """
     if client is None:
         client = OSVClient(base_url=settings.osv_base_url, timeout=settings.request_timeout)
+    log.info(
+        "scan: parsing %s (transitive=%s, include_dev=%s, ignore=%s)",
+        settings.project_path,
+        settings.include_transitive,
+        settings.include_dev,
+        list(settings.ignore_dirs),
+    )
     deps, warnings = parse_project(
         settings.project_path,
         ignore_dirs=settings.ignore_dirs,
         include_transitive=settings.include_transitive,
     )
+    log.info("scan: %d declarations parsed, %d warnings", len(deps), len(warnings))
     if not settings.include_dev:
         deps = [d for d in deps if not d.dev]
     deps = merge_declarations(deps)
+    log.info("scan: %d dependencies after merging declarations", len(deps))
+    for dep in deps:
+        log.debug(
+            "dependency %s %s %s (%s) from %s",
+            dep.ecosystem,
+            dep.name,
+            dep.version or "?",
+            dep.version_source,
+            ", ".join(dep.source_files),
+        )
 
     for dep in deps:
         if dep.custom_source:
@@ -214,9 +260,16 @@ def scan(
     image_deps = [d for d in deps if d.ecosystem == CONTAINER]
     other_deps = [d for d in deps if d.ecosystem not in (WORDPRESS, CONTAINER)]
 
+    log.info(
+        "scan: %d packages for OSV, %d WordPress packages, %d container images",
+        len(other_deps),
+        len(wordpress_deps),
+        len(image_deps),
+    )
     found = client.find_vulnerabilities(
         other_deps, include_unknown_versions=settings.query_unknown_versions
     )
+    log.info("scan: OSV reports advisories for %d packages", len(found))
 
     if wordpress_deps:
         if wordpress_client is None and settings.wordfence_api_key:
@@ -229,17 +282,18 @@ def scan(
                 min_interval_minutes=settings.wordfence_min_interval_minutes,
             )
         if wordpress_client is None:
+            log.info("scan: WordPress packages not checked (no Wordfence API key)")
             warnings.append(
                 f"{_plural(len(wordpress_deps), 'WordPress package', 'WordPress packages')} "
                 "(plugins, themes, core) not checked: set VULNSCAN_WORDFENCE_API_KEY to a "
                 "Wordfence Intelligence API key (free at wordfence.com)"
             )
         else:
-            found.update(
-                wordpress_client.find_vulnerabilities(
-                    wordpress_deps, include_unknown_versions=settings.query_unknown_versions
-                )
+            wordpress_found = wordpress_client.find_vulnerabilities(
+                wordpress_deps, include_unknown_versions=settings.query_unknown_versions
             )
+            log.info("scan: Wordfence reports advisories for %d packages", len(wordpress_found))
+            found.update(wordpress_found)
             warnings.extend(getattr(wordpress_client, "warnings", []))
 
     if image_deps:
@@ -252,11 +306,11 @@ def scan(
                 ttl_hours=settings.nvd_ttl_hours,
                 image_products=parse_image_products(settings.image_products),
             )
-        found.update(
-            nvd_client.find_vulnerabilities(
-                image_deps, include_unknown_versions=settings.query_unknown_versions
-            )
+        image_found = nvd_client.find_vulnerabilities(
+            image_deps, include_unknown_versions=settings.query_unknown_versions
         )
+        log.info("scan: NVD reports advisories for %d images", len(image_found))
+        found.update(image_found)
         warnings.extend(getattr(nvd_client, "warnings", []))
 
     findings = [Finding(dep, vulns) for dep, vulns in found.items() if vulns]
@@ -264,6 +318,7 @@ def scan(
     webpack_merge = _annotate_webpack_merge(settings, findings, warnings)
     if registry is None:
         registry = RegistryClient(timeout=settings.request_timeout)
+    log.info("scan: %d findings; forward-checking upgrade candidates", len(findings))
     warnings.extend(
         enrich_findings(
             findings,
@@ -271,9 +326,11 @@ def scan(
             osv=client,
             registry=registry,
             wordpress_client=wordpress_client,
+            nvd_client=nvd_client,
             webpack_merge=webpack_merge,
         )
     )
+    log.info("scan: finished with %d findings and %d warnings", len(findings), len(warnings))
     return ScanResult(
         project_path=settings.project_path,
         dependencies=deps,

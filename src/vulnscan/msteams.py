@@ -16,7 +16,7 @@ from collections.abc import Callable
 
 import httpx
 
-from vulnscan import __version__
+from vulnscan import __version__, debuglog
 from vulnscan.models import severity_rank
 from vulnscan.notify import AdvisoryNote, Notification, NotificationError, registry_name
 
@@ -236,7 +236,7 @@ class TeamsClient:
         self.webhook_url = webhook_url
         self._sleep = sleep or time.sleep
         self._last_post = 0.0
-        self._client = httpx.Client(
+        self._client = debuglog.Client(
             timeout=timeout, transport=transport, headers={"User-Agent": "vulnscan"}
         )
 

@@ -8,6 +8,7 @@ flags for risk / freshness checks (including yanked versions).
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,7 +16,7 @@ from urllib.parse import quote
 
 import httpx
 
-from vulnscan import __version__
+from vulnscan import __version__, debuglog
 from vulnscan.models import CONTAINER, NPM, PACKAGIST, PYPI, WORDPRESS, Dependency, normalize_name
 from vulnscan.parsers.containers import registry_and_repository, version_from_tag
 from vulnscan.versioncmp import is_prerelease, normalize_version, sort_versions
@@ -34,6 +35,9 @@ _NEXT_LINK = re.compile(r'<([^>]+)>\s*;\s*rel="?next"?')
 
 def _component_count(version: str) -> int:
     return len(version.split("-", 1)[0].split("."))
+
+
+log = logging.getLogger("vulnscan.registry")
 
 
 class RegistryError(Exception):
@@ -79,7 +83,7 @@ class RegistryClient:
 
     def _get_json(self, url: str, params: dict | None = None) -> dict:
         try:
-            with httpx.Client(
+            with debuglog.Client(
                 timeout=self.timeout,
                 transport=self._transport,
                 headers={"User-Agent": f"vulnscan/{__version__}", "Accept": "application/json"},
@@ -211,7 +215,7 @@ class RegistryClient:
         headers = {"User-Agent": f"vulnscan/{__version__}", "Accept": "application/json"}
         tags: list[str] = []
         try:
-            with httpx.Client(
+            with debuglog.Client(
                 timeout=self.timeout, transport=self._transport, follow_redirects=True
             ) as http:
                 while url:
@@ -281,6 +285,7 @@ class RegistryClient:
 
     def available_versions(self, dep: Dependency) -> list[str]:
         """Stable, installable versions of the package, oldest first."""
+        log.info("registry: listing versions of %s (%s)", dep.name, dep.ecosystem)
         if dep.ecosystem == PYPI:
             raw = self._pypi(dep)
         elif dep.ecosystem == PACKAGIST:
@@ -294,6 +299,7 @@ class RegistryClient:
         else:
             raise RegistryError(f"No registry known for ecosystem {dep.ecosystem!r}")
         stable = {v for v in raw if v and not is_prerelease(v, dep.ecosystem)}
+        log.info("registry: %s has %d stable of %d versions", dep.name, len(stable), len(raw))
         return sort_versions(list(stable), dep.ecosystem)
 
     def release_info(self, dep: Dependency) -> dict[str, ReleaseInfo]:
@@ -302,6 +308,7 @@ class RegistryClient:
         Ecosystems without timestamps still return entries with ``published_at=None`` so
         callers can skip freshness without inventing times.
         """
+        log.info("registry: release metadata for %s (%s)", dep.name, dep.ecosystem)
         if dep.ecosystem == PYPI:
             return self._pypi_release_info(dep)
         if dep.ecosystem == PACKAGIST:

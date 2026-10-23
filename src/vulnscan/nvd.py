@@ -13,6 +13,7 @@ NVD allows 5 requests per 30 seconds without an API key and 50 with one, so each
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -22,7 +23,7 @@ from pathlib import Path
 
 import httpx
 
-from vulnscan import __version__
+from vulnscan import __version__, debuglog
 from vulnscan.models import (
     CONTAINER,
     Dependency,
@@ -132,6 +133,9 @@ IMAGE_PRODUCTS: dict[str, str] = {
     "docker.elastic.co/logstash/logstash": "elastic:logstash",
 }
 """Built-in map of canonical image name to CPE ``vendor:product``."""
+
+
+log = logging.getLogger("vulnscan.nvd")
 
 
 class NVDError(Exception):
@@ -401,6 +405,7 @@ class NVDClient:
         if self._last_request is not None:
             elapsed = time.monotonic() - self._last_request
             if elapsed < interval:
+                log.info("NVD: waiting %.1f s to respect the rate limit", interval - elapsed)
                 self._sleep(interval - elapsed)
         self._last_request = time.monotonic()
 
@@ -415,7 +420,7 @@ class NVDClient:
         }
         self._throttle()
         try:
-            with httpx.Client(timeout=self.timeout, transport=self._transport) as http:
+            with debuglog.Client(timeout=self.timeout, transport=self._transport) as http:
                 response = http.get(self.base_url, params=params, headers=headers)
         except httpx.HTTPError as exc:
             raise NVDError(f"NVD request failed: {exc}") from exc
@@ -441,6 +446,7 @@ class NVDClient:
         records: list[dict] = []
         start = 0
         while True:
+            log.info("NVD: fetching %s from index %d", match, start)
             page = self._get_page(match, start)
             for item in page.get("vulnerabilities") or []:
                 cve = item.get("cve") if isinstance(item, dict) else None
@@ -457,6 +463,7 @@ class NVDClient:
         """Cached records for one ``(product, version)``, from memory, disk or NVD."""
         key = (product, version)
         if key in self._memory:
+            log.debug("NVD: %s %s served from memory", product, version)
             return self._memory[key]
         path = self._cache_path(product, version)
         age = self._cache_age(path)
@@ -464,13 +471,16 @@ class NVDClient:
             try:
                 records = self._read_cache(path)
             except (OSError, ValueError):
+                log.info("NVD: cached answer for %s %s unreadable", product, version, exc_info=True)
                 records = None
             if records is not None:
+                log.info("NVD: %s %s from cache (%.1f h old)", product, version, age / 3600)
                 self._memory[key] = records
                 return records
         try:
             records = self._download(product, version)
         except NVDError as exc:
+            log.info("NVD: download for %s %s failed: %s", product, version, exc)
             if path is None or age is None:
                 raise
             try:

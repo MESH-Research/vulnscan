@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+import time
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -14,6 +16,8 @@ from textual.timer import Timer
 from textual.widgets import DataTable, Footer, Header, Label, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
 
+from vulnscan import activity
+from vulnscan.activity import Transfer, describe, format_bytes
 from vulnscan.config import Settings
 from vulnscan.feeds import write_feeds
 from vulnscan.models import Dependency, Finding, ScanResult, Vulnerability, format_declaration
@@ -85,6 +89,76 @@ OUTDATED_BANNER = (
     "Press u for the newest release in the current series or the latest release."
 )
 NOT_SECURITY_NOTE = "Routine update: this is not a security advisory."
+
+
+LINGER_SECONDS = 2.0
+"""How long a finished transfer stays in the activity panel."""
+ACTIVITY_MAX_ROWS = 5
+
+
+ACTIVITY_LABEL_WIDTH = 34
+
+
+def _bar(fraction: float, width: int) -> str:
+    filled = round(fraction * width)
+    return "━" * filled + "╌" * (width - filled)
+
+
+def _activity_line(transfer: Transfer, label_width: int, width: int) -> str:
+    label = describe(transfer.method, transfer.url)[:label_width].ljust(label_width)
+    if transfer.failed:
+        return f"✖ {label} failed: {transfer.error}"
+    if transfer.status is None:
+        return f"⇣ {label} {'╌' * width} waiting for a response"
+    if transfer.done:
+        elapsed = (transfer.finished or 0) - transfer.started
+        detail = f"{transfer.status} {format_bytes(transfer.received)} in {elapsed:.1f} s"
+        return f"✔ {label} {'━' * width} {detail}"
+    fraction = transfer.fraction
+    if fraction is None:
+        return f"⇣ {label} {'┄' * width} {format_bytes(transfer.received)} received"
+    detail = (
+        f"{fraction * 100:3.0f}% {format_bytes(transfer.received)} / "
+        f"{format_bytes(transfer.total or 0)}"
+    )
+    return f"⇣ {label} {_bar(fraction, width)} {detail}"
+
+
+def render_activity(
+    transfers: Sequence[Transfer],
+    now: float,
+    *,
+    session_requests: int = 0,
+    session_bytes: int = 0,
+    width: int = 24,
+) -> str:
+    """Text for the activity panel: one line per transfer plus a summary, or ``""``.
+
+    Transfers still in flight come first, oldest first; finished ones follow, newest
+    first, and stay for :data:`LINGER_SECONDS` so that quick requests are still seen.
+    """
+    live = sorted((t for t in transfers if not t.done), key=lambda t: t.id)
+    recent = sorted(
+        (t for t in transfers if t.done and now - (t.finished or 0) <= LINGER_SECONDS),
+        key=lambda t: t.finished or 0,
+        reverse=True,
+    )
+    rows = live + recent
+    if not rows:
+        return ""
+    shown = rows[:ACTIVITY_MAX_ROWS]
+    label_width = min(ACTIVITY_LABEL_WIDTH, max(len(describe(t.method, t.url)) for t in shown))
+    lines = [_activity_line(t, label_width, width) for t in shown]
+    if len(rows) > len(shown):
+        lines.append(f"  and {len(rows) - len(shown)} more")
+    summary = [
+        _plural(max(session_requests, len(transfers)), "request"),
+        f"{format_bytes(session_bytes)} received",
+    ]
+    if live:
+        summary.append(f"{len(live)} in flight")
+    lines.append("  " + " · ".join(summary))
+    return "\n".join(lines)
 
 
 def _cells(values: list[str], remediated: bool) -> list[str | Text]:
@@ -420,6 +494,7 @@ class VulnScanApp(App[None]):
     #vulns { height: auto; max-height: 40%; min-height: 4; }
     #detail-scroll { height: 1fr; border-top: solid $primary; padding: 0 1; }
     #status { height: auto; padding: 0 1; background: $panel; }
+    #activity { height: auto; padding: 0 1; background: $panel; color: $text-muted; }
     #mode-banner {
         height: auto; padding: 0 1; background: $warning 25%; text-style: bold;
     }
@@ -460,6 +535,11 @@ class VulnScanApp(App[None]):
         self._spinner_timer: Timer | None = None
         self._current_finding: Finding | None = None
         self._current_vuln: Vulnerability | None = None
+        self._transfers: dict[int, Transfer] = {}
+        self._activity_lock = threading.Lock()
+        self._session_requests = 0
+        self._session_bytes = 0
+        self._activity_timer: Timer | None = None
 
     @property
     def status_text(self) -> str:
@@ -490,6 +570,7 @@ class VulnScanApp(App[None]):
                 with VerticalScroll(id="detail-scroll"):
                     yield Markdown("_Select a dependency to see its advisories._", id="detail")
         yield Static(self._status, id="status")
+        yield Static("", id="activity", markup=False)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -503,7 +584,43 @@ class VulnScanApp(App[None]):
             columns = OUTDATED_COLUMNS
         self._dep_column_keys = self.query_one("#deps", DataTable).add_columns(*columns)
         self.query_one("#vulns", DataTable).add_columns(*VULN_COLUMNS)
+        self.query_one("#activity", Static).display = False
+        activity.subscribe(self._on_transfer)
+        self._activity_timer = self.set_interval(0.2, self._refresh_activity)
         self._start_scan()
+
+    # -- HTTP activity panel -------------------------------------------------------
+
+    def _on_transfer(self, transfer: Transfer) -> None:
+        """Record the latest snapshot of a transfer; called from worker threads."""
+        with self._activity_lock:
+            previous = self._transfers.get(transfer.id)
+            if previous is None:
+                self._session_requests += 1
+            self._session_bytes += transfer.received - (previous.received if previous else 0)
+            self._transfers[transfer.id] = transfer
+
+    def _refresh_activity(self) -> None:
+        """Repaint the activity panel and forget transfers that have lingered long enough."""
+        now = time.monotonic()
+        with self._activity_lock:
+            expired = [
+                key
+                for key, t in self._transfers.items()
+                if t.done and now - (t.finished or 0) > LINGER_SECONDS
+            ]
+            for key in expired:
+                del self._transfers[key]
+            snapshot = list(self._transfers.values())
+            requests, received = self._session_requests, self._session_bytes
+        text = render_activity(snapshot, now, session_requests=requests, session_bytes=received)
+        panel = self.query_one("#activity", Static)
+        if text:
+            panel.update(text)
+            panel.display = True
+        elif panel.display:
+            panel.update("")
+            panel.display = False
 
     # -- status / busy spinner ----------------------------------------------------
 
@@ -541,8 +658,12 @@ class VulnScanApp(App[None]):
         self._busy_message = None
 
     def on_unmount(self) -> None:
-        """Stop the busy timer if the app is torn down mid-scan."""
+        """Stop the timers and the activity subscription if the app is torn down mid-scan."""
         self._stop_busy()
+        activity.unsubscribe(self._on_transfer)
+        if self._activity_timer is not None:
+            self._activity_timer.stop()
+            self._activity_timer = None
 
     # -- scanning -----------------------------------------------------------------
 

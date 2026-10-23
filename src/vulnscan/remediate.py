@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -61,6 +62,9 @@ from vulnscan.versioncmp import compare_versions, sort_versions
 
 if TYPE_CHECKING:
     from vulnscan.config import Settings
+
+
+log = logging.getLogger("vulnscan.remediate")
 
 
 class RemediationError(Exception):
@@ -206,6 +210,16 @@ def plan_remediation(
                 )
                 warnings.append(f"skipped {version} ({detail})")
                 break
+    log.info(
+        "plan: %s %s: %d candidates above current, %d safe; nearest %s, latest %s%s",
+        dep.name,
+        dep.version or "?",
+        len(candidates),
+        len(safe),
+        nearest or "none",
+        latest,
+        "" if is_safe(latest) else " (not safe)",
+    )
     return RemediationPlan(
         current=dep.version,
         nearest_safe=nearest,
@@ -1153,6 +1167,9 @@ def apply_remediation(
     For other ecosystems (and npm outside Invenio mode), every rewrite is computed before
     any file is written, so a manifest that cannot be edited leaves all of them untouched.
     """
+    log.info(
+        "remediate: %s %s -> %s in %s", dep.name, dep.version or "?", new_version, project_root
+    )
     if dep.transitive:
         return apply_pin(project_root, dep, new_version, settings=settings)
     if dep.ecosystem == NPM and settings is not None and _invenio_active(project_root, settings):
@@ -1174,9 +1191,17 @@ def apply_remediation(
         text = path.read_text(encoding="utf-8")
         new_text, old, new = editor(text, dep, new_version, source_file)
         pending.append((path, text, new_text, RemediationChange(path, source_file, old, new)))
-    for path, text, new_text, _change in pending:
+    for path, text, new_text, change in pending:
         if new_text != text:
+            log.info(
+                "remediate: writing %s (%s -> %s)",
+                change.source_file,
+                change.old_constraint,
+                change.new_constraint,
+            )
             path.write_text(new_text, encoding="utf-8")
+        else:
+            log.info("remediate: %s unchanged", change.source_file)
     hints = dict.fromkeys(follow_up_hint(project_root, dep, sf) for sf in source_files)
     return RemediationResult(tuple(c for *_, c in pending), " ".join(hints))
 

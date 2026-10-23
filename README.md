@@ -44,6 +44,12 @@ channel the first time a new advisory appears.
 - **Interfaces:** an interactive terminal UI; non-interactive modes for cron; a
   continuous watch mode that notifies [ntfy](https://ntfy.sh) and/or Microsoft
   Teams.
+- **Looking ahead:** every upgrade it offers is forward-checked against OSV
+  and the registry, so it never proposes a version with its own advisory, a
+  malware report or a yank, and it warns when a version is hours old.
+  `--preflight` resolves each manifest from scratch in a temporary directory
+  and scores what an update would pull in, with a JSON report and exit codes
+  for CI.
 - **Scope:** direct dependencies by default. With `--transitive` (or
   `VULNSCAN_TRANSITIVE=true`) every package a lock file records is scanned too,
   marked as transitive together with the packages that require it.
@@ -92,6 +98,16 @@ advisories for the selected dependency with their CVE ids. The bottom-right pane
 shows the full disclosure: severity and CVSS vector, aliases, fixed versions,
 each declaring file with its constraint, the advisory text and all reference
 links.
+
+While a scan, a version lookup or a preflight resolve runs, an **activity
+panel** above the key bar lists every HTTP request as it happens: the source
+and what it is asked about (`OSV querybatch`, `PyPI requests`, `Wordfence
+feed`, `NVD php:php:8.2.19`, `Docker Hub library/php tags`), a progress bar
+fed by the bytes received against the size the server announced, and the
+status, size and time once it has answered. Finished requests stay for two
+seconds so quick ones do not flash by unseen, a request that failed says why,
+and a summary line counts the session's requests and bytes. The panel
+disappears when nothing has happened for a while.
 
 ### Outdated packages (not just security)
 
@@ -194,7 +210,12 @@ uv run vulnscan --remediate wp-plugin/elementor --strategy latest --path /path/t
 vulnscan looks up the versions published for the package and offers the
 **nearest safe version** (the smallest upgrade above the installed one that no
 advisory affects, so `symfony/http-kernel` 5.4.0 goes to 5.4.20, not 6.x) or the
-**latest release**, saying if even that is still affected. Pre-release and
+**latest release**, saying if even that is still affected. Every candidate is
+itself checked against OSV and the registry first (the **forward check**): a
+version that carries its own advisory, is reported as malware or has been
+yanked is skipped and the output says why, and one published less than
+`VULNSCAN_FRESH_HOURS` ago (default 24) is offered with a `~fresh` warning
+rather than silently. Pre-release and
 yanked versions are never offered. The constraint is rewritten in every manifest
 that declares the package, keeping the operator style (`^12.2` becomes `^16.3`,
 `~4.18.2` becomes `~4.19.2`, `Django>=4.2,<5` becomes `Django>=4.2.11,<5`) and
@@ -231,6 +252,73 @@ table, `requirements.txt` or `Pipfile`), a `require` entry in
 text first; Esc leaves it untouched. See
 [Upgrading dependencies](docs/remediation.md#transitive-dependencies).
 
+### Preflight: what the next resolve would pull in
+
+```
+uv run vulnscan --preflight --path /path/to/project                    # interactive
+uv run vulnscan --preflight --json - --path /path/to/project           # machine-readable, for CI
+uv run vulnscan --preflight --text --update-feeds --strict-fresh --path /path/to/project
+```
+
+A scan reports on the versions you have. `--preflight` reports on the versions
+you would get: for each manifest it copies the registry constraints into an
+empty temporary project, runs a fresh resolve there without your lock files,
+compares the would-be versions with the current tree and scores every package
+that would change or that carries a risk. The project is never modified and no
+lock file of yours is written.
+
+| Manifest                                                                                              | Resolver                                                                                                              | Label             |
+| ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `pyproject.toml` (PEP 621, PEP 735 groups, Poetry), `requirements*.txt`, `setup.cfg`, `Pipfile`       | `uv lock`                                                                                                             | `uv`              |
+| `package.json`                                                                                        | `npm install --package-lock-only --ignore-scripts`, or `pnpm install --lockfile-only --ignore-scripts` when `packageManager` names pnpm | `npm`             |
+| Invenio theme bundles (see [docs/invenio.md](docs/invenio.md))                                        | one virtual assets `package.json`, resolved the same way                                                              | `invenio-assets`  |
+| `composer.json`                                                                                       | `composer update --no-install --no-interaction --ignore-platform-reqs --no-scripts --no-plugins`                      | `composer`        |
+
+The resolver must be installed (`uv`, `npm` or `pnpm`, `composer`). A manifest
+whose resolve fails is reported as a warning with the tool's output, and when
+none succeeds the run fails. Path, editable, git, URL and workspace
+dependencies cannot be fetched from a registry: local path packages contribute
+their own PyPI requirements, the rest are dropped with a warning.
+`[build-system].requires`, uv constraint and override dependencies and
+`[[tool.uv.index]]` entries are honoured. Container images and `webpack.py`
+are skipped. Because the resolve is complete, the result covers the transitive
+packages it would install, not only the direct ones.
+
+Each would-be version is checked for four kinds of risk:
+
+- **advisory**: an OSV advisory affects that exact version;
+- **malware**: the advisory is a malicious-package report (OSV `MAL-` ids and
+  records marked as such);
+- **yanked**: the release has been withdrawn (PyPI yanked files, npm
+  unpublished versions);
+- **fresh**: it was published less than `VULNSCAN_FRESH_HOURS` ago (default
+  24), the window in which a hijacked package does the most damage. PyPI,
+  npm and Packagist give publish times; wordpress.org and container
+  registries do not, so their versions are never fresh.
+
+Alone, `--preflight` opens the TUI with a **Preflight** table: package,
+ecosystem, build process, current version, would-be version, risks and
+declaring file; `f` writes the preflight feeds and `r` resolves again. With
+`--json`, `--text`, `--markdown` or `--update-feeds` it runs non-interactively
+and writes `preflight.json`, `preflight.txt`, `preflight.md` or
+`preflight.rss.xml` / `preflight.atom.xml` in the feed directory (`-` sends
+JSON, text or Markdown to stdout). The JSON carries `schema_version`,
+`resolve_ok`, a `summary` of counts, each package with its `current`,
+`would_be`, `build_process` and `risks`, the `ignored` packages and the
+`warnings`.
+
+The exit code is 0 when nothing blocks, 1 when a package carries an advisory,
+malware or yanked risk or no manifest could be resolved, and, with
+`--strict-fresh` (or `VULNSCAN_STRICT_FRESH=true`), 2 when freshness is the
+only problem. Exclude packages you accept with `--preflight-ignore NAME`
+(repeatable or comma separated; a `pypi:`, `npm:`, `packagist:` or
+`wordpress:` prefix and shell wildcards are allowed), with
+`VULNSCAN_PREFLIGHT_IGNORE`, or with a `.vulnscan-preflight-ignore` file in the
+project root, one pattern per line with `#` comments. Excluded packages are
+still listed, under *ignored*, but never affect the exit code; a pattern that
+matches nothing is a warning. `--preflight` cannot be combined with `--ntfy`,
+`--msteams`, `--test` or `--remediate`.
+
 ### Ignoring directories
 
 Some directories should never be scanned, such as a quarantine of plugins you
@@ -258,6 +346,44 @@ The same package at the same installed version in several manifests (a
 `pyproject.toml`, say) is one dependency with several declarations. Every output
 lists all of its files, and an upgrade edits each of them. Different installed
 versions stay separate because they may have different advisories.
+
+### Diagnosing problems
+
+```
+uv run vulnscan --update-feeds --path /path/to/project -d                        # writes ./debug.log
+uv run vulnscan --update-feeds --path /path/to/project -dd --debug-log /tmp/vulnscan.log
+```
+
+When an advisory source answers with an error, or the result is not what you
+expect, `-d` / `--debug` writes a diagnostic log through Python's standard
+`logging` framework. Repeating the flag raises the verbosity; `VULNSCAN_DEBUG`
+takes the same number.
+
+| Flag   | `VULNSCAN_DEBUG` | What is recorded                                                                                                                                                                                                                                                                             |
+| ------ | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-d`   | `1`              | Every outgoing HTTP request (method, URL, headers, body size) and its response (status, headers, body, elapsed time), each request followed by a `curl` command that repeats it exactly; plus every warning and error                                                                       |
+| `-dd`  | `2`              | Also the control flow: which manifests were parsed, how many packages went to each source, cache and rate-limit decisions, registry lookups, upgrade plans, the resolver commands preflight runs and their exit codes, watch-mode cycles                                                    |
+| `-ddd` | `3`              | Also `DEBUG` records from vulnscan and from every library it uses (httpx, httpcore, Textual), the stdout and stderr of preflight resolvers, and a full traceback for any uncaught exception                                                                                                   |
+
+The log goes to `debug.log` in the current directory unless `--debug-log FILE`
+or `VULNSCAN_DEBUG_LOG` says otherwise. It is appended to, and each run starts
+with a banner naming the version, level, command line and Python version.
+Response bodies longer than 16 KB are cut; request bodies never are, because
+the `curl` command has to be complete. A request and its response share a
+`#n` number so they can be matched when several run at once.
+
+Credentials never reach the file. Wherever the Wordfence or NVD key, the ntfy
+token or password, or the Teams webhook URL would appear, the log writes the
+shell variable instead, for example
+`-H "Authorization: Bearer $VULNSCAN_WORDFENCE_API_KEY"`, so a pasted command
+works as soon as the variables are exported (`set -a; . ./.env; set +a` in
+bash). The short-lived anonymous pull tokens that container registries issue
+are the one credential written as is.
+
+The records live in the `vulnscan.*` logger hierarchy, so a program that
+imports vulnscan can configure `logging` itself instead of using the flag:
+`vulnscan.http` carries the HTTP records at `DEBUG`, and the other modules log
+their control flow at `INFO`.
 
 ## Configuration
 
@@ -300,6 +426,14 @@ comments.
 | `VULNSCAN_NTFY_STATE_FILE`                          | `ntfy-state.json`                                 | Which advisories ntfy has received                                                     |
 | `VULNSCAN_MSTEAMS_WEBHOOK_URL`                      | empty                                             | Teams incoming webhook URL (required for `--msteams`)                                  |
 | `VULNSCAN_MSTEAMS_STATE_FILE`                       | `msteams-state.json`                              | Which advisories Teams has received                                                    |
+| `VULNSCAN_FRESH_HOURS`                              | `24`                                              | A version published more recently than this is flagged as `fresh`                      |
+| `VULNSCAN_STRICT_FRESH`                             | `false`                                           | `--preflight` exits 2 when freshness is the only risk (`--strict-fresh`)               |
+| `VULNSCAN_PREFLIGHT_IGNORE`                         | empty                                             | Packages excluded from preflight scoring, comma separated (`--preflight-ignore`)       |
+| `VULNSCAN_PREFLIGHT_RSS_FILE` / `..._ATOM_FILE`     | `preflight.rss.xml` / `preflight.atom.xml`        | Preflight feed filenames                                                               |
+| `VULNSCAN_PREFLIGHT_STATE_FILE`                     | `preflight-state.json`                            | When each preflight entry was first seen                                               |
+| `VULNSCAN_PREFLIGHT_MARKDOWN_FILE` / `..._TEXT_FILE` | `preflight.md` / `preflight.txt`                 | Preflight report filenames                                                             |
+| `VULNSCAN_DEBUG`                                    | `0`                                               | Debug log verbosity, `0` (off) to `3` (`-d`, `-dd`, `-ddd`)                            |
+| `VULNSCAN_DEBUG_LOG`                                | `debug.log`                                       | Where the debug log is written (`--debug-log`)                                         |
 
 ### Wordfence API key
 

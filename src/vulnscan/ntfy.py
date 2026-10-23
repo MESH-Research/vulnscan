@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from vulnscan import __version__
+from vulnscan import __version__, debuglog
 from vulnscan.models import normalize_severity
 from vulnscan.notify import AdvisoryNote, Notification, NotificationError, registry_name
 
@@ -60,7 +60,7 @@ class NtfyClient:
             headers["Authorization"] = f"Bearer {token}"
         elif user:
             auth = (user, password)
-        self._client = httpx.Client(
+        self._client = debuglog.Client(
             base_url=self.server + "/",
             headers=headers,
             auth=auth,

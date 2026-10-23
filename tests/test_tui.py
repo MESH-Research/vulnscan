@@ -946,3 +946,155 @@ async def test_outdated_mode_pins_transitive_dependency_to_series_or_latest(tmp_
         await pilot.press("enter")
         await settle(app, pilot)
         assert '"certifi>=2026.10.19"' in (settings.project_path / "pyproject.toml").read_text()
+
+
+# --- HTTP activity panel ------------------------------------------------------------------
+
+
+def _transfer(**kwargs):
+    from vulnscan.activity import Transfer
+
+    base = {
+        "id": 1,
+        "method": "GET",
+        "url": "https://pypi.org/pypi/requests/json",
+        "started": 100.0,
+    }
+    base.update(kwargs)
+    return Transfer(**base)
+
+
+def test_render_activity_is_empty_when_nothing_happened():
+    from vulnscan.tui import render_activity
+
+    assert render_activity([], now=100.0) == ""
+
+
+def test_render_activity_shows_label_progress_and_sizes_for_a_download_in_flight():
+    from vulnscan.tui import render_activity
+
+    text = render_activity(
+        [_transfer(status=200, total=120_000_000, received=73_200_000)], now=101.0
+    )
+    assert "PyPI requests" in text
+    assert "61%" in text
+    assert "73.2 MB" in text
+    assert "120.0 MB" in text
+
+
+def test_render_activity_shows_bytes_without_a_percentage_when_size_is_unknown():
+    from vulnscan.tui import render_activity
+
+    text = render_activity([_transfer(status=200, received=12_400)], now=101.0)
+    assert "12.4 kB" in text
+    assert "%" not in text
+
+
+def test_render_activity_marks_a_request_that_is_still_waiting_for_an_answer():
+    from vulnscan.tui import render_activity
+
+    text = render_activity([_transfer()], now=101.0)
+    assert "PyPI requests" in text
+    assert "waiting" in text.lower()
+
+
+def test_render_activity_keeps_a_finished_transfer_briefly_then_drops_it():
+    from vulnscan.tui import LINGER_SECONDS, render_activity
+
+    done = _transfer(status=200, total=46, received=46, finished=101.0)
+    assert "PyPI requests" in render_activity([done], now=101.0 + LINGER_SECONDS / 2)
+    assert "200" in render_activity([done], now=101.0 + LINGER_SECONDS / 2)
+    assert render_activity([done], now=101.0 + LINGER_SECONDS + 1) == ""
+
+
+def test_render_activity_says_when_a_transfer_failed():
+    from vulnscan.tui import render_activity
+
+    failed = _transfer(error="connection refused", finished=101.0)
+    text = render_activity([failed], now=101.5)
+    assert "failed" in text.lower()
+    assert "connection refused" in text
+
+
+def test_render_activity_summarises_the_session_and_in_flight_count():
+    from vulnscan.tui import render_activity
+
+    rows = [
+        _transfer(id=1, status=200, total=1000, received=1000, finished=100.5),
+        _transfer(
+            id=2, url="https://registry.npmjs.org/lodash", status=200, total=5000, received=2000
+        ),
+    ]
+    text = render_activity(rows, now=101.0, session_requests=14, session_bytes=73_300_000)
+    assert "14 requests" in text
+    assert "73.3 MB" in text
+    assert "1 in flight" in text
+
+
+def test_render_activity_limits_the_rows_and_counts_the_rest():
+    from vulnscan.tui import ACTIVITY_MAX_ROWS, render_activity
+
+    rows = [
+        _transfer(id=i, url=f"https://pypi.org/pypi/pkg{i}/json", status=200, received=1)
+        for i in range(ACTIVITY_MAX_ROWS + 3)
+    ]
+    text = render_activity(rows, now=101.0)
+    assert text.count("PyPI pkg") == ACTIVITY_MAX_ROWS
+    assert "3 more" in text
+
+
+def test_render_activity_lists_transfers_in_flight_before_finished_ones():
+    from vulnscan.tui import render_activity
+
+    rows = [
+        _transfer(id=1, status=200, total=10, received=10, finished=100.9),
+        _transfer(id=2, url="https://registry.npmjs.org/lodash", status=200, total=50, received=5),
+    ]
+    text = render_activity(rows, now=101.0)
+    assert text.index("npm lodash") < text.index("PyPI requests")
+
+
+async def test_activity_panel_shows_requests_while_a_scan_runs(tmp_path: Path):
+    import threading
+    import time
+
+    from textual.widgets import Static
+
+    from vulnscan import activity
+
+    settings = settings_for(tmp_path)
+    published = threading.Event()
+    release = threading.Event()
+
+    def scanning(s: Settings) -> ScanResult:
+        activity.publish(
+            activity.Transfer(
+                id=activity.next_id(),
+                method="GET",
+                url="https://www.wordfence.com/api/intelligence/v3/vulnerabilities/production",
+                started=time.monotonic(),
+                status=200,
+                total=1000,
+                received=400,
+            )
+        )
+        published.set()
+        release.wait(timeout=5)
+        return sample_result(s.project_path)
+
+    app = VulnScanApp(settings, scan_fn=scanning)
+    async with app.run_test() as pilot:
+        for _ in range(50):
+            if published.is_set():
+                break
+            await pilot.pause(0.05)
+        assert published.is_set()
+        await pilot.pause(0.3)
+        panel = app.query_one("#activity", Static)
+        assert panel.display is True
+        rendered = str(panel.content)
+        assert "Wordfence feed" in rendered
+        assert "40%" in rendered
+        release.set()
+        await settle(app, pilot)
+        assert "vulnerable" in app.status_text
