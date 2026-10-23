@@ -178,6 +178,44 @@ of its files, and an upgrade rewrites the constraint in each of them. If the
 files resolve to different versions (say `==1.2.0` in one and `==1.3.0` in
 another) they stay separate, because they may have different advisories.
 
+## Diagnosing problems
+
+```
+uv run vulnscan --update-feeds --path /path/to/project -d                        # writes ./debug.log
+uv run vulnscan --update-feeds --path /path/to/project -dd --debug-log /tmp/vulnscan.log
+```
+
+When an advisory source answers with an error, or the result is not what you
+expect, `-d` / `--debug` writes a diagnostic log through Python's standard
+`logging` framework. Repeating the flag raises the verbosity; `VULNSCAN_DEBUG`
+takes the same number.
+
+| Flag   | `VULNSCAN_DEBUG` | What is recorded                                                                                                                                                                                                                                                                             |
+| ------ | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-d`   | `1`              | Every outgoing HTTP request (method, URL, headers, body size) and its response (status, headers, body, elapsed time), each request followed by a `curl` command that repeats it exactly; plus every warning and error                                                                       |
+| `-dd`  | `2`              | Also the control flow: which manifests were parsed, how many packages went to each source, cache and rate-limit decisions, registry lookups, upgrade plans, the resolver commands preflight runs and their exit codes, watch-mode cycles                                                    |
+| `-ddd` | `3`              | Also `DEBUG` records from vulnscan and from every library it uses (httpx, httpcore, Textual), the stdout and stderr of preflight resolvers, and a full traceback for any uncaught exception                                                                                                   |
+
+The log goes to `debug.log` in the current directory unless `--debug-log FILE`
+or `VULNSCAN_DEBUG_LOG` says otherwise. It is appended to, and each run starts
+with a banner naming the version, level, command line and Python version.
+Response bodies longer than 16 KB are cut; request bodies never are, because
+the `curl` command has to be complete. A request and its response share a
+`#n` number so they can be matched when several run at once.
+
+Credentials never reach the file. Wherever the Wordfence or NVD key, the ntfy
+token or password, or the Teams webhook URL would appear, the log writes the
+shell variable instead, for example
+`-H "Authorization: Bearer $VULNSCAN_WORDFENCE_API_KEY"`, so a pasted command
+works as soon as the variables are exported (`set -a; . ./.env; set +a` in
+bash). The short-lived anonymous pull tokens that container registries issue
+are the one credential written as is.
+
+The records live in the `vulnscan.*` logger hierarchy, so a program that
+imports vulnscan can configure `logging` itself instead of using the flag:
+`vulnscan.http` carries the HTTP records at `DEBUG`, and the other modules log
+their control flow at `INFO`.
+
 ## Exit codes
 
 | Code | Meaning |

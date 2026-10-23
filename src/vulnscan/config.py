@@ -61,6 +61,8 @@ _ENV_MAP: dict[str, tuple[str, Any]] = {
     "preflight_state_filename": ("PREFLIGHT_STATE_FILE", "preflight-state.json"),
     "preflight_markdown_filename": ("PREFLIGHT_MARKDOWN_FILE", "preflight.md"),
     "preflight_text_filename": ("PREFLIGHT_TEXT_FILE", "preflight.txt"),
+    "debug": ("DEBUG", "0"),
+    "debug_log": ("DEBUG_LOG", "debug.log"),
 }
 
 _TRUE = {"1", "true", "yes", "on", "y"}
@@ -137,6 +139,10 @@ class Settings:
     preflight_state_filename: str = "preflight-state.json"
     preflight_markdown_filename: str = "preflight.md"
     preflight_text_filename: str = "preflight.txt"
+    debug: int = 0
+    """Debug log verbosity, 0 (off) to 3; see :mod:`vulnscan.debuglog`."""
+    debug_log: Path = Path("debug.log")
+    """Where the debug log is written when ``debug`` is on."""
 
     @property
     def ntfy_state_path(self) -> Path:
@@ -187,6 +193,18 @@ def _to_invenio_webpack(value: Any) -> str:
     return text
 
 
+def _to_debug_level(value: Any) -> int:
+    try:
+        level = int(str(value).strip())
+    except ValueError:
+        raise ValueError(
+            f"VULNSCAN_DEBUG must be a whole number from 0 to 3 (got {value!r})"
+        ) from None
+    if not 0 <= level <= 3:
+        raise ValueError(f"VULNSCAN_DEBUG must be between 0 and 3 (got {value!r})")
+    return level
+
+
 def _to_optional_path(value: Any) -> Path | None:
     if value is None:
         return None
@@ -221,6 +239,8 @@ _COERCERS = {
     "fresh_hours": float,
     "strict_fresh": _to_bool,
     "preflight_ignore": _to_tuple,
+    "debug": _to_debug_level,
+    "debug_log": lambda v: Path(v).expanduser().resolve(),
 }
 
 

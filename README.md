@@ -259,6 +259,44 @@ The same package at the same installed version in several manifests (a
 lists all of its files, and an upgrade edits each of them. Different installed
 versions stay separate because they may have different advisories.
 
+### Diagnosing problems
+
+```
+uv run vulnscan --update-feeds --path /path/to/project -d                        # writes ./debug.log
+uv run vulnscan --update-feeds --path /path/to/project -dd --debug-log /tmp/vulnscan.log
+```
+
+When an advisory source answers with an error, or the result is not what you
+expect, `-d` / `--debug` writes a diagnostic log through Python's standard
+`logging` framework. Repeating the flag raises the verbosity; `VULNSCAN_DEBUG`
+takes the same number.
+
+| Flag   | `VULNSCAN_DEBUG` | What is recorded                                                                                                                                                                                                                                                                             |
+| ------ | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-d`   | `1`              | Every outgoing HTTP request (method, URL, headers, body size) and its response (status, headers, body, elapsed time), each request followed by a `curl` command that repeats it exactly; plus every warning and error                                                                       |
+| `-dd`  | `2`              | Also the control flow: which manifests were parsed, how many packages went to each source, cache and rate-limit decisions, registry lookups, upgrade plans, the resolver commands preflight runs and their exit codes, watch-mode cycles                                                    |
+| `-ddd` | `3`              | Also `DEBUG` records from vulnscan and from every library it uses (httpx, httpcore, Textual), the stdout and stderr of preflight resolvers, and a full traceback for any uncaught exception                                                                                                   |
+
+The log goes to `debug.log` in the current directory unless `--debug-log FILE`
+or `VULNSCAN_DEBUG_LOG` says otherwise. It is appended to, and each run starts
+with a banner naming the version, level, command line and Python version.
+Response bodies longer than 16 KB are cut; request bodies never are, because
+the `curl` command has to be complete. A request and its response share a
+`#n` number so they can be matched when several run at once.
+
+Credentials never reach the file. Wherever the Wordfence or NVD key, the ntfy
+token or password, or the Teams webhook URL would appear, the log writes the
+shell variable instead, for example
+`-H "Authorization: Bearer $VULNSCAN_WORDFENCE_API_KEY"`, so a pasted command
+works as soon as the variables are exported (`set -a; . ./.env; set +a` in
+bash). The short-lived anonymous pull tokens that container registries issue
+are the one credential written as is.
+
+The records live in the `vulnscan.*` logger hierarchy, so a program that
+imports vulnscan can configure `logging` itself instead of using the flag:
+`vulnscan.http` carries the HTTP records at `DEBUG`, and the other modules log
+their control flow at `INFO`.
+
 ## Configuration
 
 All settings are read from `VULNSCAN_*` environment variables, falling back to a
@@ -300,6 +338,8 @@ comments.
 | `VULNSCAN_NTFY_STATE_FILE`                          | `ntfy-state.json`                                 | Which advisories ntfy has received                                                     |
 | `VULNSCAN_MSTEAMS_WEBHOOK_URL`                      | empty                                             | Teams incoming webhook URL (required for `--msteams`)                                  |
 | `VULNSCAN_MSTEAMS_STATE_FILE`                       | `msteams-state.json`                              | Which advisories Teams has received                                                    |
+| `VULNSCAN_DEBUG`                                    | `0`                                               | Debug log verbosity, `0` (off) to `3` (`-d`, `-dd`, `-ddd`)                            |
+| `VULNSCAN_DEBUG_LOG`                                | `debug.log`                                       | Where the debug log is written (`--debug-log`)                                         |
 
 ### Wordfence API key
 

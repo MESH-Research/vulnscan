@@ -659,3 +659,118 @@ def test_nvd_error_fails_cleanly(tmp_path: Path, monkeypatch, capsys):
     )
     assert code == 1
     assert "NVD rate limit hit" in capsys.readouterr().err
+
+
+# --- debug logging --------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_debug_logging():
+    from vulnscan import debuglog
+
+    debuglog.reset()
+    yield
+    debuglog.reset()
+
+
+def test_parser_counts_debug_flags():
+    parser = cli.build_parser()
+    assert parser.parse_args([]).debug == 0
+    assert parser.parse_args(["--debug"]).debug == 1
+    assert parser.parse_args(["-dd"]).debug == 2
+    assert parser.parse_args(["-d", "--debug", "-d"]).debug == 3
+    assert parser.parse_args(["--debug-log", "out/x.log"]).debug_log == "out/x.log"
+    assert parser.parse_args([]).debug_log is None
+
+
+def test_debug_flag_writes_the_log_file_named_by_debug_log(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(cli, "scan", lambda settings: fake_result(settings.project_path))
+    log = tmp_path / "logs" / "vs.log"
+    code = cli.main(["--text", "-", "--path", str(tmp_path), "--debug", "--debug-log", str(log)])
+    assert code == 0
+    assert log.is_file()
+    assert cli.__version__ in log.read_text()
+
+
+def test_debug_flag_defaults_to_debug_log_in_the_working_directory(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "scan", lambda settings: fake_result(settings.project_path))
+    assert cli.main(["--text", "-", "--path", str(tmp_path), "-d"]) == 0
+    assert (tmp_path / "debug.log").is_file()
+
+
+def test_debug_level_from_environment_and_flags_capped_at_three(tmp_path: Path, monkeypatch):
+    seen = {}
+
+    def fake_scan(settings):
+        seen["debug"] = settings.debug
+        return fake_result(settings.project_path)
+
+    monkeypatch.setattr(cli, "scan", fake_scan)
+    log = tmp_path / "d.log"
+    monkeypatch.setenv("VULNSCAN_DEBUG", "1")
+    monkeypatch.setenv("VULNSCAN_DEBUG_LOG", str(log))
+    assert cli.main(["--text", "-", "--path", str(tmp_path)]) == 0
+    assert seen["debug"] == 1
+    assert log.is_file()
+    assert cli.main(["--text", "-", "--path", str(tmp_path), "-dddd"]) == 0
+    assert seen["debug"] == 3
+
+
+def test_without_debug_no_log_file_is_written(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "scan", lambda settings: fake_result(settings.project_path))
+    assert cli.main(["--text", "-", "--path", str(tmp_path)]) == 0
+    assert not (tmp_path / "debug.log").exists()
+
+
+def test_second_level_records_control_flow_first_does_not(tmp_path: Path, monkeypatch):
+    import logging
+
+    def chatty_scan(settings):
+        logging.getLogger("vulnscan.scanner").info("flow-marker")
+        return fake_result(settings.project_path)
+
+    monkeypatch.setattr(cli, "scan", chatty_scan)
+    one, two = tmp_path / "one.log", tmp_path / "two.log"
+    assert cli.main(["--text", "-", "--path", str(tmp_path), "-d", "--debug-log", str(one)]) == 0
+    assert cli.main(["--text", "-", "--path", str(tmp_path), "-dd", "--debug-log", str(two)]) == 0
+    assert "flow-marker" not in one.read_text()
+    assert "flow-marker" in two.read_text()
+
+
+def test_scan_errors_are_recorded_in_the_debug_log(tmp_path: Path, monkeypatch):
+    def failing(settings):
+        raise OSVError("OSV returned HTTP 400 for /v1/querybatch")
+
+    monkeypatch.setattr(cli, "scan", failing)
+    log = tmp_path / "d.log"
+    code = cli.main(["--text", "-", "--path", str(tmp_path), "-d", "--debug-log", str(log)])
+    assert code == 1
+    assert "HTTP 400" in log.read_text()
+
+
+def test_watch_mode_still_reports_progress_on_stderr_with_debug_on(
+    tmp_path: Path, monkeypatch, no_registry, capsys
+):
+    recorder = RecordingChannel("ntfy")
+    monkeypatch.setattr(cli, "scan", lambda settings: multi_file_result(settings.project_path))
+    monkeypatch.setattr(cli, "build_ntfy_client", lambda settings: recorder)
+    monkeypatch.setenv("VULNSCAN_NTFY_TOPIC", "alerts")
+    log = tmp_path / "d.log"
+    code = cli.main(
+        [
+            "--ntfy",
+            "--once",
+            "--path",
+            str(tmp_path),
+            "--feed-dir",
+            str(tmp_path / "feeds"),
+            "-dd",
+            "--debug-log",
+            str(log),
+        ]
+    )
+    assert code == 0
+    assert "scanning" in capsys.readouterr().err
+    assert "scanning" in log.read_text()

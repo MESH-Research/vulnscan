@@ -131,6 +131,21 @@ the tests inject fakes; the TUI instead injects a whole scan function.
 - `vulnscan.tui` is the Textual application; `vulnscan.cli` chooses between
   it and the non-interactive modes.
 
+## Debug logging (`vulnscan.debuglog`)
+
+Every HTTP client is a `debuglog.Client`, a thin `httpx.Client` subclass whose
+`send` records the request, the response (or the transport error) and a `curl`
+command that replays the request, on the `vulnscan.http` logger at `DEBUG`.
+The other modules log their control flow on `vulnscan.<module>` loggers at
+`INFO` and finer detail at `DEBUG`. `debuglog.configure(level, path)` is the
+only thing that attaches a handler: levels 1 and 2 put a file handler on the
+`vulnscan` logger (at `WARNING` and `INFO` respectively, with `vulnscan.http`
+forced to `DEBUG`); level 3 puts it on the root logger at `DEBUG` and installs
+an `excepthook` so uncaught exceptions are written with their traceback. Secret
+values from the settings are mapped to shell variable names and substituted
+before anything is written. This is the one place with process-wide state,
+mirroring the `logging` module it configures; `debuglog.reset()` undoes it.
+
 ## Design rules
 
 - Type hints everywhere, dataclasses for data, no inheritance hierarchies

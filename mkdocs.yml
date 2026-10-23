@@ -74,6 +74,7 @@ nav:
       - ntfy: api/ntfy.md
       - msteams: api/msteams.md
       - cli: api/cli.md
+      - debuglog: api/debuglog.md
       - tui: api/tui.md
       - versioncmp: api/versioncmp.md
   - Design notes:

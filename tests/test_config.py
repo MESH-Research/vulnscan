@@ -252,3 +252,23 @@ def test_nvd_and_image_product_settings_from_environment(tmp_path: Path):
     assert settings.nvd_url == "https://nvd.example/cves"
     assert settings.nvd_ttl_hours == 6.0
     assert settings.image_products == ("myorg/app=myorg:app", "ghcr.io/x/y=x:y")
+
+
+def test_debug_settings_default_to_off_and_debug_log_in_cwd(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    settings = load_settings(env={}, dotenv_path=tmp_path / "missing.env")
+    assert settings.debug == 0
+    assert settings.debug_log == (tmp_path / "debug.log").resolve()
+
+
+def test_debug_settings_from_environment(tmp_path: Path):
+    env = {"VULNSCAN_DEBUG": "2", "VULNSCAN_DEBUG_LOG": str(tmp_path / "logs" / "vs.log")}
+    settings = load_settings(env=env, dotenv_path=tmp_path / "missing.env")
+    assert settings.debug == 2
+    assert settings.debug_log == (tmp_path / "logs" / "vs.log").resolve()
+
+
+@pytest.mark.parametrize("raw", ["4", "-1", "two", "1.5"])
+def test_debug_level_outside_zero_to_three_is_rejected(tmp_path: Path, raw):
+    with pytest.raises(ValueError):
+        load_settings(env={"VULNSCAN_DEBUG": raw}, dotenv_path=tmp_path / "missing.env")

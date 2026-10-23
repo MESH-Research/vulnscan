@@ -7,6 +7,7 @@ vulnerability. It needs a (free) API key and is large, so it is cached on disk.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from collections.abc import Iterable
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import httpx
 
-from vulnscan import __version__
+from vulnscan import __version__, debuglog
 from vulnscan.models import WORDPRESS, Dependency, VersionRange, Vulnerability, normalize_severity
 from vulnscan.parsers.versions import version_in_range
 
@@ -60,6 +61,9 @@ def slim_feed(feed: dict) -> dict:
         slim[key] = {k: v for k, v in record.items() if k not in _SLIM_DROP}
     slim["_meta"] = {"source": "Wordfence Intelligence", "copyrights": notice}
     return slim
+
+
+log = logging.getLogger("vulnscan.wordfence")
 
 
 class WordfenceError(Exception):
@@ -229,6 +233,7 @@ class WordfenceClient:
         since = self._seconds_since_last_attempt()
         if since is not None and since < self.min_interval_minutes * 60:
             wait = self.min_interval_minutes - since / 60
+            log.info("Wordfence: last attempt %.0f s ago, inside the minimum interval", since)
             raise WordfenceError(
                 f"Wordfence feed was last requested {since / 60:.0f} minutes ago; not "
                 f"contacting the API again for {max(wait, 1):.0f} more minute(s)"
@@ -240,13 +245,18 @@ class WordfenceClient:
         }
         if cached_age is not None:
             headers.update(self._cached_validators())
+        log.info(
+            "Wordfence: downloading the feed%s",
+            " with cached validators" if cached_age is not None else "",
+        )
         self._record_attempt()
         try:
-            with httpx.Client(timeout=self.timeout, transport=self._transport) as http:
+            with debuglog.Client(timeout=self.timeout, transport=self._transport) as http:
                 response = http.get(self.base_url + FEED_PATH, headers=headers)
         except httpx.HTTPError as exc:
             raise WordfenceError(f"Wordfence feed download failed: {exc}") from exc
         if response.status_code == 304 and cached_age is not None and self.cache_path:
+            log.info("Wordfence: feed unchanged upstream (304), cache is fresh again")
             os.utime(self.cache_path, None)  # unchanged upstream: cache is fresh again
             return self._read_cache()
         if response.status_code == 429:
@@ -265,6 +275,8 @@ class WordfenceClient:
         if not isinstance(data, dict):
             raise WordfenceError("Wordfence feed has an unexpected shape")
         data = slim_feed(data)
+        records = sum(1 for k in data if not str(k).startswith("_"))
+        log.info("Wordfence: feed downloaded, %d records", records)
         data["_meta"]["etag"] = response.headers.get("ETag")
         data["_meta"]["last_modified"] = response.headers.get("Last-Modified")
         data["_meta"]["downloaded_at"] = datetime.now(UTC).isoformat()
@@ -279,19 +291,25 @@ class WordfenceClient:
         """Return the feed, from a fresh cache, a new download, or a stale cache as last resort."""
         age = self._cache_age_seconds()
         if age is not None and age < self.ttl_hours * 3600:
+            log.info("Wordfence: using cached feed from %.1f h ago", age / 3600)
             try:
                 return self._read_cache()
             except (OSError, ValueError):
-                pass
+                log.info("Wordfence: cached feed unreadable, downloading instead", exc_info=True)
+        else:
+            state = "no cached feed" if age is None else f"cache is {age / 3600:.1f} h old"
+            log.info("Wordfence: %s", state)
         try:
             return self._download(age)
         except WordfenceError as exc:
+            log.info("Wordfence: download failed: %s", exc)
             if age is None:
                 raise
             try:
                 data = self._read_cache()
             except (OSError, ValueError):
                 raise exc from None
+            log.info("Wordfence: falling back to the stale cache")
             self.warnings.append(
                 f"{exc}; using stale cached Wordfence feed from {age / 3600:.0f} hours ago"
             )
@@ -322,6 +340,8 @@ class WordfenceClient:
             return {}
         if self._index is None:
             self._index = self._build_index()
+            log.info("Wordfence: indexed %d (type, slug) pairs", len(self._index))
+        log.info("Wordfence: matching %d WordPress packages against the feed", len(candidates))
         found: dict[Dependency, list[Vulnerability]] = {}
         for dep in candidates:
             vulns: list[Vulnerability] = []

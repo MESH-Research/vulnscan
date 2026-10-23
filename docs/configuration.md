@@ -101,6 +101,16 @@ An entry for a built-in image overrides the built-in mapping.
 
 See [Notifications](notifications.md).
 
+## Debugging
+
+| Variable             | Default     | Purpose                                                                                                                                                  |
+| -------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VULNSCAN_DEBUG`     | `0`         | Debug log verbosity: `0` off, `1` every HTTP request and response with a `curl` command that repeats it, `2` also control flow, `3` also library internals and tracebacks (`-d`, `-dd`, `-ddd`) |
+| `VULNSCAN_DEBUG_LOG` | `debug.log` | Where the debug log is written, relative to the current directory (`--debug-log`). The file is appended to                                              |
+
+Credentials are written to the log as `$VULNSCAN_*` variable references, never
+as values. See [Diagnosing problems](usage.md#diagnosing-problems).
+
 ## Precedence
 
 For every setting: command line flag, then environment variable, then the `.env`

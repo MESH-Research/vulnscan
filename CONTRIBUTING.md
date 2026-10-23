@@ -41,6 +41,7 @@ fakes and manifests are written into pytest's `tmp_path`.
 src/vulnscan/
   cli.py          argument parsing and the non-interactive modes
   config.py       Settings from VULNSCAN_* variables and .env
+  debuglog.py     the --debug log: HTTP exchanges as curl commands, control flow
   models.py       Dependency, Declaration, Vulnerability, Finding, ScanResult
   parsers/        manifest discovery, manifest and lock-file parsers
   osv.py          OSV.dev client
