@@ -210,22 +210,51 @@ def is_excluded(dep: Dependency, patterns: Sequence[str]) -> bool:
     return False
 
 
+# Shell convention for "command not found"; keeps a missing tool distinct from a
+# resolver that ran and failed.
+_EXIT_COMMAND_NOT_FOUND = 127
+
+
+def _launch_failure(argv: Sequence[str], exc: OSError) -> subprocess.CompletedProcess[str]:
+    """Turn a failure to *start* a resolver into a failed result the callers already handle.
+
+    A missing ``npm``/``uv``/``composer`` binary must only fail that manifest's mock
+    lock, not abort the whole preflight run.
+    """
+    tool = argv[0] if argv else "<unknown>"
+    if isinstance(exc, FileNotFoundError):
+        reason = f"{tool}: command not found (is it installed and on PATH?)"
+    else:
+        reason = f"{tool}: could not be started ({exc.strerror or exc})"
+    return subprocess.CompletedProcess(list(argv), _EXIT_COMMAND_NOT_FOUND, "", reason)
+
+
 def _default_run(argv: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        list(argv),
-        cwd=cwd,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        return subprocess.run(
+            list(argv),
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        return _launch_failure(argv, exc)
 
 
 def _logged_run(run_fn: RunFn) -> RunFn:
-    """Wrap a runner so every resolver invocation and its outcome reach the debug log."""
+    """Wrap a runner so every resolver invocation and its outcome reach the debug log.
+
+    Also guards injected runners: an ``OSError`` raised while launching the tool
+    becomes a failed result rather than propagating out of ``run_preflight``.
+    """
 
     def run(argv: Sequence[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         log.info("preflight: running %s in %s", " ".join(argv), cwd)
-        result = run_fn(argv, cwd)
+        try:
+            result = run_fn(argv, cwd)
+        except OSError as exc:
+            result = _launch_failure(argv, exc)
         log.info("preflight: %s exited %d", argv[0], result.returncode)
         if result.stdout:
             log.debug("preflight: %s stdout:\n%s", argv[0], result.stdout.rstrip())

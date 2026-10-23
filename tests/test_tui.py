@@ -1098,3 +1098,15 @@ async def test_activity_panel_shows_requests_while_a_scan_runs(tmp_path: Path):
         release.set()
         await settle(app, pilot)
         assert "vulnerable" in app.status_text
+
+
+async def test_activity_refresh_tolerates_a_torn_down_panel(tmp_path: Path):
+    """The 200ms activity timer can fire during shutdown after the panel is gone."""
+    from textual.widgets import Static
+
+    app = VulnScanApp(settings_for(tmp_path), scan_fn=lambda s: sample_result(s.project_path))
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await app.query_one("#activity", Static).remove()
+        await pilot.pause()
+        app._refresh_activity()  # must not raise NoMatches
