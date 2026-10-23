@@ -99,6 +99,16 @@ shows the full disclosure: severity and CVSS vector, aliases, fixed versions,
 each declaring file with its constraint, the advisory text and all reference
 links.
 
+While a scan, a version lookup or a preflight resolve runs, an **activity
+panel** above the key bar lists every HTTP request as it happens: the source
+and what it is asked about (`OSV querybatch`, `PyPI requests`, `Wordfence
+feed`, `NVD php:php:8.2.19`, `Docker Hub library/php tags`), a progress bar
+fed by the bytes received against the size the server announced, and the
+status, size and time once it has answered. Finished requests stay for two
+seconds so quick ones do not flash by unseen, a request that failed says why,
+and a summary line counts the session's requests and bytes. The panel
+disappears when nothing has happened for a while.
+
 ### Outdated packages (not just security)
 
 ```

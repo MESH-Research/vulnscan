@@ -131,6 +131,19 @@ the tests inject fakes; the TUI instead injects a whole scan function.
 - `vulnscan.tui` is the Textual application; `vulnscan.cli` chooses between
   it and the non-interactive modes.
 
+## HTTP activity (`vulnscan.activity`)
+
+`debuglog.Client.send` always streams the response and wraps its byte stream,
+so it can publish an immutable `Transfer` snapshot to `vulnscan.activity` when
+the request starts, when the headers arrive (status and `Content-Length`),
+after every chunk and when the body is fully read or the transport fails.
+Observers subscribe with a plain callable and are invoked on the thread doing
+the request, so they only record. The TUI keeps the latest snapshot per
+transfer under a lock and repaints its `#activity` panel from a timer, through
+the pure `render_activity` function, dropping finished transfers after
+`LINGER_SECONDS`. `describe` turns a URL into the label shown (`PyPI
+requests`, `NVD php:php:8.2.19`).
+
 ## Debug logging (`vulnscan.debuglog`)
 
 Every HTTP client is a `debuglog.Client`, a thin `httpx.Client` subclass whose

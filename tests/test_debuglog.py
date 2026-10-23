@@ -450,3 +450,121 @@ def test_msteams_requests_are_logged(tmp_path: Path):
     debuglog.configure(1, log)
     TeamsClient("https://hook.test/x", transport=httpx.MockTransport(_ok)).send_test("proj")
     assert "https://hook.test/x" in log.read_text()
+
+
+# --- activity reporting --------------------------------------------------------------------
+
+
+class _Chunks(httpx.SyncByteStream):
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    def __iter__(self):
+        yield from self._chunks
+
+
+@pytest.fixture
+def transfers():
+    from vulnscan import activity
+
+    activity.reset()
+    seen: list = []
+    activity.subscribe(seen.append)
+    yield seen
+    activity.reset()
+
+
+def _chunked(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(
+        200,
+        stream=_Chunks([b"a" * 100, b"b" * 100, b"c" * 100]),
+        headers={"content-length": "300", "content-type": "text/plain"},
+    )
+
+
+def test_client_reports_start_headers_progress_and_finish_without_a_debug_log(transfers):
+    assert not debuglog.is_active()
+    with _client(_chunked) as http:
+        response = http.get("https://pypi.org/pypi/requests/json")
+    assert response.content == b"a" * 100 + b"b" * 100 + b"c" * 100
+    first, last = transfers[0], transfers[-1]
+    assert first.method == "GET"
+    assert first.url == "https://pypi.org/pypi/requests/json"
+    assert first.status is None and first.received == 0 and not first.done
+    assert any(t.status == 200 and t.total == 300 for t in transfers)
+    received = [t.received for t in transfers]
+    assert received == sorted(received)
+    assert {100, 200, 300} <= set(received)
+    assert last.done and not last.failed
+    assert last.status == 200 and last.received == 300 and last.total == 300
+    assert len({t.id for t in transfers}) == 1
+
+
+def test_client_reports_an_unknown_size_when_there_is_no_content_length(transfers):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_Chunks([b"xyz"]), headers={"content-type": "text/plain"})
+
+    with _client(handler) as http:
+        http.get("https://example.test/")
+    assert transfers[-1].total is None
+    assert transfers[-1].received == 3
+
+
+def test_client_reports_transport_failures(transfers):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=request)
+
+    with _client(handler) as http, pytest.raises(httpx.ConnectError):
+        http.get("https://down.test/")
+    last = transfers[-1]
+    assert last.done and last.failed
+    assert "boom" in last.error
+    assert last.status is None
+
+
+def test_client_reports_error_statuses_as_finished_not_failed(transfers):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"message": "bad"})
+
+    with _client(handler) as http:
+        http.post("https://api.osv.dev/v1/querybatch", json={})
+    assert transfers[-1].status == 400
+    assert transfers[-1].done and not transfers[-1].failed
+
+
+def test_streaming_callers_finish_the_transfer_when_they_read_the_body(transfers):
+    with _client(_chunked) as http:
+        response = http.send(http.build_request("GET", "https://pypi.org/x"), stream=True)
+        assert not transfers[-1].done
+        response.read()
+        response.close()
+    assert transfers[-1].done and transfers[-1].received == 300
+
+
+def test_each_request_gets_its_own_transfer(transfers):
+    with _client(_ok) as http:
+        http.get("https://a.test/")
+        http.get("https://b.test/")
+    ids = {t.id for t in transfers}
+    assert len(ids) == 2
+    assert [t.url for t in transfers if t.done] == ["https://a.test/", "https://b.test/"]
+
+
+def test_a_failing_observer_does_not_break_the_request(transfers):
+    from vulnscan import activity
+
+    def bad(transfer):
+        raise RuntimeError("observer broke")
+
+    activity.subscribe(bad)
+    with _client(_ok) as http:
+        assert http.get("https://a.test/").status_code == 200
+
+
+def test_activity_and_debug_log_work_together(tmp_path: Path, transfers):
+    log = tmp_path / "debug.log"
+    debuglog.configure(1, log)
+    with _client(_chunked) as http:
+        http.get("https://pypi.org/pypi/requests/json")
+    assert transfers[-1].done
+    assert "https://pypi.org/pypi/requests/json" in log.read_text()

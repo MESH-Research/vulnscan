@@ -43,6 +43,7 @@ Then, for example, `vulnscan.feeds.write_feeds(result, settings)`,
 | [`vulnscan.ntfy`](ntfy.md) | ntfy channel |
 | [`vulnscan.msteams`](msteams.md) | Microsoft Teams channel (Adaptive Cards) |
 | [`vulnscan.cli`](cli.md) | Command line entry point |
+| [`vulnscan.activity`](activity.md) | Live `Transfer` snapshots of every HTTP request, for the TUI's activity panel |
 | [`vulnscan.debuglog`](debuglog.md) | The `--debug` log: HTTP exchanges as `curl` commands, control flow, internals |
 | [`vulnscan.tui`](tui.md) | Textual application |
 | [`vulnscan.versioncmp`](versioncmp.md) | Ecosystem-aware version comparison |

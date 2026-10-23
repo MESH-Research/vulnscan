@@ -25,9 +25,10 @@ import logging
 import platform
 import shlex
 import sys
+import threading
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from itertools import count
 from pathlib import Path
@@ -35,7 +36,7 @@ from typing import Any
 
 import httpx
 
-from vulnscan import __version__
+from vulnscan import __version__, activity
 from vulnscan.config import Settings
 
 LEVEL_HTTP = 1
@@ -179,34 +180,108 @@ def _join(lines: list[str]) -> str:
 # -- the client -----------------------------------------------------------------------
 
 
-class Client(httpx.Client):
-    """An :class:`httpx.Client` that records every exchange in the debug log when enabled.
+class _Tracker:
+    """Mutable progress of one transfer; publishes an immutable snapshot on every change."""
 
-    A drop-in replacement: construct it exactly as ``httpx.Client``. When no debug log
-    is configured it costs one attribute check per request.
+    def __init__(self, transfer: activity.Transfer) -> None:
+        self.transfer = transfer
+        self._lock = threading.Lock()
+
+    def _update(self, **changes: Any) -> None:
+        with self._lock:
+            if self.transfer.done:
+                return
+            self.transfer = replace(self.transfer, **changes)
+            snapshot = self.transfer
+        activity.publish(snapshot)
+
+    def headers(self, response: httpx.Response) -> None:
+        length = response.headers.get("content-length")
+        total = int(length) if length and length.isdigit() else None
+        self._update(status=response.status_code, total=total)
+
+    def progress(self, count: int) -> None:
+        self._update(received=self.transfer.received + count)
+
+    def finish(self) -> None:
+        self._update(finished=time.monotonic())
+
+    def fail(self, exc: BaseException) -> None:
+        error = _redact(f"{type(exc).__name__}: {exc}", _state.secrets)
+        self._update(error=error, finished=time.monotonic())
+
+
+class _ProgressStream(httpx.SyncByteStream):
+    """Wraps a response's byte stream to count what arrives and notice when it closes."""
+
+    def __init__(self, inner: httpx.SyncByteStream, tracker: _Tracker) -> None:
+        self._inner = inner
+        self._tracker = tracker
+
+    def __iter__(self):
+        for chunk in self._inner:
+            self._tracker.progress(len(chunk))
+            yield chunk
+
+    def close(self) -> None:
+        self._inner.close()
+        self._tracker.finish()
+
+
+class Client(httpx.Client):
+    """An :class:`httpx.Client` that reports every exchange and records it when debugging.
+
+    A drop-in replacement: construct it exactly as ``httpx.Client``. Every request is
+    published to :mod:`vulnscan.activity` as it starts, answers, streams in and ends,
+    which is what the TUI's activity panel shows. When a debug log is configured the
+    request, the response and a replaying ``curl`` command are written to it as well.
     """
 
-    def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
-        if not is_active():
-            return super().send(request, **kwargs)
-        sequence = next(_state.sequence)
+    def send(
+        self, request: httpx.Request, *, stream: bool = False, **kwargs: Any
+    ) -> httpx.Response:
+        logging_on = is_active()
+        sequence = next(_state.sequence) if logging_on else 0
         started = time.perf_counter()
-        self._log_request(sequence, request)
-        try:
-            response = super().send(request, **kwargs)
-        except Exception as exc:
-            elapsed = time.perf_counter() - started
-            log.debug(
-                "#%d %s %s failed after %.2f s: %s: %s",
-                sequence,
-                request.method,
-                _redact(str(request.url), _state.secrets),
-                elapsed,
-                type(exc).__name__,
-                _redact(str(exc), _state.secrets),
+        tracker = _Tracker(
+            activity.Transfer(
+                id=activity.next_id(),
+                method=request.method,
+                url=_redact(str(request.url), _state.secrets),
+                started=time.monotonic(),
             )
+        )
+        activity.publish(tracker.transfer)
+        if logging_on:
+            self._log_request(sequence, request)
+        try:
+            response = super().send(request, stream=True, **kwargs)
+        except Exception as exc:
+            tracker.fail(exc)
+            if logging_on:
+                log.debug(
+                    "#%d %s %s failed after %.2f s: %s: %s",
+                    sequence,
+                    request.method,
+                    _redact(str(request.url), _state.secrets),
+                    time.perf_counter() - started,
+                    type(exc).__name__,
+                    _redact(str(exc), _state.secrets),
+                )
             raise
-        self._log_response(sequence, request, response, time.perf_counter() - started)
+        tracker.headers(response)
+        response.stream = _ProgressStream(response.stream, tracker)
+        if stream:
+            return response
+        try:
+            response.read()
+        except BaseException as exc:
+            tracker.fail(exc)
+            response.close()
+            raise
+        tracker.finish()
+        if logging_on:
+            self._log_response(sequence, request, response, time.perf_counter() - started)
         return response
 
     @staticmethod
