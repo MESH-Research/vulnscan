@@ -1,12 +1,16 @@
 """Look up the versions available for a package on PyPI, Packagist, wordpress.org, npm
 or a container registry.
 
-Only stable, non-yanked releases are returned, sorted ascending.
+Only stable, non-yanked releases are returned by :meth:`RegistryClient.available_versions`,
+sorted ascending. :meth:`RegistryClient.release_info` returns publish times and yank
+flags for risk / freshness checks (including yanked versions).
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from urllib.parse import quote
 
 import httpx
@@ -36,9 +40,35 @@ class RegistryError(Exception):
     """Raised when available versions cannot be determined."""
 
 
+@dataclass(frozen=True)
+class ReleaseInfo:
+    """Publish metadata for one registry version.
+
+    ``published_at`` may be ``None`` when the registry does not expose a reliable
+    timestamp (best-effort for Packagist / WordPress).
+    """
+
+    published_at: datetime | None
+    yanked: bool = False
+
+
+def _parse_registry_datetime(text: object) -> datetime | None:
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        # PyPI uses space-separated "2015-03-14T16:00:00"; npm uses ISO with Z.
+        normalized = text.replace("Z", "+00:00").replace(" ", "T", 1)
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
 class RegistryClient:
-    """Query PyPI, Packagist, wordpress.org, npm or a container registry for the versions
-    of a dependency.
+    """Query PyPI, Packagist, wordpress.org, npm or a container registry for versions
+    and release metadata.
 
     ``transport`` is for tests. Every failure surfaces as :class:`RegistryError`.
     """
@@ -79,6 +109,27 @@ class RegistryClient:
             versions.append(str(version))
         return versions
 
+    def _pypi_release_info(self, dep: Dependency) -> dict[str, ReleaseInfo]:
+        data = self._get_json(PYPI_URL.format(name=normalize_name(dep.name, PYPI)))
+        out: dict[str, ReleaseInfo] = {}
+        for version, files in (data.get("releases") or {}).items():
+            if not isinstance(files, list) or not files:
+                continue
+            file_dicts = [f for f in files if isinstance(f, dict)]
+            yanked = bool(file_dicts) and all(f.get("yanked") for f in file_dicts)
+            times = [
+                t
+                for f in file_dicts
+                if (
+                    t := _parse_registry_datetime(
+                        f.get("upload_time_iso_8601") or f.get("upload_time")
+                    )
+                )
+            ]
+            published = min(times) if times else None
+            out[str(version)] = ReleaseInfo(published_at=published, yanked=yanked)
+        return out
+
     def _packagist(self, dep: Dependency) -> list[str]:
         name = normalize_name(dep.name, PACKAGIST)
         data = self._get_json(PACKAGIST_URL.format(name=name))
@@ -90,6 +141,21 @@ class RegistryClient:
             for e in entries
             if isinstance(e, dict) and isinstance(e.get("version"), str)
         ]
+
+    def _packagist_release_info(self, dep: Dependency) -> dict[str, ReleaseInfo]:
+        name = normalize_name(dep.name, PACKAGIST)
+        data = self._get_json(PACKAGIST_URL.format(name=name))
+        entries = (data.get("packages") or {}).get(name)
+        if not isinstance(entries, list):
+            raise RegistryError(f"Packagist has no versions for {name}")
+        out: dict[str, ReleaseInfo] = {}
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("version"), str):
+                continue
+            version = normalize_version(str(entry["version"]))
+            published = _parse_registry_datetime(entry.get("time"))
+            out[version] = ReleaseInfo(published_at=published, yanked=False)
+        return out
 
     def _wordpress(self, dep: Dependency) -> list[str]:
         if dep.kind == "core":
@@ -115,6 +181,10 @@ class RegistryClient:
         if not versions:
             raise RegistryError(f"wordpress.org lists no versions for {dep.kind} {dep.slug}")
         return list(versions)
+
+    def _wordpress_release_info(self, dep: Dependency) -> dict[str, ReleaseInfo]:
+        # wordpress.org version lists do not expose per-version upload times reliably.
+        return {v: ReleaseInfo(published_at=None, yanked=False) for v in self._wordpress(dep)}
 
     def _npm(self, dep: Dependency) -> list[str]:
         name = normalize_name(dep.name, NPM)
@@ -192,6 +262,23 @@ class RegistryClient:
                 versions.append(version)
         return versions
 
+    def _npm_release_info(self, dep: Dependency) -> dict[str, ReleaseInfo]:
+        name = normalize_name(dep.name, NPM)
+        data = self._get_json(NPM_URL.format(name=quote(name, safe="@")))
+        versions = data.get("versions")
+        if not isinstance(versions, dict) or not versions:
+            raise RegistryError(f"npm lists no versions for {name}")
+        times = data.get("time") if isinstance(data.get("time"), dict) else {}
+        out: dict[str, ReleaseInfo] = {}
+        for version, meta in versions.items():
+            unpublished = meta.get("unpublished") if isinstance(meta, dict) else None
+            yanked = unpublished is True or isinstance(unpublished, dict)
+            out[str(version)] = ReleaseInfo(
+                published_at=_parse_registry_datetime(times.get(str(version))),
+                yanked=yanked,
+            )
+        return out
+
     def available_versions(self, dep: Dependency) -> list[str]:
         """Stable, installable versions of the package, oldest first."""
         if dep.ecosystem == PYPI:
@@ -208,3 +295,22 @@ class RegistryClient:
             raise RegistryError(f"No registry known for ecosystem {dep.ecosystem!r}")
         stable = {v for v in raw if v and not is_prerelease(v, dep.ecosystem)}
         return sort_versions(list(stable), dep.ecosystem)
+
+    def release_info(self, dep: Dependency) -> dict[str, ReleaseInfo]:
+        """Publish time and yank flag per version string (including yanked / prerelease).
+
+        Ecosystems without timestamps still return entries with ``published_at=None`` so
+        callers can skip freshness without inventing times.
+        """
+        if dep.ecosystem == PYPI:
+            return self._pypi_release_info(dep)
+        if dep.ecosystem == PACKAGIST:
+            return self._packagist_release_info(dep)
+        if dep.ecosystem == WORDPRESS:
+            return self._wordpress_release_info(dep)
+        if dep.ecosystem == NPM:
+            return self._npm_release_info(dep)
+        if dep.ecosystem == CONTAINER:
+            # Tags have no reliable publish/yank metadata in the registry API we use.
+            return {v: ReleaseInfo(published_at=None, yanked=False) for v in self._docker(dep)}
+        raise RegistryError(f"No registry known for ecosystem {dep.ecosystem!r}")

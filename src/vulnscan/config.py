@@ -53,6 +53,14 @@ _ENV_MAP: dict[str, tuple[str, Any]] = {
     "interval_minutes": ("INTERVAL_MINUTES", "60"),
     "invenio_webpack": ("INVENIO_WEBPACK", "auto"),
     "invenio_webpack_overlay": ("INVENIO_WEBPACK_OVERLAY", ""),
+    "fresh_hours": ("FRESH_HOURS", "24"),
+    "strict_fresh": ("STRICT_FRESH", "false"),
+    "preflight_ignore": ("PREFLIGHT_IGNORE", ""),
+    "preflight_rss_filename": ("PREFLIGHT_RSS_FILE", "preflight.rss.xml"),
+    "preflight_atom_filename": ("PREFLIGHT_ATOM_FILE", "preflight.atom.xml"),
+    "preflight_state_filename": ("PREFLIGHT_STATE_FILE", "preflight-state.json"),
+    "preflight_markdown_filename": ("PREFLIGHT_MARKDOWN_FILE", "preflight.md"),
+    "preflight_text_filename": ("PREFLIGHT_TEXT_FILE", "preflight.txt"),
 }
 
 _TRUE = {"1", "true", "yes", "on", "y"}
@@ -118,6 +126,17 @@ class Settings:
     invenio_webpack_overlay: Path | None = None
     include_transitive: bool = False
     """Also scan packages that lock files record but no manifest declares."""
+    fresh_hours: float = 24.0
+    """Treat registry publishes newer than this many hours as freshness risks."""
+    strict_fresh: bool = False
+    """When true, freshness-only preflight hits fail with exit code 2."""
+    preflight_ignore: tuple[str, ...] = ()
+    """Package specs excluded from preflight scoring only."""
+    preflight_rss_filename: str = "preflight.rss.xml"
+    preflight_atom_filename: str = "preflight.atom.xml"
+    preflight_state_filename: str = "preflight-state.json"
+    preflight_markdown_filename: str = "preflight.md"
+    preflight_text_filename: str = "preflight.txt"
 
     @property
     def ntfy_state_path(self) -> Path:
@@ -199,6 +218,9 @@ _COERCERS = {
     "interval_minutes": float,
     "invenio_webpack": _to_invenio_webpack,
     "invenio_webpack_overlay": _to_optional_path,
+    "fresh_hours": float,
+    "strict_fresh": _to_bool,
+    "preflight_ignore": _to_tuple,
 }
 
 

@@ -47,6 +47,42 @@ def test_plan_picks_nearest_safe_and_latest():
     assert plan.latest_is_safe is True
 
 
+def test_plan_skips_forward_blocked_candidate():
+    """Local-clear version that is malware-blocked is skipped; next clear version wins."""
+    from vulnscan.risk import RiskKind, VersionRisk, VersionScore
+
+    dep = Dependency("pkg", PYPI, "==1.0", "1.0", "pinned", "requirements.txt")
+    vuln = vuln_with_ranges(VersionRange(lower="0", upper="1.1"))
+    finding = Finding(dep, [vuln])
+    scores = {
+        "1.1": VersionScore(
+            "1.1",
+            (VersionRisk(RiskKind.MALWARE, "bad", advisory_id="MAL-1"),),
+        ),
+        "1.2": VersionScore("1.2", ()),
+    }
+    plan = plan_remediation(finding, ["1.0", "1.1", "1.2"], scores=scores)
+    assert plan.nearest_safe == "1.2"
+    assert any("skipped 1.1" in w for w in plan.warnings)
+
+
+def test_plan_freshness_warns_but_does_not_block():
+    from vulnscan.risk import RiskKind, VersionRisk, VersionScore
+
+    dep = Dependency("pkg", PYPI, "==1.0", "1.0", "pinned", "requirements.txt")
+    vuln = vuln_with_ranges(VersionRange(lower="0", upper="1.1"))
+    finding = Finding(dep, [vuln])
+    scores = {
+        "1.1": VersionScore(
+            "1.1",
+            (VersionRisk(RiskKind.FRESH, "new"),),
+        ),
+    }
+    plan = plan_remediation(finding, ["1.0", "1.1"], scores=scores)
+    assert plan.nearest_safe == "1.1"
+    assert plan.warnings
+
+
 def test_plan_respects_release_branches():
     """symfony/http-kernel 5.4.0: fixes in 4.4.50, 5.4.20, 6.0.20; the target is 5.4.20."""
     dep = Dependency("symfony/http-kernel", PACKAGIST, "^5.4", "5.4.0", "lock", "composer.json")
