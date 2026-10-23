@@ -1,3 +1,10 @@
+## 1.11.1 (2026-10-23)
+
+### Fix
+
+- **tui**: ignore the activity timer firing after the screen is torn down
+- **preflight**: report a missing resolver binary instead of aborting the run
+
 ## 1.11.0 (2026-10-23)
 
 ### Feat
