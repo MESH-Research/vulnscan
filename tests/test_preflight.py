@@ -595,3 +595,44 @@ def test_run_preflight_uv_packages_set_build_process(tmp_path: Path):
     )
     bumped = next(p for p in report.packages if p.dependency.name == "demo-pkg")
     assert bumped.build_process == "uv"
+
+
+def test_run_preflight_missing_resolver_binary_is_reported_not_raised(tmp_path: Path):
+    """A resolver that is not installed must become a warning, not abort the run."""
+    (tmp_path / "package.json").write_text(
+        '{"name":"app","version":"1.0.0","dependencies":{"left-pad":"1.0.0"}}\n'
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname="demo"\nversion="0.1.0"\ndependencies=["demo-pkg>=1"]\n'
+    )
+
+    def fake_run(argv, cwd: Path):
+        if argv[0] in {"npm", "pnpm"}:
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
+        (cwd / "uv.lock").write_text(
+            'version = 1\n\n[[package]]\nname = "demo-pkg"\nversion = "1.2.0"\n'
+            'source = { registry = "https://pypi.org/simple" }\n'
+        )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    transport = _transport()
+    settings = load_settings(env={"VULNSCAN_PROJECT_PATH": str(tmp_path)})
+    report = run_preflight(
+        settings,
+        osv=OSVClient(base_url="https://api.osv.dev", timeout=1.0, transport=transport),
+        registry=RegistryClient(timeout=1.0, transport=transport),
+        run=fake_run,
+    )
+    assert any("npm" in w and "not found" in w.lower() and "failed" in w for w in report.warnings)
+    # The Python manifest still resolved despite npm being absent, so the run as a whole is ok.
+    assert report.resolve_ok is True
+    assert any(p.dependency.name == "demo-pkg" and p.would_be == "1.2.0" for p in report.packages)
+
+
+def test_default_run_missing_binary_returns_failed_process(tmp_path: Path):
+    from vulnscan.preflight import _default_run
+
+    result = _default_run(["vulnscan-definitely-not-a-real-binary-xyz", "--version"], tmp_path)
+    assert result.returncode != 0
+    assert "vulnscan-definitely-not-a-real-binary-xyz" in result.stderr
+    assert "not found" in result.stderr.lower() or "no such file" in result.stderr.lower()
