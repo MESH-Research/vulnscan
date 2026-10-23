@@ -17,10 +17,30 @@ def pypi_handler(request: httpx.Request) -> httpx.Response:
             json={
                 "info": {"version": "2.32.4"},
                 "releases": {
-                    "2.30.0": [{"yanked": False}],
-                    "2.31.0": [{"yanked": False}],
-                    "2.32.0": [{"yanked": True}],
-                    "2.32.4": [{"yanked": False}],
+                    "2.30.0": [
+                        {
+                            "yanked": False,
+                            "upload_time_iso_8601": "2023-05-01T12:00:00.000000Z",
+                        }
+                    ],
+                    "2.31.0": [
+                        {
+                            "yanked": False,
+                            "upload_time_iso_8601": "2023-06-01T12:00:00.000000Z",
+                        }
+                    ],
+                    "2.32.0": [
+                        {
+                            "yanked": True,
+                            "upload_time_iso_8601": "2023-07-01T12:00:00.000000Z",
+                        }
+                    ],
+                    "2.32.4": [
+                        {
+                            "yanked": False,
+                            "upload_time_iso_8601": "2023-08-01T12:00:00.000000Z",
+                        }
+                    ],
                     "2.33.0rc1": [{"yanked": False}],
                     "2.9.2": [{"yanked": False}],
                     "3.0.0.dev1": [{"yanked": False}],
@@ -210,6 +230,13 @@ def npm_handler(request: httpx.Request) -> httpx.Response:
             json={
                 "name": "express",
                 "dist-tags": {"latest": "4.19.2", "next": "5.0.0-beta.3"},
+                "time": {
+                    "4.18.2": "2023-01-01T00:00:00.000Z",
+                    "4.19.0": "2023-02-01T00:00:00.000Z",
+                    "4.19.2": "2023-03-01T00:00:00.000Z",
+                    "4.9.0": "2020-01-01T00:00:00.000Z",
+                    "5.0.0-beta.3": "2024-01-01T00:00:00.000Z",
+                },
                 "versions": {
                     "4.18.2": {"version": "4.18.2"},
                     "4.19.0": {"version": "4.19.0", "deprecated": "use 4.19.2"},
@@ -371,3 +398,36 @@ def test_docker_image_without_a_version_led_tag_raises():
     dep = Dependency("php", CONTAINER, "latest", None, "unknown", "Dockerfile", kind="image")
     with pytest.raises(RegistryError):
         make_client(docker_handler).available_versions(dep)
+
+def test_pypi_release_info_times_and_yanked():
+    from datetime import UTC, datetime
+
+    dep = Dependency("Requests", PYPI, "==2.30.0", "2.30.0", "pinned", "requirements.txt")
+    info = make_client(pypi_handler).release_info(dep)
+    assert info["2.30.0"].published_at == datetime(2023, 5, 1, 12, 0, tzinfo=UTC)
+    assert info["2.30.0"].yanked is False
+    assert info["2.32.0"].yanked is True
+
+
+def test_npm_release_info_times_and_unpublished():
+    from datetime import UTC, datetime
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/gone":
+            return httpx.Response(
+                200,
+                json={
+                    "name": "gone",
+                    "time": {"1.0.0": "2023-01-01T00:00:00.000Z"},
+                    "versions": {"1.0.0": {"version": "1.0.0", "unpublished": True}},
+                },
+            )
+        return npm_handler(request)
+
+    dep = Dependency("express", NPM, "^4.18.2", "4.18.2", "constraint", "package.json")
+    info = make_client(handler).release_info(dep)
+    assert info["4.18.2"].published_at == datetime(2023, 1, 1, tzinfo=UTC)
+    assert info["4.19.0"].yanked is False  # deprecated ≠ yanked
+    gone = Dependency("gone", NPM, "1.0.0", "1.0.0", "pinned", "package.json")
+    assert make_client(handler).release_info(gone)["1.0.0"].yanked is True
+

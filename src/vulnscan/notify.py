@@ -240,7 +240,9 @@ def _notification(
     worst = min((n.severity for n in notes), key=severity_rank)
     nearest_safe = latest = latest_is_safe = None
     if versions is not None:
-        plan = plan_remediation(finding, versions, webpack_merge=webpack_merge)
+        plan = getattr(finding, "upgrade_plan", None)
+        if plan is None:
+            plan = plan_remediation(finding, versions, webpack_merge=webpack_merge)
         nearest_safe, latest, latest_is_safe = plan.nearest_safe, plan.latest, plan.latest_is_safe
     return Notification(
         project=project,

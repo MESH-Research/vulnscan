@@ -29,6 +29,14 @@ def settings_for(tmp_path: Path, **kwargs) -> Settings:
     return Settings(**base)
 
 
+
+class EmptyRegistry:
+    """Avoid forward-check network / extra OSV queries in unit tests."""
+
+    def available_versions(self, dep):
+        return []
+
+
 class FakeClient:
     """Stands in for OSVClient. `table` maps (name, version) -> list of Vulnerability."""
 
@@ -71,7 +79,7 @@ def test_scan_builds_findings_sorted_by_severity_then_name(tmp_path: Path):
             ("pytest", "7.0.0"): [vuln("GHSA-P", "LOW")],
         }
     )
-    result = scan(settings_for(tmp_path), client=client)
+    result = scan(settings_for(tmp_path), client=client, registry=EmptyRegistry())
     assert [f.dependency.name for f in result.findings] == ["monolog/monolog", "pytest", "requests"]
     assert result.findings[0].worst_severity == "CRITICAL"
     assert {d.name for d in result.dependencies} == {
@@ -88,7 +96,11 @@ def test_scan_builds_findings_sorted_by_severity_then_name(tmp_path: Path):
 def test_scan_excludes_dev_dependencies_when_configured(tmp_path: Path):
     write_project(tmp_path)
     client = FakeClient({("pytest", "7.0.0"): [vuln("GHSA-P")]})
-    result = scan(settings_for(tmp_path, include_dev=False), client=client)
+    result = scan(
+        settings_for(tmp_path, include_dev=False),
+        client=client,
+        registry=EmptyRegistry(),
+    )
     assert result.findings == []
     assert "pytest" not in {d.name for d in result.dependencies}
 
@@ -99,7 +111,7 @@ def test_scan_collapses_duplicate_dependencies(tmp_path: Path):
         '[project]\nname="x"\ndependencies=["requests==2.30.0"]\n'
     )
     client = FakeClient({("requests", "2.30.0"): [vuln("GHSA-R")]})
-    result = scan(settings_for(tmp_path), client=client)
+    result = scan(settings_for(tmp_path), client=client, registry=EmptyRegistry())
     assert len(result.findings) == 1
     assert len([d for d in result.dependencies if d.name == "requests"]) == 1
 
@@ -112,7 +124,7 @@ def test_scan_lists_every_file_declaring_a_collapsed_dependency(tmp_path: Path):
         '[project]\nname="x"\ndependencies=["authlib==1.2.0"]\n'
     )
     client = FakeClient({("authlib", "1.2.0"): [vuln("GHSA-A")]})
-    result = scan(settings_for(tmp_path), client=client)
+    result = scan(settings_for(tmp_path), client=client, registry=EmptyRegistry())
     assert len(result.findings) == 1
     dep = result.findings[0].dependency
     assert dep.source_files == [
@@ -126,7 +138,7 @@ def test_scan_lists_every_file_declaring_a_collapsed_dependency(tmp_path: Path):
 def test_scan_reports_unknown_versions_as_warnings_and_does_not_query_them(tmp_path: Path):
     (tmp_path / "requirements.txt").write_text("flask\n")
     client = FakeClient({})
-    result = scan(settings_for(tmp_path), client=client)
+    result = scan(settings_for(tmp_path), client=client, registry=EmptyRegistry())
     assert result.findings == []
     assert any("flask" in w for w in result.warnings)
     assert [d.version for d in result.dependencies] == [None]
@@ -135,12 +147,16 @@ def test_scan_reports_unknown_versions_as_warnings_and_does_not_query_them(tmp_p
 def test_scan_queries_unknown_versions_when_enabled(tmp_path: Path):
     (tmp_path / "requirements.txt").write_text("flask\n")
     client = FakeClient({("flask", None): [vuln("GHSA-F")]})
-    result = scan(settings_for(tmp_path, query_unknown_versions=True), client=client)
+    result = scan(
+        settings_for(tmp_path, query_unknown_versions=True),
+        client=client,
+        registry=EmptyRegistry(),
+    )
     assert [f.dependency.name for f in result.findings] == ["flask"]
 
 
 def test_scan_warns_when_no_manifests(tmp_path: Path):
-    result = scan(settings_for(tmp_path), client=FakeClient({}))
+    result = scan(settings_for(tmp_path), client=FakeClient({}), registry=EmptyRegistry())
     assert result.findings == []
     assert result.warnings
 
@@ -148,12 +164,16 @@ def test_scan_warns_when_no_manifests(tmp_path: Path):
 def test_scan_propagates_osv_errors(tmp_path: Path):
     write_project(tmp_path)
     with pytest.raises(OSVError):
-        scan(settings_for(tmp_path), client=FakeClient({}, error=OSVError("down")))
+        scan(
+            settings_for(tmp_path),
+            client=FakeClient({}, error=OSVError("down")),
+            registry=EmptyRegistry(),
+        )
 
 
 def test_scan_with_no_vulnerabilities(tmp_path: Path):
     write_project(tmp_path)
-    result = scan(settings_for(tmp_path), client=FakeClient({}))
+    result = scan(settings_for(tmp_path), client=FakeClient({}), registry=EmptyRegistry())
     assert result.findings == []
     assert len(result.dependencies) == 4
 
@@ -172,13 +192,16 @@ def test_scan_uses_default_client_when_none_given(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(scanner_module, "OSVClient", Recording)
     write_project(tmp_path)
-    scan(settings_for(tmp_path, osv_base_url="https://osv.example", request_timeout=7.0))
+    scan(
+        settings_for(tmp_path, osv_base_url="https://osv.example", request_timeout=7.0),
+        registry=EmptyRegistry(),
+    )
     assert created == {"base_url": "https://osv.example", "timeout": 7.0}
 
 
 def test_scan_dependency_ecosystem_preserved(tmp_path: Path):
     write_project(tmp_path)
-    result = scan(settings_for(tmp_path), client=FakeClient({}))
+    result = scan(settings_for(tmp_path), client=FakeClient({}), registry=EmptyRegistry())
     assert {d.ecosystem for d in result.dependencies} == {PYPI, "Packagist"}
 
 
@@ -201,7 +224,12 @@ def test_scan_routes_wordpress_dependencies_to_wordpress_client(tmp_path: Path):
     write_wordpress_project(tmp_path)
     osv = FakeClient({("monolog/monolog", "1.0.0"): [vuln("GHSA-M", "LOW")]})
     wp = FakeWordpressClient({("wp-plugin/elementor", "3.13.4"): [vuln("CVE-2023-1234", "HIGH")]})
-    result = scan(settings_for(tmp_path, wordfence_api_key="k"), client=osv, wordpress_client=wp)
+    result = scan(
+        settings_for(tmp_path, wordfence_api_key="k"),
+        client=osv,
+        wordpress_client=wp,
+        registry=EmptyRegistry(),
+    )
     assert [d.name for d in osv.seen] == ["monolog/monolog"]
     assert [d.name for d in wp.seen] == ["wp-plugin/elementor"]
     assert [(f.dependency.name, f.worst_severity) for f in result.findings] == [
@@ -213,7 +241,11 @@ def test_scan_routes_wordpress_dependencies_to_wordpress_client(tmp_path: Path):
 
 def test_scan_warns_when_wordpress_dependencies_but_no_api_key(tmp_path: Path):
     write_wordpress_project(tmp_path)
-    result = scan(settings_for(tmp_path, wordfence_api_key=""), client=FakeClient({}))
+    result = scan(
+        settings_for(tmp_path, wordfence_api_key=""),
+        client=FakeClient({}),
+        registry=EmptyRegistry(),
+    )
     assert result.findings == []
     assert any("WORDFENCE_API_KEY" in w and "1" in w for w in result.warnings)
 
@@ -246,7 +278,7 @@ def test_scan_builds_wordfence_client_from_settings(tmp_path: Path, monkeypatch)
         wordfence_min_interval_minutes=15.0,
         request_timeout=9.0,
     )
-    scan(settings, client=FakeClient({}))
+    scan(settings, client=FakeClient({}), registry=EmptyRegistry())
     assert created == {
         "api_key": "k",
         "base_url": "https://wf.example/v3",
@@ -265,14 +297,21 @@ def test_scan_does_not_build_wordfence_client_without_wordpress_deps(tmp_path: P
 
     monkeypatch.setattr(scanner_module, "WordfenceClient", boom)
     write_project(tmp_path)
-    scan(settings_for(tmp_path, wordfence_api_key="k"), client=FakeClient({}))
+    scan(
+        settings_for(tmp_path, wordfence_api_key="k"),
+        client=FakeClient({}),
+        registry=EmptyRegistry(),
+    )
 
 
 def test_scan_collects_client_warnings(tmp_path: Path):
     write_wordpress_project(tmp_path)
     wp = FakeWordpressClient({}, warnings=["Using stale Wordfence cache"])
     result = scan(
-        settings_for(tmp_path, wordfence_api_key="k"), client=FakeClient({}), wordpress_client=wp
+        settings_for(tmp_path, wordfence_api_key="k"),
+        client=FakeClient({}),
+        wordpress_client=wp,
+        registry=EmptyRegistry(),
     )
     assert "Using stale Wordfence cache" in result.warnings
 
@@ -282,7 +321,7 @@ def test_scan_warns_about_custom_source_packages(tmp_path: Path):
     (tmp_path / "composer.lock").write_text(
         json.dumps({"packages": [{"name": "acme/private", "version": "1.0.0", "type": "library"}]})
     )
-    result = scan(settings_for(tmp_path), client=FakeClient({}))
+    result = scan(settings_for(tmp_path), client=FakeClient({}), registry=EmptyRegistry())
     assert any("acme/private" in w and "custom" in w.lower() for w in result.warnings)
 
 
@@ -290,14 +329,18 @@ def test_scan_passes_ignore_dirs(tmp_path: Path):
     (tmp_path / "legacy").mkdir()
     (tmp_path / "legacy" / "requirements.txt").write_text("old==1.0\n")
     (tmp_path / "requirements.txt").write_text("new==1.0\n")
-    result = scan(settings_for(tmp_path, ignore_dirs=("legacy",)), client=FakeClient({}))
+    result = scan(
+        settings_for(tmp_path, ignore_dirs=("legacy",)),
+        client=FakeClient({}),
+        registry=EmptyRegistry(),
+    )
     assert [d.name for d in result.dependencies] == ["new"]
 
 
 def test_scan_queries_npm_dependencies_through_osv(tmp_path: Path):
     (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"lodash": "4.17.20"}}))
     client = FakeClient({("lodash", "4.17.20"): [vuln("GHSA-L", "HIGH")]})
-    result = scan(settings_for(tmp_path), client=client)
+    result = scan(settings_for(tmp_path), client=client, registry=EmptyRegistry())
     assert [(f.dependency.name, f.dependency.ecosystem) for f in result.findings] == [
         ("lodash", NPM)
     ]
@@ -311,7 +354,11 @@ def test_scan_includes_transitive_lock_packages_when_configured(tmp_path: Path):
         '[[package]]\nname="urllib3"\nversion="2.0.0"\n'
     )
     client = FakeClient({("urllib3", "2.0.0"): [vuln("GHSA-U", "HIGH")]})
-    result = scan(settings_for(tmp_path, include_transitive=True), client=client)
+    result = scan(
+        settings_for(tmp_path, include_transitive=True),
+        client=client,
+        registry=EmptyRegistry(),
+    )
     assert {d.name for d in result.dependencies} == {"requests", "urllib3"}
     assert [f.dependency.name for f in result.findings] == ["urllib3"]
     assert result.findings[0].dependency.transitive is True
@@ -324,7 +371,7 @@ def test_scan_leaves_transitive_packages_out_by_default(tmp_path: Path):
         '[[package]]\nname="requests"\nversion="2.31.0"\n\n[[package]]\nname="urllib3"\nversion="2.0.0"\n'
     )
     client = FakeClient({("urllib3", "2.0.0"): [vuln("GHSA-U", "HIGH")]})
-    result = scan(settings_for(tmp_path), client=client)
+    result = scan(settings_for(tmp_path), client=client, registry=EmptyRegistry())
     assert {d.name for d in result.dependencies} == {"requests"}
     assert result.findings == []
 
@@ -356,7 +403,12 @@ def test_scan_routes_container_images_to_the_nvd_client(tmp_path: Path):
         },
         warnings=["nvd note"],
     )
-    result = scan(settings_for(tmp_path), client=osv, nvd_client=nvd)
+    result = scan(
+        settings_for(tmp_path),
+        client=osv,
+        nvd_client=nvd,
+        registry=EmptyRegistry(),
+    )
     assert [d.name for d in osv.seen] == ["requests"]
     assert sorted(d.name for d in nvd.seen) == ["php", "traefik"]
     assert [(f.dependency.name, f.worst_severity) for f in result.findings] == [
@@ -398,7 +450,7 @@ def test_scan_builds_nvd_client_from_settings(tmp_path: Path, monkeypatch):
         image_products=("myorg/app=myorg:app",),
         request_timeout=9.0,
     )
-    scan(settings, client=FakeClient({}))
+    scan(settings, client=FakeClient({}), registry=EmptyRegistry())
     assert created == {
         "api_key": "k",
         "base_url": "https://nvd.example/cves",
@@ -417,7 +469,7 @@ def test_scan_does_not_build_nvd_client_without_images(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(scanner_module, "NVDClient", boom)
     write_project(tmp_path)
-    scan(settings_for(tmp_path), client=FakeClient({}))
+    scan(settings_for(tmp_path), client=FakeClient({}), registry=EmptyRegistry())
 
 
 def test_scan_propagates_nvd_errors(tmp_path: Path):
@@ -427,4 +479,9 @@ def test_scan_propagates_nvd_errors(tmp_path: Path):
     nvd = FakeNVDClient({})
     nvd.error = NVDError("NVD down")
     with pytest.raises(NVDError):
-        scan(settings_for(tmp_path), client=FakeClient({}), nvd_client=nvd)
+        scan(
+            settings_for(tmp_path),
+            client=FakeClient({}),
+            nvd_client=nvd,
+            registry=EmptyRegistry(),
+        )

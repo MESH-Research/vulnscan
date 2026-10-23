@@ -37,6 +37,17 @@ treated as an npm manifest. Constraints are read from
 from `package.json` and npm/pnpm lock files as usual, with the caveat that these
 may _not_ be the same as the versions installed dynamically in app containers.
 
+## Preflight (`--preflight`)
+
+In Invenio mode, npm preflight does **not** float each on-disk `package.json`
+(those are typically the test-env tree). It builds one **virtual** assets
+`package.json` from the same sources as `webpack create` / the scan merge index
+(in-tree theme `webpack.py` files, `invenio_assets.webpack` entry points in the
+project `.venv`, and the invenio-assets base templates), folds constraints with
+pywebpack’s same-major `max_version` rule, then runs a lockfile-only npm/pnpm
+resolve on that document. Major merge conflicts are omitted with warnings.
+Python manifests are still mock-locked individually.
+
 Exclude local forks of upstream modules you do not control using
 `.vulnscanignore` (paths relative to the project root). Otherwise, dependencies
 in any local submodules  

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from vulnscan.config import Settings
@@ -22,6 +24,10 @@ from vulnscan.models import (
 from vulnscan.nvd import NVDClient, parse_image_products
 from vulnscan.osv import OSVClient
 from vulnscan.parsers import load_ignore_file, parse_project
+from vulnscan.registry import RegistryClient, RegistryError
+from vulnscan.remediate import plan_remediation
+from vulnscan.risk import RiskKind, VersionRisk, VersionScore, score_versions
+from vulnscan.versioncmp import compare_versions, sort_versions
 from vulnscan.wordfence import WordfenceClient
 
 WORDFENCE_CACHE_FILENAME = "wordfence-production.json"
@@ -60,11 +66,125 @@ def _annotate_webpack_merge(
     return index
 
 
+def _local_candidate_versions(finding: Finding, versions: list[str]) -> list[str]:
+    """Newer versions that clear the finding's current advisories (local range math only)."""
+    dep = finding.dependency
+    ordered = sort_versions(list(dict.fromkeys(versions)), dep.ecosystem)
+    out = []
+    for version in ordered:
+        if dep.version is not None and compare_versions(version, dep.version, dep.ecosystem) <= 0:
+            continue
+        if any(v.affects(version, dep.ecosystem) for v in finding.vulnerabilities):
+            continue
+        out.append(version)
+    if ordered:
+        latest = ordered[-1]
+        if latest not in out:
+            out.append(latest)
+    return out
+
+
+def _wordpress_scores(
+    finding: Finding,
+    versions: list[str],
+    wordpress_client: WordfenceClient,
+) -> dict[str, VersionScore]:
+    """Score WordPress candidate versions via Wordfence (blocking advisories only)."""
+    scores: dict[str, VersionScore] = {}
+    dep = finding.dependency
+    stubs = [replace(dep, version=v) for v in versions]
+    if not stubs:
+        return scores
+    found = wordpress_client.find_vulnerabilities(stubs, include_unknown_versions=False)
+    for stub in stubs:
+        version = stub.version or ""
+        risks: list[VersionRisk] = []
+        for vuln in found.get(stub, []):
+            risks.append(
+                VersionRisk(
+                    kind=RiskKind.ADVISORY,
+                    detail=vuln.summary or vuln.id,
+                    advisory_id=vuln.id,
+                    url=vuln.url,
+                    severity=vuln.severity,
+                    published_at=vuln.published,
+                )
+            )
+        scores[version] = VersionScore(version=version, risks=tuple(risks))
+    return scores
+
+
+def enrich_findings(
+    findings: list[Finding],
+    *,
+    settings: Settings,
+    osv: OSVClient,
+    registry: RegistryClient | None = None,
+    wordpress_client: WordfenceClient | None = None,
+    webpack_merge: object | None = None,
+) -> list[str]:
+    """Attach forward-checked ``upgrade_plan`` to each finding. Returns extra warnings."""
+    warnings: list[str] = []
+    if not findings:
+        return warnings
+    if registry is None:
+        registry = RegistryClient(timeout=settings.request_timeout)
+
+    def enrich_one(finding: Finding) -> list[str]:
+        local_warnings: list[str] = []
+        dep = finding.dependency
+        try:
+            versions = registry.available_versions(dep)
+        except RegistryError as exc:
+            local_warnings.append(f"{dep.name}: could not list versions for forward-check: {exc}")
+            finding.upgrade_plan = plan_remediation(finding, [], webpack_merge=webpack_merge)
+            finding.candidate_warnings = tuple(local_warnings)
+            return local_warnings
+
+        candidates = _local_candidate_versions(finding, versions)
+        scores_by_version: dict[str, VersionScore] = {}
+        if dep.ecosystem == WORDPRESS:
+            if wordpress_client is not None and candidates:
+                scores_by_version = _wordpress_scores(finding, candidates, wordpress_client)
+        elif candidates:
+            from vulnscan.risk import score_for
+
+            stubs = [replace(dep, version=v) for v in candidates]
+            keyed = score_versions(
+                stubs,
+                osv=osv,
+                registry=registry,
+                fresh_hours=settings.fresh_hours,
+            )
+            for stub in stubs:
+                version = stub.version or ""
+                score = score_for(keyed, stub, version)
+                if score is not None:
+                    scores_by_version[version] = score
+
+        plan = plan_remediation(
+            finding,
+            versions,
+            webpack_merge=webpack_merge,
+            scores=scores_by_version or None,
+        )
+        finding.upgrade_plan = plan
+        finding.candidate_warnings = tuple(plan.warnings)
+        return local_warnings
+
+    workers = min(8, max(1, len(findings)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for extra in pool.map(enrich_one, findings):
+            warnings.extend(extra)
+    return warnings
+
+
 def scan(
     settings: Settings,
     client: OSVClient | None = None,
     wordpress_client: WordfenceClient | None = None,
     nvd_client: NVDClient | None = None,
+    registry: RegistryClient | None = None,
 ) -> ScanResult:
     """Scan the configured project.
 
@@ -142,6 +262,18 @@ def scan(
     findings = [Finding(dep, vulns) for dep, vulns in found.items() if vulns]
     findings.sort(key=lambda f: (severity_rank(f.worst_severity), f.dependency.name.lower()))
     webpack_merge = _annotate_webpack_merge(settings, findings, warnings)
+    if registry is None:
+        registry = RegistryClient(timeout=settings.request_timeout)
+    warnings.extend(
+        enrich_findings(
+            findings,
+            settings=settings,
+            osv=client,
+            registry=registry,
+            wordpress_client=wordpress_client,
+            webpack_merge=webpack_merge,
+        )
+    )
     return ScanResult(
         project_path=settings.project_path,
         dependencies=deps,

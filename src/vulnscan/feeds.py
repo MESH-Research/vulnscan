@@ -232,3 +232,95 @@ def write_feeds(
     _write_atomic(settings.atom_path, render_atom(entries, settings, now))
     save_state(settings.state_path, state)
     return settings.rss_path, settings.atom_path
+
+
+def build_preflight_entries(report, state: dict[str, str], now: datetime) -> list[FeedEntry]:
+    """One feed entry per (package, risk) from a preflight report."""
+    from vulnscan.preflight import PreflightReport
+
+    assert isinstance(report, PreflightReport)
+    project = report.project_path.name or "project"
+    entries: list[FeedEntry] = []
+    for pkg in report.packages:
+        dep = pkg.dependency
+        risks = list(pkg.score.risks) if pkg.score else []
+        if not risks and pkg.would_bump:
+            # bump-only informational entry
+            guid = (
+                f"urn:vulnscan:preflight:{project}:{dep.ecosystem}:"
+                f"{dep.name}:{pkg.would_be}:bump"
+            )
+            if guid not in state:
+                state[guid] = now.isoformat()
+            try:
+                published = _as_utc(datetime.fromisoformat(state[guid]))
+            except ValueError:
+                published = now
+                state[guid] = now.isoformat()
+            title = f"{dep.name}: {pkg.current or '?'} → {pkg.would_be}"
+            entries.append(
+                FeedEntry(
+                    guid=guid,
+                    title=title,
+                    link=report.project_path.as_uri(),
+                    summary=title,
+                    content_html=f"<p>{title}</p>",
+                    published=published,
+                    updated=now,
+                    categories=["bump", dep.ecosystem, dep.name],
+                )
+            )
+            continue
+        for risk in risks:
+            rid = risk.advisory_id or str(risk.kind)
+            guid = (
+                f"urn:vulnscan:preflight:{project}:{dep.ecosystem}:"
+                f"{dep.name}:{pkg.would_be}:{rid}"
+            )
+            if guid not in state:
+                state[guid] = now.isoformat()
+            try:
+                published = _as_utc(datetime.fromisoformat(state[guid]))
+            except ValueError:
+                published = now
+                state[guid] = now.isoformat()
+            bump = f"{pkg.current or '?'} → {pkg.would_be}"
+            title = f"{dep.name} {bump}: {rid}"
+            if risk.detail:
+                title += f" - {risk.detail}"
+            entries.append(
+                FeedEntry(
+                    guid=guid,
+                    title=title,
+                    link=risk.url or report.project_path.as_uri(),
+                    summary=risk.detail or rid,
+                    content_html=(
+                        f"<p><strong>{dep.name}</strong> {bump}</p>"
+                        f"<p>{risk.kind}: {risk.detail}</p>"
+                    ),
+                    published=published,
+                    updated=now,
+                    categories=[str(risk.kind), dep.ecosystem, dep.name],
+                )
+            )
+    entries.sort(key=lambda e: e.published, reverse=True)
+    return entries
+
+
+def write_preflight_feeds(report, settings) -> list[Path]:
+    """Write preflight RSS/Atom feeds; skip rewrite when resolve failed."""
+    if not report.resolve_ok:
+        return []
+    now = datetime.now(UTC)
+    state_path = settings.feed_dir / settings.preflight_state_filename
+    state = load_state(state_path)
+    entries = build_preflight_entries(report, state, now)
+    settings.feed_dir.mkdir(parents=True, exist_ok=True)
+    rss_path = settings.feed_dir / settings.preflight_rss_filename
+    atom_path = settings.feed_dir / settings.preflight_atom_filename
+    # Temporarily point feed metadata via a shallow settings stand-in is hard;
+    # reuse render helpers with existing settings (title still says vulns — acceptable v1).
+    rss_path.write_bytes(render_rss(entries, settings, now))
+    atom_path.write_bytes(render_atom(entries, settings, now))
+    save_state(state_path, state)
+    return [rss_path, atom_path]

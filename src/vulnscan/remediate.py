@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -50,7 +51,7 @@ from vulnscan.parsers.containers import (
     tag_for_version,
     version_from_tag,
 )
-from vulnscan.parsers.webpack import (
+from vulnscan.parsers.invenio_webpack import (
     THEME_NAME,
     extract_theme_dependencies,
     find_theme_dependencies_node,
@@ -71,14 +72,16 @@ class RemediationPlan:
     """Upgrade options for one finding.
 
     ``current`` is the version in use (``None`` if unknown), ``nearest_safe`` the smallest
-    newer version no advisory affects, ``latest`` the newest release and
-    ``latest_is_safe`` whether that release is clear of advisories.
+    newer version that clears current advisories and forward-check blocking risks,
+    ``latest`` the newest release and ``latest_is_safe`` whether that release is clear.
+    ``warnings`` carries non-blocking notes (e.g. freshness).
     """
 
     current: str | None
     nearest_safe: str | None
     latest: str | None
     latest_is_safe: bool
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -130,19 +133,25 @@ def plan_remediation(
     finding: Finding,
     versions: list[str],
     webpack_merge: object | None = None,
+    scores: Mapping[str, object] | None = None,
 ) -> RemediationPlan:
     """Choose the smallest upgrade that clears every known advisory, and the newest release.
 
     When ``webpack_merge`` is a :class:`~vulnscan.invenio.WebpackMergeIndex` (or the
     finding already carries ``webpack_merge_block``), candidate versions that would
     break pywebpack's same-major merge are excluded from ``nearest_safe``.
+
+    When ``scores`` maps version strings to objects with ``has_blocking`` / ``is_fresh``
+    (typically :class:`~vulnscan.risk.VersionScore`), candidates with blocking risks are
+    skipped; freshness becomes a warning on the plan rather than a disqualification.
+    ``scores=None`` preserves local-only safety (unit tests).
     """
     dep = finding.dependency
     ordered = sort_versions(list(dict.fromkeys(versions)), dep.ecosystem)
     if not ordered:
         return RemediationPlan(dep.version, None, None, False)
 
-    def is_safe(version: str) -> bool:
+    def is_locally_safe(version: str) -> bool:
         return not any(v.affects(version, dep.ecosystem) for v in finding.vulnerabilities)
 
     def is_mergeable(version: str) -> bool:
@@ -155,18 +164,51 @@ def plan_remediation(
             return True
         return bool(allows(dep.name, version))
 
+    def forward_ok(version: str) -> bool:
+        if scores is None:
+            return True
+        score = scores.get(version)
+        if score is None:
+            return True
+        return not bool(getattr(score, "has_blocking", False))
+
+    def is_safe(version: str) -> bool:
+        return is_locally_safe(version) and is_mergeable(version) and forward_ok(version)
+
     candidates = [
         v
         for v in ordered
         if dep.version is None or compare_versions(v, dep.version, dep.ecosystem) > 0
     ]
-    safe = [v for v in candidates if is_safe(v) and is_mergeable(v)]
+    safe = [v for v in candidates if is_safe(v)]
     latest = ordered[-1]
+    warnings: list[str] = []
+    nearest = safe[0] if safe else None
+    for version in ([nearest, latest] if nearest or latest else []):
+        if version is None or scores is None:
+            continue
+        score = scores.get(version)
+        if score is not None and getattr(score, "is_fresh", False):
+            warnings.append(f"{dep.name} {version} was published within the freshness window")
+    # Explain first blocked local-safe candidate when nearest had to walk past it.
+    if scores is not None:
+        for version in candidates:
+            if not is_locally_safe(version) or not is_mergeable(version):
+                continue
+            score = scores.get(version)
+            if score is not None and getattr(score, "has_blocking", False):
+                blocking = getattr(score, "blocking", lambda: ())()
+                detail = ", ".join(
+                    f"{getattr(r, 'kind', 'risk')}: {getattr(r, 'detail', r)}" for r in blocking
+                ) or "blocking risk"
+                warnings.append(f"skipped {version} ({detail})")
+                break
     return RemediationPlan(
         current=dep.version,
-        nearest_safe=safe[0] if safe else None,
+        nearest_safe=nearest,
         latest=latest,
-        latest_is_safe=is_safe(latest) and is_mergeable(latest),
+        latest_is_safe=is_safe(latest),
+        warnings=tuple(dict.fromkeys(warnings)),
     )
 
 

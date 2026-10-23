@@ -37,7 +37,17 @@ def _vuln_facts(vuln: Vulnerability) -> list[tuple[str, str]]:
 
 
 def _nearest_safe_cell(finding: Finding, result: ScanResult) -> str:
-    """Nearest-safe display for reports: ``none`` when pywebpack blocks an upgrade."""
+    """Nearest-safe display for reports: prefer forward-checked plan when present."""
+    plan = getattr(finding, "upgrade_plan", None)
+    if plan is not None:
+        nearest = getattr(plan, "nearest_safe", None)
+        if not nearest:
+            return "none"
+        warnings = getattr(plan, "warnings", ()) or ()
+        fresh = any(
+            nearest in w and "published within the freshness" in w for w in warnings
+        )
+        return f"{nearest} ~fresh" if fresh else nearest
     if finding.webpack_merge_block:
         return "none"
     merge = result.webpack_merge

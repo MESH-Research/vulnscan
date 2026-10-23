@@ -55,6 +55,34 @@ def build_parser() -> argparse.ArgumentParser:
         "the latest release",
     )
     parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="pin-float resolve in a temp tree and score would-be packages for advisories, "
+        "malware, freshness and yank; alone opens the TUI, with --json/--text/--markdown/"
+        "--update-feeds runs non-interactively for CI",
+    )
+    parser.add_argument(
+        "--json",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="FILE",
+        help="with --preflight: write machine-readable JSON to FILE ('-' for stdout; "
+        "default: <feed dir>/preflight.json)",
+    )
+    parser.add_argument(
+        "--preflight-ignore",
+        action="append",
+        metavar="PKG",
+        help="exclude package from preflight scoring only (name or ecosystem:name); "
+        "repeatable; also VULNSCAN_PREFLIGHT_IGNORE and .vulnscan-preflight-ignore",
+    )
+    parser.add_argument(
+        "--strict-fresh",
+        action="store_true",
+        help="with --preflight: freshness-only hits exit with code 2 (VULNSCAN_STRICT_FRESH)",
+    )
+    parser.add_argument(
         "--update-feeds",
         action="store_true",
         help="non-interactive: scan and rewrite the RSS and Atom feeds, then exit",
@@ -199,13 +227,17 @@ def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
         )
         return 1
     dep = finding.dependency
-    try:
-        plan = plan_remediation(
-            finding, fetch_versions(settings, dep), webpack_merge=result.webpack_merge
-        )
-    except RegistryError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    plan = getattr(finding, "upgrade_plan", None)
+    if plan is None:
+        try:
+            plan = plan_remediation(
+                finding, fetch_versions(settings, dep), webpack_merge=result.webpack_merge
+            )
+        except RegistryError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    for warning in getattr(plan, "warnings", ()):
+        print(f"warning: {warning}", file=sys.stderr)
     target = plan.nearest_safe if args.strategy == "nearest" else plan.latest
     if target is None:
         extra = ""
@@ -326,15 +358,15 @@ def run_notifications(settings: Settings, args: argparse.Namespace) -> int:
     )
 
 
-def run_tui(settings: Settings, outdated: bool = False) -> None:
+def run_tui(settings: Settings, outdated: bool = False, preflight: bool = False) -> None:
     """Start the interactive Textual interface (imported lazily to keep CLI start-up light).
 
     With ``outdated`` the TUI lists dependencies with newer releases instead of
-    vulnerable ones.
+    vulnerable ones. With ``preflight`` it lists pin-float would-be risks.
     """
     from vulnscan.tui import VulnScanApp
 
-    VulnScanApp(settings, outdated=outdated).run()
+    VulnScanApp(settings, outdated=outdated, preflight=preflight).run()
 
 
 def _print_summary(result: ScanResult, written: list[Path]) -> None:
@@ -404,6 +436,63 @@ def run_non_interactive(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+
+def run_preflight_cli(settings: Settings, args: argparse.Namespace) -> int:
+    """Run pin-float preflight; write JSON/text/markdown/feeds as requested."""
+    from vulnscan.preflight import (
+        render_preflight_text,
+        run_preflight,
+        write_json_report,
+    )
+
+    extra = []
+    for raw in args.preflight_ignore or []:
+        extra.extend(part.strip() for part in raw.split(",") if part.strip())
+    strict = bool(args.strict_fresh or settings.strict_fresh)
+    report = run_preflight(settings, extra_ignores=extra)
+    written: list[Path] = []
+    if args.json is not None:
+        target = args.json or str(settings.feed_dir / "preflight.json")
+        payload = write_json_report(
+            report,
+            None if target == "-" else Path(target),
+            strict_fresh=strict,
+        )
+        if target == "-":
+            print(payload, end="")
+        else:
+            written.append(Path(target))
+            print(payload, end="") if False else None
+    if args.text is not None:
+        content = render_preflight_text(report)
+        path = _export(content, args.text, settings.feed_dir / settings.preflight_text_filename)
+        if path:
+            written.append(path)
+        elif args.text == "-":
+            print(content, end="")
+    if args.markdown is not None:
+        # Markdown for preflight reuses the text form for v1.
+        content = "# Preflight\n\n```\n" + render_preflight_text(report) + "```\n"
+        path = _export(
+            content, args.markdown, settings.feed_dir / settings.preflight_markdown_filename
+        )
+        if path:
+            written.append(path)
+        elif args.markdown == "-":
+            print(content, end="")
+    if args.update_feeds:
+        from vulnscan.feeds import write_preflight_feeds
+
+        written.extend(write_preflight_feeds(report, settings))
+    if args.json is None and args.text is None and args.markdown is None and not args.update_feeds:
+        print(render_preflight_text(report), end="")
+    for path in written:
+        print(f"Wrote {path}")
+    for warning in report.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    return report.exit_code(strict_fresh=strict)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point: parse ``argv``, load settings and dispatch to the requested mode.
 
@@ -423,6 +512,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "invenio_webpack": args.invenio_webpack,
                 "invenio_webpack_overlay": args.invenio_webpack_overlay,
                 "include_transitive": True if args.transitive else None,
+                "strict_fresh": True if args.strict_fresh else None,
             },
         )
     except ValueError as exc:
@@ -439,10 +529,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         or args.update_feeds
         or args.markdown is not None
         or args.text is not None
+        or args.json is not None
     )
     if args.outdated and non_interactive:
         print(
             "error: --outdated opens the TUI and cannot be combined with non-interactive flags",
+            file=sys.stderr,
+        )
+        return 2
+    if args.preflight and (args.ntfy or args.msteams or args.test or args.remediate):
+        print(
+            "error: --preflight cannot be combined with --ntfy/--msteams/--test/--remediate",
             file=sys.stderr,
         )
         return 2
@@ -453,6 +550,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if args.remediate:
         return run_remediate(settings, args)
+    if args.preflight and non_interactive:
+        return run_preflight_cli(settings, args)
+    if args.preflight:
+        run_tui(settings, preflight=True)
+        return 0
     if args.update_feeds or args.markdown is not None or args.text is not None:
         return run_non_interactive(settings, args)
     run_tui(settings, outdated=args.outdated)

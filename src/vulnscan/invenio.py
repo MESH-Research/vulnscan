@@ -16,7 +16,7 @@ from importlib.machinery import PathFinder
 from pathlib import Path
 
 from vulnscan.models import NPM, Dependency, normalize_name
-from vulnscan.parsers.webpack import BUNDLE_NAME, extract_theme_dependencies
+from vulnscan.parsers.invenio_webpack import BUNDLE_NAME, extract_theme_dependencies
 
 # Match pywebpack.helpers.SEM_VER closely enough for major extraction.
 _SEM_MAJOR = re.compile(
@@ -579,3 +579,168 @@ def build_webpack_merge_index(
             flat = tuple((s, c) for group in majors.values() for s, c in group)
             conflicts.append(WebpackMergeConflict(package, flat))
     return WebpackMergeIndex(frozen, tuple(conflicts))
+
+
+# pywebpack.helpers._parse_version / max_version (same-major merge for virtual package.json).
+_SEM_VER_FULL = re.compile(
+    r"^\D*(?P<major>0|[1-9]\d*)"
+    r"\.?(?P<minor>0|[1-9]\d*)?"
+    r"\.?(?P<patch>0|[1-9]\d*)?"
+    r"(?:-(?P<prerelease>(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
+    r"(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?"
+    r"(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$"
+)
+
+
+def _parse_npm_semver(version: str) -> tuple[int, int, int, str]:
+    """Parse an npm constraint/version into ``(major, minor, patch, prerelease)``.
+
+    Raises:
+        ValueError: when the string is not a simple semver-like constraint.
+    """
+    match = _SEM_VER_FULL.match(version.strip())
+    if not match:
+        raise ValueError(f"{version!r} is not a valid semantic version constraint")
+    return (
+        int(match.group("major")),
+        int(match.group("minor") or 0),
+        int(match.group("patch") or 0),
+        match.group("prerelease") or "",
+    )
+
+
+def npm_max_version(v1: str, v2: str) -> str:
+    """Return the higher of two npm version/constraint strings (pywebpack ``max_version``).
+
+    Used when folding same-major constraints into one virtual assets ``package.json``.
+    """
+    v1_maj, v1_min, v1_patch, v1_pre = _parse_npm_semver(v1)
+    v2_maj, v2_min, v2_patch, v2_pre = _parse_npm_semver(v2)
+
+    if v1_maj == v2_maj:
+        if v1_min == v2_min:
+            if v1_patch == v2_patch:
+                if v1_pre and v2_pre:
+                    v1_tags = v1_pre.split(".")
+                    v2_tags = v2_pre.split(".")
+                    for a, b in zip(v1_tags, v2_tags, strict=False):
+                        if a == b:
+                            continue
+                        if a.isdigit() and b.isdigit():
+                            return v1 if int(a) > int(b) else v2
+                        return v1 if a > b else v2
+                    return v1 if len(v1_tags) > len(v2_tags) else v2
+                if v1_pre and not v2_pre:
+                    return v2
+                if v2_pre and not v1_pre:
+                    return v1
+                return v1
+            return v1 if v1_patch > v2_patch else v2
+        return v1 if v1_min > v2_min else v2
+    return v1 if v1_maj > v2_maj else v2
+
+
+def virtual_assets_dependencies(
+    index: WebpackMergeIndex,
+) -> tuple[dict[str, str], list[str]]:
+    """Fold a merge index into one ``dependencies`` map for a dry-run assets ``package.json``.
+
+    Mirrors pywebpack ``merge_deps``: same major → keep ``npm_max_version``; packages with
+    major conflicts are omitted (with warnings). Non-registry / unparseable constraints are
+    skipped with a warning.
+
+    Returns:
+        ``(dependencies, warnings)`` where keys are canonical npm package names.
+    """
+    warnings: list[str] = []
+    conflicted = {normalize_name(c.package, NPM) for c in index.conflicts}
+    deps: dict[str, str] = {}
+
+    for package, entries in sorted(index.by_package.items()):
+        if package in conflicted:
+            conflict = index.conflict_for(package)
+            detail = conflict.message() if conflict else "major conflict"
+            warnings.append(
+                f"preflight: omitting {package!r} from virtual assets package.json ({detail})"
+            )
+            continue
+        folded: str | None = None
+        for _source, constraint in entries:
+            text = constraint.strip()
+            if not text or _npm_spec_non_registry(text):
+                warnings.append(
+                    f"preflight: skipping non-registry constraint for {package!r}: {constraint!r}"
+                )
+                continue
+            if folded is None:
+                folded = text
+                continue
+            maj_a, maj_b = npm_major(folded), npm_major(text)
+            if maj_a is not None and maj_b is not None and maj_a != maj_b:
+                warnings.append(
+                    f"preflight: omitting {package!r} from virtual assets package.json "
+                    f"(major conflict while folding {folded!r} vs {text!r})"
+                )
+                folded = None
+                break
+            try:
+                folded = npm_max_version(folded, text)
+            except ValueError as exc:
+                warnings.append(
+                    f"preflight: omitting {package!r} from virtual assets package.json ({exc})"
+                )
+                folded = None
+                break
+        if folded:
+            deps[package] = folded
+    return deps, warnings
+
+
+def _npm_spec_non_registry(spec: str) -> bool:
+    s = spec.strip().lower()
+    return (
+        s.startswith("file:")
+        or s.startswith("link:")
+        or s.startswith("workspace:")
+        or s.startswith("git+")
+        or s.startswith("github:")
+        or s.startswith("http:")
+        or s.startswith("https:")
+    )
+
+
+def build_virtual_assets_package_json(
+    project_root: Path,
+    *,
+    ignore_patterns: tuple[str, ...] = (),
+    include_environment: bool = True,
+    package_manager: str | None = None,
+) -> tuple[dict, WebpackMergeIndex, list[str]]:
+    """Build a dry-run assets ``package.json`` from the same sources as ``webpack create``.
+
+    Args:
+        project_root: Invenio project root.
+        ignore_patterns: Same patterns as :func:`build_webpack_merge_index`.
+        include_environment: Include ``.venv`` entry points and invenio-assets templates.
+        package_manager: Optional ``packageManager`` field (e.g. from the project root
+            ``package.json``) so preflight uses pnpm when the app does.
+
+    Returns:
+        ``(package_json_dict, merge_index, warnings)``.
+    """
+    index = build_webpack_merge_index(
+        project_root,
+        ignore_patterns=ignore_patterns,
+        include_environment=include_environment,
+    )
+    deps, fold_warnings = virtual_assets_dependencies(index)
+    warnings = list(index.warning_lines()) + fold_warnings
+    data: dict = {
+        "name": "vulnscan-invenio-assets-preflight",
+        "version": "0.0.0",
+        "private": True,
+        "dependencies": deps,
+    }
+    if package_manager:
+        data["packageManager"] = package_manager
+    return data, index, warnings

@@ -47,9 +47,23 @@ DEP_COLUMNS = (
     "Via",
     "Severity",
     "Advisories",
-    "Fixed in",
+    "Nearest safe",
     "File",
 )
+PREFLIGHT_COLUMNS = (
+    "Package",
+    "Ecosystem",
+    "Process",
+    "Current",
+    "Would be",
+    "Risks",
+    "File",
+)
+PREFLIGHT_BANNER = (
+    "Preflight mode: versions the current pins would allow on the next resolve/update, "
+    "with advisory/malware/freshness/yank risks. The project is not modified."
+)
+
 OUTDATED_COLUMNS = (
     " ",
     "Package",
@@ -78,6 +92,21 @@ def _cells(values: list[str], remediated: bool) -> list[str | Text]:
     if not remediated:
         return list(values)
     return [Text(v, style=REMEDIATED_STYLE) for v in values]
+
+
+
+def _nearest_safe_label(finding: Finding) -> str:
+    """Forward-checked nearest safe for the deps table, with optional freshness marker."""
+    plan = getattr(finding, "upgrade_plan", None)
+    if plan is not None:
+        nearest = getattr(plan, "nearest_safe", None)
+        if not nearest:
+            return "none"
+        warnings = getattr(plan, "warnings", ()) or ()
+        if any(nearest in w and "published within the freshness" in w for w in warnings):
+            return f"{nearest} ~fresh"
+        return nearest
+    return ", ".join(finding.fixed_versions) or "-"
 
 
 def _plural(count: int, noun: str) -> str:
@@ -117,6 +146,15 @@ def vulnerability_markdown(finding: Finding, vuln: Vulnerability) -> str:
         f"- **Aliases:** {', '.join(vuln.aliases) or 'none'}",
         f"- **Fixed in:** {', '.join(vuln.fixed_versions) or 'no fix listed'}",
     ]
+    plan = getattr(finding, "upgrade_plan", None)
+    if plan is not None:
+        lines += [
+            f"- **Nearest safe:** {plan.nearest_safe or 'none'}",
+            f"- **Latest:** {plan.latest or 'none'}"
+            + ("" if plan.latest_is_safe else " (not clear of known risks)"),
+        ]
+        for warning in plan.warnings:
+            lines.append(f"- **Warning:** {warning}")
     if vuln.published:
         lines.append(f"- **Published:** {vuln.published:%Y-%m-%d}")
     if vuln.modified:
@@ -241,6 +279,8 @@ class RemediateScreen(OptionDialog):
         ]
         if not self.plan.nearest_safe and not self.finding.upgrade_limit:
             summary.append("Nearest safe: none available")
+        for warning in self.plan.warnings:
+            summary.append(warning)
         return summary
 
     def options(self) -> list[Option]:
@@ -254,7 +294,12 @@ class RemediateScreen(OptionDialog):
         else:
             nearest = Option("Nearest safe version: none available", id="nearest", disabled=True)
         if self.plan.latest:
-            note = "" if self.plan.latest_is_safe else "  (still has known advisories!)"
+            if self.plan.latest_is_safe:
+                note = ""
+                if any(self.plan.latest in w and "freshness" in w for w in self.plan.warnings):
+                    note = "  (~fresh)"
+            else:
+                note = "  (still has known advisories or other risks!)"
             latest = Option(f"Latest release: {self.plan.latest}{note}", id="latest")
         else:
             latest = Option("Latest release: none found", id="latest", disabled=True)
@@ -395,10 +440,13 @@ class VulnScanApp(App[None]):
         scan_fn: ScanFn | None = None,
         versions_fn: VersionsFn | None = None,
         outdated: bool = False,
+        preflight: bool = False,
     ) -> None:
         super().__init__()
         self.settings = settings
         self.outdated = outdated
+        self.preflight = preflight
+        self._preflight_report = None
         self._scan_fn: ScanFn = scan_fn or scan
         self._versions_fn: VersionsFn | None = versions_fn
         self.result: ScanResult | None = None
@@ -432,7 +480,9 @@ class VulnScanApp(App[None]):
     def compose(self) -> ComposeResult:
         """Lay out the dependency table, advisory table, detail pane and status bar."""
         yield Header()
-        if self.outdated:
+        if self.preflight:
+            yield Static(PREFLIGHT_BANNER, id="mode-banner")
+        elif self.outdated:
             yield Static(OUTDATED_BANNER, id="mode-banner")
         with Horizontal():
             yield DataTable(id="deps", cursor_type="row", zebra_stripes=True)
@@ -447,7 +497,9 @@ class VulnScanApp(App[None]):
         """Add the table columns and start the first scan."""
         self.sub_title = str(self.settings.project_path)
         columns = DEP_COLUMNS
-        if self.outdated:
+        if self.preflight:
+            columns = PREFLIGHT_COLUMNS
+        elif self.outdated:
             self.sub_title += f"  |  {OUTDATED_SUBTITLE}"
             columns = OUTDATED_COLUMNS
         self._dep_column_keys = self.query_one("#deps", DataTable).add_columns(*columns)
@@ -496,12 +548,23 @@ class VulnScanApp(App[None]):
     # -- scanning -----------------------------------------------------------------
 
     def _start_scan(self) -> None:
-        what = " and checking registries for newer releases" if self.outdated else ""
+        if self.preflight:
+            what = " (preflight pin-float resolve)"
+        elif self.outdated:
+            what = " and checking registries for newer releases"
+        else:
+            what = ""
         self._start_busy(f"Scanning {self.settings.project_path}{what} ...")
         self.run_worker(self._scan_in_thread, thread=True, exclusive=True, exit_on_error=False)
 
     def _scan_in_thread(self) -> None:
         try:
+            if self.preflight:
+                from vulnscan.preflight import run_preflight
+
+                report = run_preflight(self.settings)
+                self.call_from_thread(self._apply_preflight, report)
+                return
             result = self._scan_fn(self.settings)
             outdated = None
             if self.outdated:
@@ -533,6 +596,99 @@ class VulnScanApp(App[None]):
         self._upgrades = {o.dependency.key: o.options for o in outdated}
         return [by_key.get(o.dependency.key) or Finding(o.dependency, []) for o in outdated]
 
+
+    def _apply_preflight(self, report) -> None:
+        """Populate the tables from a preflight report."""
+        self._stop_busy()
+        self._preflight_report = report
+        self.result = None
+        self._rows = []
+        deps = self.query_one("#deps", DataTable)
+        deps.clear()
+        self.query_one("#vulns", DataTable).clear()
+        self._dep_row_keys = []
+        for pkg in report.packages:
+            kinds = (
+                ",".join(sorted({str(r.kind) for r in (pkg.score.risks if pkg.score else ())}))
+                or "-"
+            )
+            key = deps.add_row(
+                pkg.dependency.name,
+                pkg.dependency.ecosystem,
+                pkg.build_process or "-",
+                pkg.current or "-",
+                pkg.would_be,
+                kinds,
+                ", ".join(pkg.dependency.source_files),
+            )
+            self._dep_row_keys.append(key)
+            self._rows.append(Finding(pkg.dependency, []))
+        summary = (
+            f"Preflight: resolve {'ok' if report.resolve_ok else 'FAILED'}; "
+            f"{len(report.packages)} packages of interest; "
+            f"{_plural(len(report.warnings), 'warning')}."
+        )
+        self._set_status(summary)
+        if report.packages:
+            self._show_preflight_detail(0)
+        else:
+            self._show_preflight_overview()
+
+    def _show_preflight_overview(self) -> None:
+        """Detail pane when there is no package row (resolve failed or nothing interesting)."""
+        report = self._preflight_report
+        if report is None:
+            return
+        lines = [
+            "# Preflight",
+            "",
+            f"- **Resolve:** {'ok' if report.resolve_ok else 'FAILED'}",
+            f"- **Packages of interest:** {len(report.packages)}",
+            f"- **Ecosystems:** {', '.join(report.ecosystems) or '—'}",
+            "",
+        ]
+        if report.warnings:
+            lines.append("## Warnings")
+            lines.append("")
+            for w in report.warnings:
+                lines.append(f"- {w}")
+        else:
+            lines.append("_No warnings._")
+        self.query_one("#detail", Markdown).update(chr(10).join(lines))
+
+    def _show_preflight_detail(self, index: int) -> None:
+        report = self._preflight_report
+        if report is None:
+            return
+        if index < 0 or index >= len(report.packages):
+            self._show_preflight_overview()
+            return
+        pkg = report.packages[index]
+        lines = [
+            f"# {pkg.dependency.name}",
+            "",
+            f"- **Ecosystem:** {pkg.dependency.ecosystem}",
+            f"- **Process:** {pkg.build_process or '—'}",
+            f"- **Current:** {pkg.current or 'not in project lock'}",
+            f"- **Would be:** {pkg.would_be}",
+            f"- **Would bump:** {'yes' if pkg.would_bump else 'no'}",
+            "",
+            "## Risks",
+            "",
+        ]
+        if pkg.score and pkg.score.risks:
+            for r in pkg.score.risks:
+                extra = f" (`{r.advisory_id}`)" if r.advisory_id else ""
+                lines.append(f"- **{r.kind}:** {r.detail}{extra}")
+        else:
+            lines.append("_No advisory/malware/fresh/yank risks for this version._")
+        if report.warnings:
+            lines.extend(["", "## Warnings", ""])
+            for w in report.warnings[:20]:
+                lines.append(f"- {w}")
+            if len(report.warnings) > 20:
+                lines.append(f"- …and {len(report.warnings) - 20} more")
+        self.query_one("#detail", Markdown).update(chr(10).join(lines))
     def _apply_result(
         self, result: ScanResult, outdated: list[OutdatedPackage] | None = None
     ) -> None:
@@ -594,7 +750,7 @@ class VulnScanApp(App[None]):
             via,
             finding.worst_severity,
             str(len(finding.vulnerabilities)),
-            ", ".join(finding.fixed_versions) or "-",
+            _nearest_safe_label(finding),
             ", ".join(dep.source_files),
         ]
         return _cells(values, done)
@@ -655,7 +811,10 @@ class VulnScanApp(App[None]):
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         """Show the highlighted dependency's advisories, or the highlighted advisory's details."""
         if event.data_table.id == "deps":
-            self._show_finding(event.cursor_row)
+            if self.preflight:
+                self._show_preflight_detail(event.cursor_row)
+            else:
+                self._show_finding(event.cursor_row)
         elif event.data_table.id == "vulns":
             # In outdated mode the pane describes the update until the user actually moves
             # into the advisory table; the automatic highlight after repopulating is ignored.
@@ -671,6 +830,20 @@ class VulnScanApp(App[None]):
 
     def action_write_feeds(self) -> None:
         """Write the RSS and Atom feeds for the last result (``f``); warns if no scan completed."""
+        if self.preflight:
+            if self._preflight_report is None:
+                self.notify("Nothing to write: no completed preflight.", severity="warning")
+                return
+            try:
+                from vulnscan.feeds import write_preflight_feeds
+
+                paths = write_preflight_feeds(self._preflight_report, self.settings)
+            except OSError as exc:
+                self._set_status(f"Could not write feeds: {exc}")
+                return
+            self._set_status("Wrote " + ", ".join(str(p) for p in paths))
+            self.notify("Preflight feeds written.")
+            return
         if self.result is None:
             self.notify("Nothing to write: no completed scan.", severity="warning")
             return
@@ -707,6 +880,12 @@ class VulnScanApp(App[None]):
 
         In outdated mode the versions are already known, so the upgrade dialog opens at once.
         """
+        if self.preflight:
+            self.notify(
+                "Preflight is read-only; it does not modify the project.",
+                severity="information",
+            )
+            return
         finding = self._current_finding
         if finding is None:
             self.notify("Select a dependency first.", severity="warning")
@@ -723,15 +902,17 @@ class VulnScanApp(App[None]):
         )
 
     def _lookup_versions(self, finding: Finding) -> None:
-        try:
-            plan = plan_remediation(
-                finding,
-                self._available_versions(finding.dependency),
-                webpack_merge=self.result.webpack_merge if self.result else None,
-            )
-        except RegistryError as exc:
-            self.call_from_thread(self._set_status, f"Could not look up versions: {exc}")
-            return
+        plan = getattr(finding, "upgrade_plan", None)
+        if plan is None:
+            try:
+                plan = plan_remediation(
+                    finding,
+                    self._available_versions(finding.dependency),
+                    webpack_merge=self.result.webpack_merge if self.result else None,
+                )
+            except RegistryError as exc:
+                self.call_from_thread(self._set_status, f"Could not look up versions: {exc}")
+                return
         if finding.dependency.transitive:
             self.call_from_thread(self._offer_pin, finding, plan)
             return

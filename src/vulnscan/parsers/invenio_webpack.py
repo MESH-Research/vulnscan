@@ -111,7 +111,7 @@ def find_theme_dependencies_node(tree: ast.AST, theme: str = THEME_NAME) -> ast.
     return None
 
 
-def parse_webpack_py(path: Path, root: Path) -> list[Dependency]:
+def parse_invenio_webpack_py(path: Path, root: Path) -> list[Dependency]:
     """Parse npm dependencies from an Invenio ``webpack.py`` theme bundle.
 
     Returns ``[]`` when the file is unreadable, not a theme bundle, or has no

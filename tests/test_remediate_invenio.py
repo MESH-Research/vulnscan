@@ -5,7 +5,7 @@ import pytest
 
 from vulnscan.config import load_settings
 from vulnscan.models import NPM, Declaration, Dependency
-from vulnscan.parsers.webpack import extract_theme_dependencies
+from vulnscan.parsers.invenio_webpack import extract_theme_dependencies
 from vulnscan.remediate import (
     RemediationError,
     _edit_invenio_npm_dependency,

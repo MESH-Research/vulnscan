@@ -81,6 +81,26 @@ with ecosystem-aware version comparison (`vulnscan.versioncmp`), which is
 what remediation planning uses to decide whether a candidate version is
 safe.
 
+## Forward-check and preflight
+
+After advisories are collected, `scan` enriches each finding with a forward-checked
+`upgrade_plan` (`vulnscan.risk` + `plan_remediation`). `--preflight` does **not** use
+project lockfiles as resolve inputs. For each supported Python manifest
+(`pyproject.toml`, requirements / `setup.cfg` / `Pipfile`) it builds a tiny temp
+project and runs a fresh `uv lock`. Path/editable packages (uv sources and Poetry
+path deps) are not resolved as themselves; their PyPI requirements are folded in
+recursively from each package's `pyproject.toml` or `setup.cfg`, along with
+`[build-system].requires` and `tool.uv` `constraint-dependencies` /
+`override-dependencies` / `[[tool.uv.index]]`. For npm, a normal project
+mock-locks each `package.json`; in **Invenio mode** it instead builds one
+virtual assets `package.json` from the same webpack merge sources as
+`invenio webpack create` (`build_virtual_assets_package_json`) and lockfile-only
+resolves that, skipping on-disk `package.json` files. For PHP, each
+`composer.json` is mock-locked with `composer update --no-install` (path/vcs
+repos stripped). Each package is labeled with the build process that produced
+it (`uv`, `npm`, `invenio-assets`, or `composer`) in the TUI/JSON. Would-be
+versions are scored for bumps and risks against the project's current tree.
+
 ## Scanner (`vulnscan.scanner`)
 
 `scan(settings)` is the orchestration: parse, drop dev dependencies if

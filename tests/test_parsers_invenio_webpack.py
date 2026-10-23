@@ -3,7 +3,7 @@ from pathlib import Path
 
 from vulnscan.models import merge_declarations
 from vulnscan.parsers import discover_manifests, parse_project
-from vulnscan.parsers.webpack import extract_theme_dependencies, parse_webpack_py
+from vulnscan.parsers.invenio_webpack import extract_theme_dependencies, parse_invenio_webpack_py
 
 BRACE_WEBPACK = """\
 from invenio_assets.webpack import WebpackThemeBundle
@@ -63,7 +63,7 @@ def test_extract_returns_empty_without_bundle():
 def test_parse_webpack_py_emits_npm_deps(tmp_path: Path):
     path = tmp_path / "webpack.py"
     path.write_text(BRACE_WEBPACK)
-    deps = parse_webpack_py(path, tmp_path)
+    deps = parse_invenio_webpack_py(path, tmp_path)
     assert {(d.name, d.constraint, d.source_file, d.ecosystem) for d in deps} == {
         ("axios", "^1.20.0", "webpack.py", "npm"),
         ("yup", "^0.32.11", "webpack.py", "npm"),

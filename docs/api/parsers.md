@@ -22,6 +22,10 @@
 
 ::: vulnscan.parsers.yamlish
 
+## vulnscan.parsers.invenio_webpack
+
+::: vulnscan.parsers.invenio_webpack
+
 ## vulnscan.parsers.lockfiles
 
 ::: vulnscan.parsers.lockfiles

@@ -23,6 +23,7 @@ from vulnscan.parsers.containers import (
     parse_github_workflow,
     parse_gitlab_ci,
 )
+from vulnscan.parsers.invenio_webpack import parse_invenio_webpack_py
 from vulnscan.parsers.lockfiles import LockedPackage, load_lock_packages, load_lock_versions
 from vulnscan.parsers.node import parse_package_json
 from vulnscan.parsers.python import (
@@ -32,7 +33,6 @@ from vulnscan.parsers.python import (
     parse_setup_cfg,
 )
 from vulnscan.parsers.versions import resolve_dependency
-from vulnscan.parsers.webpack import parse_webpack_py
 
 IGNORED_DIRS = {
     ".git",
@@ -89,7 +89,7 @@ _EXACT_NAMES: dict[str, Parser] = {
     "pyproject.toml": parse_pyproject,
     "pipfile": parse_pipfile,
     "setup.cfg": parse_setup_cfg,
-    "webpack.py": parse_webpack_py,
+    "webpack.py": parse_invenio_webpack_py,
 }
 
 
