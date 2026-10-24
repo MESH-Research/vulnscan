@@ -44,9 +44,29 @@ In Invenio mode, npm preflight does **not** float each on-disk `package.json`
 `package.json` from the same sources as `webpack create` / the scan merge index
 (in-tree theme `webpack.py` files, `invenio_assets.webpack` entry points in the
 project `.venv`, and the invenio-assets base templates), folds constraints with
-pywebpack’s same-major `max_version` rule, then runs a lockfile-only npm/pnpm
-resolve on that document. Major merge conflicts are omitted with warnings.
-Python manifests are still mock-locked individually.
+pywebpack’s same-major `max_version` rule, then runs a lockfile-only resolve on
+that document. Major merge conflicts are omitted with warnings. Python manifests
+are still mock-locked individually.
+
+### Package manager
+
+The lockfile-only client is **pnpm** when `invenio.cfg` sets
+`WEBPACKEXT_NPM_PKG_CLS` to `pynpm.package:PNPMPackage` (or any value containing
+`PNPMPackage`); otherwise **npm**. A root `package.json` `packageManager: pnpm@…`
+still selects pnpm if the cfg setting is missing. Default when neither applies is
+npm.
+
+When the cfg requires pnpm and the root `package.json` lacks a
+`packageManager: pnpm@…` field, preflight **restores** it (reusing a version
+string from another in-tree `package.json` when available) and may align
+`engines` away from npm-only. No project lock file is written.
+
+### Detail / JSON (scan parity)
+
+The preflight TUI detail pane and JSON field `upstream_constraints` list the same
+per-file merge-tree constraints as a normal scan (`src as ^constraint`, or
+`none`). The **File** column / `resolve_from` names the mock-lock site
+(`invenio-assets (virtual)` for this path).
 
 Exclude local forks of upstream modules you do not control using
 `.vulnscanignore` (paths relative to the project root). Otherwise, dependencies
@@ -91,6 +111,7 @@ Per-finding details (report, TUI, feeds, ntfy, Teams) show:
 
 - **Declared in** — scanned manifests (empty constraint →
   `no version constraint`)
-- **Upstream constraints** — the merge-tree sources above (`none` when absent)
+- **Upstream constraints** — the merge-tree sources above (`none` when absent);
+  also on preflight npm packages (detail pane and JSON)
 - **Upgrade limit** — when pywebpack blocks a fix (including “major bump
   required”)

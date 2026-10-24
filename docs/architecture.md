@@ -95,11 +95,16 @@ recursively from each package's `pyproject.toml` or `setup.cfg`, along with
 mock-locks each `package.json`; in **Invenio mode** it instead builds one
 virtual assets `package.json` from the same webpack merge sources as
 `invenio webpack create` (`build_virtual_assets_package_json`) and lockfile-only
-resolves that, skipping on-disk `package.json` files. For PHP, each
-`composer.json` is mock-locked with `composer update --no-install` (path/vcs
-repos stripped). Each package is labeled with the build process that produced
-it (`uv`, `npm`, `invenio-assets`, or `composer`) in the TUI/JSON. Would-be
-versions are scored for bumps and risks against the project's current tree.
+resolves that, skipping on-disk `package.json` files. The npm client is chosen
+from `WEBPACKEXT_NPM_PKG_CLS` in `invenio.cfg` (pnpm when `PNPMPackage`), else
+`packageManager`, else npm; a missing root `packageManager` may be restored when
+cfg requires pnpm. For PHP, each `composer.json` is mock-locked with
+`composer update --no-install` (path/vcs repos stripped). Each package is
+labeled with the build process that produced it (`uv`, `npm`, `invenio-assets`,
+or `composer`) and `resolve_from` in the TUI/JSON; Invenio npm packages also
+carry `upstream_constraints` from the merge index. Would-be versions are scored
+for bumps and risks against the project's current tree. The TUI can switch into
+preflight with `p` and back with `n`.
 
 ## Scanner (`vulnscan.scanner`)
 

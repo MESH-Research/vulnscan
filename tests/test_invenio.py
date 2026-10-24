@@ -7,6 +7,7 @@ from vulnscan.invenio import (
     major_conflict_message,
     npm_major,
     resolve_overlay,
+    webpack_uses_pnpm,
 )
 
 BUNDLE = """\
@@ -75,3 +76,16 @@ def test_detect_auto_requires_signal_and_bundle(tmp_path: Path):
     assert detect_invenio_webpack(plain, "auto") is True
     assert detect_invenio_webpack(plain, "off") is False
     assert detect_invenio_webpack(plain, "on") is True
+
+
+def test_webpack_uses_pnpm_defaults_false(tmp_path: Path):
+    assert webpack_uses_pnpm(tmp_path) is False
+    (tmp_path / "invenio.cfg").write_text('WEBPACKEXT_NPM_PKG_CLS = "pynpm.package:NPMPackage"\n')
+    assert webpack_uses_pnpm(tmp_path) is False
+
+
+def test_webpack_uses_pnpm_reads_pnpmpackage(tmp_path: Path):
+    (tmp_path / "invenio.cfg").write_text(
+        '# comment\nWEBPACKEXT_NPM_PKG_CLS = "pynpm.package:PNPMPackage"\n'
+    )
+    assert webpack_uses_pnpm(tmp_path) is True

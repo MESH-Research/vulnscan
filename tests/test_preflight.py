@@ -12,9 +12,11 @@ from vulnscan.config import load_settings
 from vulnscan.models import PYPI, Dependency
 from vulnscan.osv import OSVClient
 from vulnscan.preflight import (
+    _prefer_pnpm,
     is_excluded,
     load_preflight_ignore_file,
     report_to_json,
+    restore_missing_package_manager,
     run_preflight,
 )
 from vulnscan.registry import RegistryClient
@@ -361,7 +363,7 @@ def test_run_preflight_package_json_mock_lock(tmp_path: Path):
     )
 
     def fake_run(argv, cwd: Path):
-        assert "npm" in argv or "pnpm" in argv
+        assert argv[0] == "npm"
         assert not (cwd / "package-lock.json").exists()
         assert not (cwd / "pnpm-lock.yaml").exists()
         (cwd / "package-lock.json").write_text(
@@ -430,6 +432,7 @@ def test_run_preflight_invenio_uses_virtual_assets_package_json(tmp_path: Path):
                 '[[package]]\nname = "invenio-app-rdm"\nversion = "13.0.0"\n'
             )
             return subprocess.CompletedProcess(argv, 0, "", "")
+        assert argv[0] == "npm"
         doc = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
         seen_docs.append(doc)
         assert "should-not-resolve" not in (doc.get("dependencies") or {})
@@ -463,6 +466,11 @@ def test_run_preflight_invenio_uses_virtual_assets_package_json(tmp_path: Path):
     assert any("skipping package.json" in w for w in report.warnings)
     assert any(p.dependency.name == "axios" and p.would_be == "1.9.1" for p in report.packages)
     assert not any(p.dependency.name == "should-not-resolve" for p in report.packages)
+    axios_pkg = next(p for p in report.packages if p.dependency.name == "axios")
+    assert axios_pkg.upstream_constraints_text is not None
+    assert "webpack.py" in axios_pkg.upstream_constraints_text
+    text = axios_pkg.upstream_constraints_text
+    assert "^1.9.0" in text or "^1.7.0" in text
 
 
 def test_virtual_assets_dependencies_omits_major_conflicts():
@@ -565,6 +573,7 @@ def test_run_preflight_composer_mock_lock_sets_build_process(tmp_path: Path):
     monolog = next(p for p in report.packages if p.dependency.name == "monolog/monolog")
     assert monolog.would_be == "2.9.1"
     assert monolog.build_process == "composer"
+    assert monolog.resolve_from == "composer.json"
     assert any("dropping non-registry composer repositories" in w for w in report.warnings)
     payload = report_to_json(report, strict_fresh=False)
     assert any(
@@ -595,6 +604,7 @@ def test_run_preflight_uv_packages_set_build_process(tmp_path: Path):
     )
     bumped = next(p for p in report.packages if p.dependency.name == "demo-pkg")
     assert bumped.build_process == "uv"
+    assert bumped.resolve_from == "pyproject.toml"
 
 
 def test_run_preflight_missing_resolver_binary_is_reported_not_raised(tmp_path: Path):
@@ -636,3 +646,106 @@ def test_default_run_missing_binary_returns_failed_process(tmp_path: Path):
     assert result.returncode != 0
     assert "vulnscan-definitely-not-a-real-binary-xyz" in result.stderr
     assert "not found" in result.stderr.lower() or "no such file" in result.stderr.lower()
+
+
+def test_prefer_pnpm_defaults_to_npm(tmp_path: Path):
+    assert _prefer_pnpm(tmp_path) is False
+    assert _prefer_pnpm(tmp_path, {"dependencies": {"x": "1"}}) is False
+
+
+def test_prefer_pnpm_from_package_manager_field(tmp_path: Path):
+    (tmp_path / "package.json").write_text(
+        '{"name":"app","packageManager":"pnpm@9.0.0","dependencies":{"x":"1"}}\n'
+    )
+    assert _prefer_pnpm(tmp_path) is True
+    assert _prefer_pnpm(tmp_path, {"packageManager": "npm@10.0.0"}) is False
+
+
+def test_prefer_pnpm_from_webpackext_cfg(tmp_path: Path):
+    (tmp_path / "invenio.cfg").write_text('WEBPACKEXT_NPM_PKG_CLS = "pynpm.package:PNPMPackage"\n')
+    assert _prefer_pnpm(tmp_path) is True
+    assert _prefer_pnpm(tmp_path, {"packageManager": "npm@10.0.0"}) is True
+
+
+def test_run_preflight_invenio_uses_pnpm_when_webpackext_set(tmp_path: Path):
+    site = tmp_path / "site" / "app"
+    site.mkdir(parents=True)
+    (site / "webpack.py").write_text(BUNDLE_A)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname="app"\nversion="0.1.0"\ndependencies=["invenio-app-rdm"]\n'
+    )
+    (tmp_path / "invenio.cfg").write_text('WEBPACKEXT_NPM_PKG_CLS = "pynpm.package:PNPMPackage"\n')
+    seen: list[list[str]] = []
+
+    def fake_run(argv, cwd: Path):
+        if argv[:2] == ["uv", "lock"]:
+            (cwd / "uv.lock").write_text(
+                'version = 1\nrevision = 1\nrequires-python = ">=3.12"\n\n'
+                '[[package]]\nname = "invenio-app-rdm"\nversion = "13.0.0"\n'
+            )
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        seen.append(list(argv))
+        assert argv[0] == "pnpm"
+        assert "--lockfile-only" in argv
+        doc = json.loads((cwd / "package.json").read_text(encoding="utf-8"))
+        assert isinstance(doc.get("packageManager"), str)
+        assert doc["packageManager"].lower().startswith("pnpm@")
+        (cwd / "pnpm-lock.yaml").write_text(
+            "lockfileVersion: '9.0'\n"
+            "importers:\n"
+            "  .:\n"
+            "    dependencies:\n"
+            "      axios:\n"
+            "        specifier: ^1.7.0\n"
+            "        version: 1.7.9\n"
+            "packages:\n"
+            "  axios@1.7.9:\n"
+            "    resolution: {integrity: sha512-x}\n"
+        )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    transport = _transport()
+    settings = load_settings(
+        env={
+            "VULNSCAN_PROJECT_PATH": str(tmp_path),
+            "VULNSCAN_INVENIO_WEBPACK": "on",
+        }
+    )
+    report = run_preflight(
+        settings,
+        osv=OSVClient(base_url="https://api.osv.dev", timeout=1.0, transport=transport),
+        registry=RegistryClient(timeout=1.0, transport=transport),
+        run=fake_run,
+    )
+    assert report.resolve_ok
+    assert seen and seen[0][0] == "pnpm"
+    assert any(p.dependency.name == "axios" and p.would_be == "1.7.9" for p in report.packages)
+
+
+def test_restore_missing_package_manager_noop_without_webpackext(tmp_path: Path):
+    (tmp_path / "package.json").write_text('{"name":"app","dependencies":{}}\n')
+    assert restore_missing_package_manager(tmp_path) == []
+    assert "packageManager" not in json.loads((tmp_path / "package.json").read_text())
+
+
+def test_restore_missing_package_manager_writes_pnpm_field(tmp_path: Path):
+    (tmp_path / "invenio.cfg").write_text('WEBPACKEXT_NPM_PKG_CLS = "pynpm.package:PNPMPackage"\n')
+    nested = tmp_path / "site" / "pkg"
+    nested.mkdir(parents=True)
+    (nested / "package.json").write_text('{"name":"nested","packageManager":"pnpm@12.11.2"}\n')
+    (tmp_path / "package.json").write_text(
+        '{"name":"app","engines":{"node":">=18","npm":">=8"},"dependencies":{}}\n'
+    )
+    warnings = restore_missing_package_manager(tmp_path)
+    assert warnings and "packageManager" in warnings[0]
+    data = json.loads((tmp_path / "package.json").read_text())
+    assert data["packageManager"] == "pnpm@12.11.2"
+    assert data["engines"] == {"node": ">=18", "pnpm": ">=10.0.0"}
+
+
+def test_restore_missing_package_manager_skips_when_already_pnpm(tmp_path: Path):
+    (tmp_path / "invenio.cfg").write_text('WEBPACKEXT_NPM_PKG_CLS = "pynpm.package:PNPMPackage"\n')
+    (tmp_path / "package.json").write_text('{"name":"app","packageManager":"pnpm@12.11.2"}\n')
+    before = (tmp_path / "package.json").read_text()
+    assert restore_missing_package_manager(tmp_path) == []
+    assert (tmp_path / "package.json").read_text() == before

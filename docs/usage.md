@@ -18,7 +18,9 @@ uv run vulnscan --path /path/to/project
 | `f` | Write the RSS and Atom feeds |
 | `e` | Export Markdown and plain-text reports |
 | `u` | Upgrade the selected dependency in every manifest that declares it |
-| `r` | Rescan |
+| `p` | Run preflight against the current on-disk pins (after upgrades this session) |
+| `n` | Return to the last normal or outdated scan result (from preflight) |
+| `r` | Rescan (or re-run preflight when that mode is active) |
 | `q` | Quit |
 
 The left table lists vulnerable dependencies: package, ecosystem, resolved
@@ -191,14 +193,16 @@ A scan reports on the versions you have. `--preflight` reports on the versions
 you would get: for each manifest it copies the registry constraints into an
 empty temporary project, runs a fresh resolve there without your lock files,
 compares the would-be versions with the current tree and scores every package
-that would change or that carries a risk. The project is never modified and no
-lock file of yours is written.
+that would change or that carries a risk. No lock file of yours is written. The
+project is otherwise left alone, except that Invenio mode may restore a missing
+root `package.json` `packageManager` field when `WEBPACKEXT_NPM_PKG_CLS`
+requires pnpm (see [Invenio / webpack.py](invenio.md#preflight-preflight)).
 
 | Manifest                                                                                              | Resolver                                                                                                              | Label             |
 | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ----------------- |
 | `pyproject.toml` (PEP 621, PEP 735 groups, Poetry), `requirements*.txt`, `setup.cfg`, `Pipfile`       | `uv lock`                                                                                                             | `uv`              |
-| `package.json`                                                                                        | `npm install --package-lock-only --ignore-scripts`, or `pnpm install --lockfile-only --ignore-scripts` when `packageManager` names pnpm | `npm`             |
-| Invenio theme bundles (see [Invenio / webpack.py](invenio.md#preflight-preflight))                                        | one virtual assets `package.json`, resolved the same way                                                              | `invenio-assets`  |
+| `package.json`                                                                                        | `npm install --package-lock-only --ignore-scripts` by default; `pnpm install --lockfile-only --ignore-scripts` when `invenio.cfg` sets `WEBPACKEXT_NPM_PKG_CLS` to `PNPMPackage`, or when `packageManager` names pnpm | `npm`             |
+| Invenio theme bundles (see [Invenio / webpack.py](invenio.md#preflight-preflight))                                        | one virtual assets `package.json`, resolved the same way (pnpm vs npm as above)                                       | `invenio-assets`  |
 | `composer.json`                                                                                       | `composer update --no-install --no-interaction --ignore-platform-reqs --no-scripts --no-plugins`                      | `composer`        |
 
 The resolver must be installed (`uv`, `npm` or `pnpm`, `composer`). A manifest
@@ -225,14 +229,20 @@ Each would-be version is checked for four kinds of risk:
 
 Alone, `--preflight` opens the TUI with a **Preflight** table: package,
 ecosystem, build process, current version, would-be version, risks and
-declaring file; `f` writes the preflight feeds and `r` resolves again. With
+**File** (the mock-locked manifest path, e.g. `apps/web/composer.json`);
+`f` writes the preflight feeds and `r` / `p` resolve again.
+From a normal or outdated TUI session, `p` switches into the same preflight
+view (using whatever pins are on disk after upgrades) and `n` restores the
+last scan result. With
 `--json`, `--text`, `--markdown` or `--update-feeds` it runs non-interactively
 and writes `preflight.json`, `preflight.txt`, `preflight.md` or
 `preflight.rss.xml` / `preflight.atom.xml` in the feed directory (`-` sends
 JSON, text or Markdown to stdout). The JSON carries `schema_version`,
 `resolve_ok`, a `summary` of counts, each package with its `current`,
-`would_be`, `build_process` and `risks`, the `ignored` packages and the
-`warnings`.
+`would_be`, `build_process`, `resolve_from`, optional `upstream_constraints`
+(Invenio npm merge-tree sources) and `risks`, the `ignored` packages and the
+`warnings`. The preflight detail pane mirrors a normal scan for constraints:
+declared-in (current tree) plus, in Invenio mode, **Upstream constraints**.
 
 The exit code is 0 when nothing blocks, 1 when a package carries an advisory,
 malware or yanked risk or no manifest could be resolved, and, with
