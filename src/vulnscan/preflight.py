@@ -22,13 +22,17 @@ import subprocess
 import tempfile
 import tomllib
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
 
 from vulnscan.config import Settings
-from vulnscan.invenio import build_virtual_assets_package_json, detect_invenio_webpack
+from vulnscan.invenio import (
+    build_virtual_assets_package_json,
+    detect_invenio_webpack,
+    webpack_uses_pnpm,
+)
 from vulnscan.models import NPM, PACKAGIST, PYPI, Dependency, normalize_name
 from vulnscan.osv import OSVClient
 from vulnscan.parsers import (
@@ -82,6 +86,9 @@ class PreflightPackage:
     would_be: str
     would_bump: bool
     build_process: str = ""
+    resolve_from: str = ""
+    upstream_constraints_text: str | None = None
+    """Invenio npm: which ``webpack.py`` / template files set which constraint (scan-parity)."""
     score: VersionScore | None = None
     ignored: bool = False
 
@@ -156,7 +163,14 @@ class _MockLockResult:
     ecosystem: str
     versions: dict[tuple[str, str], str]  # (ecosystem, normalized_name) -> version
     build_process: str
+    resolve_from: str = ""
     detail: str = ""
+    webpack_merge: object | None = None
+
+
+def _tag_resolve_from(result: _MockLockResult, resolve_from: str) -> _MockLockResult:
+    """Attach the project-relative mock-lock site (manifest path or virtual label)."""
+    return replace(result, resolve_from=resolve_from)
 
 
 def load_preflight_ignore_file(root: Path) -> tuple[str, ...]:
@@ -764,10 +778,9 @@ def _npm_non_registry(spec: object) -> bool:
     )
 
 
-def _package_manager_argv(package_json: dict) -> list[str]:
-    """Prefer pnpm when ``packageManager`` says so; otherwise npm lockfile-only."""
-    pm = package_json.get("packageManager")
-    if isinstance(pm, str) and pm.lower().startswith("pnpm@"):
+def _package_manager_argv(*, prefer_pnpm: bool) -> list[str]:
+    """Lockfile-only argv: pnpm when preferred, otherwise npm (the default)."""
+    if prefer_pnpm:
         return ["pnpm", "install", "--lockfile-only", "--ignore-scripts"]
     return ["npm", "install", "--package-lock-only", "--ignore-scripts"]
 
@@ -785,12 +798,122 @@ def _read_root_package_manager(root: Path) -> str | None:
     return None
 
 
+def _prefer_pnpm(root: Path, package_json: dict | None = None) -> bool:
+    """Whether mock-lock should use pnpm.
+
+    Order:
+    1. ``WEBPACKEXT_NPM_PKG_CLS`` in ``invenio.cfg`` naming ``PNPMPackage``
+    2. ``packageManager`` on the document / root ``package.json`` starting with ``pnpm@``
+    3. otherwise npm (default)
+    """
+    if webpack_uses_pnpm(root):
+        return True
+    pm = None
+    if isinstance(package_json, dict) and isinstance(package_json.get("packageManager"), str):
+        pm = package_json["packageManager"]
+    else:
+        pm = _read_root_package_manager(root)
+    return isinstance(pm, str) and pm.lower().startswith("pnpm@")
+
+
+def _iter_package_json_paths(root: Path) -> list[Path]:
+    """Shallow-ish ``package.json`` paths under ``root`` (skip venv / node_modules)."""
+    skip = {".venv", "node_modules", ".git", "dist", "build", "var"}
+    found: list[Path] = []
+    root_pkg = root / "package.json"
+    if root_pkg.is_file():
+        found.append(root_pkg)
+    root_resolved = root.resolve()
+    for path in root.rglob("package.json"):
+        if path == root_pkg:
+            continue
+        try:
+            relative_parts = path.resolve().relative_to(root_resolved).parts
+        except ValueError:
+            continue
+        if any(part in skip for part in relative_parts):
+            continue
+        found.append(path)
+        if len(found) >= 40:
+            break
+    return found
+
+
+def _discover_pnpm_package_manager(root: Path) -> str:
+    """Best ``packageManager`` string for a pnpm project (Corepack-style)."""
+    existing = _read_root_package_manager(root)
+    if isinstance(existing, str) and existing.lower().startswith("pnpm@"):
+        return existing
+    for path in _iter_package_json_paths(root):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        pm = data.get("packageManager")
+        if isinstance(pm, str) and pm.lower().startswith("pnpm@"):
+            return pm
+    return "pnpm@"
+
+
+def _resolve_package_manager_field(root: Path) -> str | None:
+    """``packageManager`` value to stamp on a virtual assets package.json."""
+    if webpack_uses_pnpm(root):
+        return _discover_pnpm_package_manager(root)
+    return _read_root_package_manager(root)
+
+
+def restore_missing_package_manager(root: Path) -> list[str]:
+    """Write ``packageManager`` into root ``package.json`` when Invenio cfg requires pnpm.
+
+    If ``WEBPACKEXT_NPM_PKG_CLS`` selects pnpm and the on-disk root ``package.json``
+    is missing a ``pnpm@…`` ``packageManager`` field, restore it (preferring a
+    version found in another in-tree ``package.json``). No-op when the field is
+    already correct, the file is absent, or webpack is not configured for pnpm.
+    """
+    if not webpack_uses_pnpm(root):
+        return []
+    path = root / "package.json"
+    if not path.is_file():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    current = data.get("packageManager")
+    if isinstance(current, str) and current.lower().startswith("pnpm@"):
+        return []
+    desired = _discover_pnpm_package_manager(root)
+    data["packageManager"] = desired
+    # Keep engines aligned when the assets template still lists npm only.
+    engines = data.get("engines")
+    if isinstance(engines, dict):
+        engines = dict(engines)
+        if "pnpm" not in engines:
+            engines["pnpm"] = ">=10.0.0"
+        engines.pop("npm", None)
+        data["engines"] = engines
+    try:
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        return [f"preflight: could not restore packageManager in package.json ({exc})"]
+    return [
+        f"preflight: restored packageManager={desired!r} in package.json "
+        f"(WEBPACKEXT_NPM_PKG_CLS uses PNPMPackage)"
+    ]
+
+
 def _mock_lock_npm_document(
     document: dict,
     *,
     label: str,
     run_fn: RunFn,
     build_process: str = BUILD_NPM,
+    prefer_pnpm: bool = False,
 ) -> tuple[_MockLockResult, list[str]]:
     """Lockfile-only resolve for an in-memory npm package document (no prior lock)."""
     warnings: list[str] = []
@@ -809,7 +932,7 @@ def _mock_lock_npm_document(
             warnings,
         )
 
-    argv = _package_manager_argv(document)
+    argv = _package_manager_argv(prefer_pnpm=prefer_pnpm)
     with tempfile.TemporaryDirectory(prefix="vulnscan-preflight-npm-") as tmp:
         temp = Path(tmp)
         (temp / "package.json").write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
@@ -901,7 +1024,12 @@ def _mock_lock_package_json(
         )
     if isinstance(data.get("packageManager"), str):
         cleaned["packageManager"] = data["packageManager"]
-    result, extra = _mock_lock_npm_document(cleaned, label=rel, run_fn=run_fn)
+    result, extra = _mock_lock_npm_document(
+        cleaned,
+        label=rel,
+        run_fn=run_fn,
+        prefer_pnpm=_prefer_pnpm(root, cleaned),
+    )
     warnings.extend(extra)
     return result, warnings
 
@@ -915,12 +1043,13 @@ def _mock_lock_invenio_assets(
 ) -> tuple[_MockLockResult, list[str]]:
     """Mock-lock the virtual assets package.json (full Invenio webpack merge tree)."""
     warnings: list[str] = []
+    warnings.extend(restore_missing_package_manager(root))
     patterns = tuple(ignore_dirs) + load_ignore_file(root)
-    document, _index, build_warnings = build_virtual_assets_package_json(
+    document, merge_index, build_warnings = build_virtual_assets_package_json(
         root,
         ignore_patterns=patterns,
         include_environment=include_environment,
-        package_manager=_read_root_package_manager(root),
+        package_manager=_resolve_package_manager_field(root),
     )
     warnings.extend(build_warnings)
     deps = document.get("dependencies") or {}
@@ -935,6 +1064,7 @@ def _mock_lock_invenio_assets(
                 versions={},
                 build_process=BUILD_INVENIO_ASSETS,
                 detail="empty",
+                webpack_merge=merge_index,
             ),
             warnings,
         )
@@ -947,9 +1077,10 @@ def _mock_lock_invenio_assets(
         label="invenio-assets (virtual)",
         run_fn=run_fn,
         build_process=BUILD_INVENIO_ASSETS,
+        prefer_pnpm=_prefer_pnpm(root, document),
     )
     warnings.extend(extra)
-    return result, warnings
+    return replace(result, webpack_merge=merge_index), warnings
 
 
 def _mock_lock_requirements(
@@ -1225,15 +1356,20 @@ def mock_lock_manifest(
     if name in _SKIP_MANIFEST_NAMES:
         return None, [f"preflight: skipping {_rel(manifest, root)} (not a registry float target)"]
     if name == "pyproject.toml":
-        return _mock_lock_pyproject(manifest, root, run_fn)
+        result, warnings = _mock_lock_pyproject(manifest, root, run_fn)
+        return _tag_resolve_from(result, _rel(manifest, root)), warnings
     if name == "package.json":
-        return _mock_lock_package_json(manifest, root, run_fn)
+        result, warnings = _mock_lock_package_json(manifest, root, run_fn)
+        return _tag_resolve_from(result, _rel(manifest, root)), warnings
     if name == "composer.json":
-        return _mock_lock_composer(manifest, root, run_fn)
+        result, warnings = _mock_lock_composer(manifest, root, run_fn)
+        return _tag_resolve_from(result, _rel(manifest, root)), warnings
     if is_requirements_file(manifest):
-        return _mock_lock_requirements(manifest, root, run_fn)
+        result, warnings = _mock_lock_requirements(manifest, root, run_fn)
+        return _tag_resolve_from(result, _rel(manifest, root)), warnings
     if name in {"setup.cfg", "Pipfile"}:
-        return _mock_lock_setup_or_pipfile(manifest, root, run_fn)
+        result, warnings = _mock_lock_setup_or_pipfile(manifest, root, run_fn)
+        return _tag_resolve_from(result, _rel(manifest, root)), warnings
     return None, [f"preflight: skipping {_rel(manifest, root)} (unsupported for mock lock)"]
 
 
@@ -1296,13 +1432,17 @@ def run_preflight(
     )
     would_versions: dict[tuple[str, str], str] = {}
     would_process: dict[tuple[str, str], str] = {}
+    would_resolve_from: dict[tuple[str, str], str] = {}
     ecosystems: list[str] = []
     attempted = 0
     succeeded = 0
+    webpack_merge = None
 
     def _absorb(result: _MockLockResult) -> None:
-        nonlocal attempted, succeeded
+        nonlocal attempted, succeeded, webpack_merge
         attempted += 1
+        if result.webpack_merge is not None:
+            webpack_merge = result.webpack_merge
         if not result.ok:
             return
         succeeded += 1
@@ -1310,6 +1450,8 @@ def run_preflight(
         for key, ver in result.versions.items():
             would_versions[key] = ver
             would_process[key] = result.build_process
+            if result.resolve_from:
+                would_resolve_from[key] = result.resolve_from
 
     if invenio_mode:
         result, mw = _mock_lock_invenio_assets(
@@ -1318,7 +1460,7 @@ def run_preflight(
             run_fn=run_fn,
         )
         warnings.extend(mw)
-        _absorb(result)
+        _absorb(_tag_resolve_from(result, "invenio-assets (virtual)"))
 
     for manifest in manifests:
         if invenio_mode and manifest.name == "package.json":
@@ -1380,12 +1522,18 @@ def run_preflight(
             current.dev if current else False,
         )
         process = would_process.get((ecosystem, norm_name), "")
+        resolve_from = would_resolve_from.get((ecosystem, norm_name), "")
+        upstream = None
+        if webpack_merge is not None and ecosystem == NPM:
+            upstream = webpack_merge.upstream_constraints_text(display_name)
         entry = PreflightPackage(
             dependency=dep,
             current=current_ver,
             would_be=would_be,
             would_bump=would_bump,
             build_process=process,
+            resolve_from=resolve_from,
+            upstream_constraints_text=upstream,
         )
         if is_excluded(dep, ignore_patterns):
             ignored.append(
@@ -1395,6 +1543,8 @@ def run_preflight(
                     would_be=would_be,
                     would_bump=would_bump,
                     build_process=process,
+                    resolve_from=resolve_from,
+                    upstream_constraints_text=upstream,
                     ignored=True,
                 )
             )
@@ -1422,6 +1572,8 @@ def run_preflight(
                 would_be=entry.would_be,
                 would_bump=entry.would_bump,
                 build_process=entry.build_process,
+                resolve_from=entry.resolve_from,
+                upstream_constraints_text=entry.upstream_constraints_text,
                 score=score,
             )
         )
@@ -1447,7 +1599,10 @@ def report_to_json(report: PreflightReport, *, strict_fresh: bool) -> dict:
             "would_be": p.would_be,
             "would_bump": p.would_bump,
             "build_process": p.build_process,
+            "resolve_from": p.resolve_from,
         }
+        if p.upstream_constraints_text is not None:
+            data["upstream_constraints"] = p.upstream_constraints_text
         if ignored:
             data["reason"] = "excluded"
             return data
@@ -1499,8 +1654,10 @@ def render_preflight_text(report: PreflightReport) -> str:
         bump = f"{p.current or '?'} → {p.would_be}" if p.would_bump else f"{p.would_be} (unchanged)"
         kinds = ",".join(sorted({str(r.kind) for r in (p.score.risks if p.score else ())})) or "-"
         process = p.build_process or "-"
+        site = p.resolve_from or "-"
         lines.append(
-            f"- {p.dependency.name} ({p.dependency.ecosystem}, {process}): {bump} [{kinds}]"
+            f"- {p.dependency.name} ({p.dependency.ecosystem}, {process} @ {site}): "
+            f"{bump} [{kinds}]"
         )
     if report.ignored:
         lines.append("")

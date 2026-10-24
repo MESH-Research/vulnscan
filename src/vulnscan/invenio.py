@@ -106,6 +106,30 @@ def discover_theme_webpack_files(root: Path, paths: list[Path]) -> list[Path]:
     return [p for p in paths if p.name == "webpack.py" and file_has_webpack_theme_bundle(p)]
 
 
+def webpack_uses_pnpm(project_root: Path) -> bool:
+    """Whether the project configures Invenio webpack to install with pnpm.
+
+    Reads ``WEBPACKEXT_NPM_PKG_CLS`` from ``invenio.cfg`` (Flask/Invenio style).
+    ``pynpm.package:PNPMPackage`` (or any value containing ``PNPMPackage``) means pnpm;
+    anything else — including a missing setting — means the default npm client.
+    """
+    cfg = project_root / "invenio.cfg"
+    if not cfg.is_file():
+        return False
+    try:
+        text = cfg.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    match = re.search(
+        r"^\s*WEBPACKEXT_NPM_PKG_CLS\s*=\s*['\"]([^'\"]+)['\"]",
+        text,
+        flags=re.MULTILINE,
+    )
+    if not match:
+        return False
+    return "pnpmpackage" in match.group(1).lower().replace("_", "")
+
+
 def detect_invenio_webpack(
     root: Path,
     mode: str,

@@ -1,3 +1,14 @@
+## 1.12.0 (2026-10-24)
+
+### Feat
+
+- **tui**: ``p`` runs preflight from normal/outdated mode; ``n`` restores the last scan
+- **tui / preflight**: detail pane and JSON include ``resolve_from`` (mock-lock site) and,
+  in Invenio mode, ``upstream_constraints`` (per-file merge-tree constraints, scan-parity)
+- **preflight**: choose pnpm when ``invenio.cfg`` sets ``WEBPACKEXT_NPM_PKG_CLS`` to
+  ``PNPMPackage`` (else ``packageManager: pnpm@…``, else npm); restore a missing root
+  ``package.json`` ``packageManager`` field (and align ``engines``) when the cfg requires pnpm
+
 ## 1.11.1 (2026-10-23)
 
 ### Fix
