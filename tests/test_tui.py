@@ -625,14 +625,14 @@ async def test_outdated_mode_clearly_marks_updates_as_non_security(tmp_path: Pat
 
 
 async def test_normal_mode_has_no_outdated_banner(tmp_path: Path):
-    from textual.css.query import NoMatches
     from textual.widgets import Static
 
     app = VulnScanApp(settings_for(tmp_path), scan_fn=lambda s: sample_result(s.project_path))
     async with app.run_test() as pilot:
         await settle(app, pilot)
-        with pytest.raises(NoMatches):
-            app.query_one("#mode-banner", Static)
+        banner = app.query_one("#mode-banner", Static)
+        assert banner.display is False
+        assert not str(banner.content).strip()
         assert "not security" not in app.sub_title.lower()
 
 
