@@ -17,21 +17,26 @@ from vulnscan.models import (
     CONTAINER,
     NPM,
     WORDPRESS,
+    Dependency,
     Finding,
     ScanResult,
+    Vulnerability,
     merge_declarations,
     severity_rank,
 )
-from vulnscan.nvd import NVDClient, parse_image_products
-from vulnscan.osv import OSVClient
+from vulnscan.nvd import NVDClient, NVDError, parse_image_products
+from vulnscan.osv import OSVClient, OSVError
 from vulnscan.parsers import load_ignore_file, parse_project
 from vulnscan.registry import RegistryClient, RegistryError
 from vulnscan.remediate import plan_remediation
 from vulnscan.risk import RiskKind, VersionRisk, VersionScore, score_versions
 from vulnscan.versioncmp import compare_versions, sort_versions
-from vulnscan.wordfence import WordfenceClient
+from vulnscan.wordfence import WordfenceClient, WordfenceError
 
 WORDFENCE_CACHE_FILENAME = "wordfence-production.json"
+
+SOURCE_ERRORS = (OSVError, WordfenceError, NVDError)
+"""Raised by an advisory source that cannot answer; a scan carries on without it."""
 
 
 log = logging.getLogger("vulnscan.scanner")
@@ -159,28 +164,37 @@ def enrich_findings(
 
         candidates = _local_candidate_versions(finding, versions)
         scores_by_version: dict[str, VersionScore] = {}
-        if dep.ecosystem == WORDPRESS:
-            if wordpress_client is not None and candidates:
-                scores_by_version = _advisory_scores(finding, candidates, wordpress_client)
-        elif dep.ecosystem == CONTAINER:
-            if nvd_client is not None and candidates:
-                chosen = list(dict.fromkeys([candidates[0], candidates[-1]]))
-                scores_by_version = _advisory_scores(finding, chosen, nvd_client)
-        elif candidates:
-            from vulnscan.risk import score_for
+        try:
+            if dep.ecosystem == WORDPRESS:
+                if wordpress_client is not None and candidates:
+                    scores_by_version = _advisory_scores(finding, candidates, wordpress_client)
+            elif dep.ecosystem == CONTAINER:
+                if nvd_client is not None and candidates:
+                    chosen = list(dict.fromkeys([candidates[0], candidates[-1]]))
+                    scores_by_version = _advisory_scores(finding, chosen, nvd_client)
+            elif candidates:
+                from vulnscan.risk import score_for
 
-            stubs = [replace(dep, version=v) for v in candidates]
-            keyed = score_versions(
-                stubs,
-                osv=osv,
-                registry=registry,
-                fresh_hours=settings.fresh_hours,
+                stubs = [replace(dep, version=v) for v in candidates]
+                keyed = score_versions(
+                    stubs,
+                    osv=osv,
+                    registry=registry,
+                    fresh_hours=settings.fresh_hours,
+                )
+                for stub in stubs:
+                    version = stub.version or ""
+                    score = score_for(keyed, stub, version)
+                    if score is not None:
+                        scores_by_version[version] = score
+        except SOURCE_ERRORS as exc:
+            # Candidates are still ranked by the local range maths; only the advisory
+            # check of each candidate is missing.
+            log.warning("forward-check: %s: advisory source failed: %s", dep.name, exc)
+            local_warnings.append(
+                f"{dep.name}: upgrade candidates were not checked against advisories: {exc}"
             )
-            for stub in stubs:
-                version = stub.version or ""
-                score = score_for(keyed, stub, version)
-                if score is not None:
-                    scores_by_version[version] = score
+            scores_by_version = {}
 
         plan = plan_remediation(
             finding,
@@ -217,8 +231,8 @@ def scan(
     """Scan the configured project.
 
     PyPI, Packagist and npm packages go to OSV, WordPress packages to Wordfence and
-    container images to NVD. Raises OSVError, WordfenceError or NVDError if a source
-    fails.
+    container images to NVD. A source that fails does not abort the scan: its packages
+    go unchecked this run and the failure is recorded in ``ScanResult.source_errors``.
     """
     if client is None:
         client = OSVClient(base_url=settings.osv_base_url, timeout=settings.request_timeout)
@@ -266,10 +280,21 @@ def scan(
         len(wordpress_deps),
         len(image_deps),
     )
-    found = client.find_vulnerabilities(
-        other_deps, include_unknown_versions=settings.query_unknown_versions
-    )
-    log.info("scan: OSV reports advisories for %d packages", len(found))
+    source_errors: list[str] = []
+    found: dict[Dependency, list[Vulnerability]] = {}
+    try:
+        found = client.find_vulnerabilities(
+            other_deps, include_unknown_versions=settings.query_unknown_versions
+        )
+    except OSVError as exc:
+        log.warning("scan: OSV failed: %s", exc)
+        source_errors.append(
+            f"OSV unavailable: {exc}. "
+            f"{_plural(len(other_deps), 'package', 'packages')} (PyPI, npm, Packagist) "
+            "not checked"
+        )
+    else:
+        log.info("scan: OSV reports advisories for %d packages", len(found))
 
     if wordpress_deps:
         if wordpress_client is None and settings.wordfence_api_key:
@@ -289,11 +314,20 @@ def scan(
                 "Wordfence Intelligence API key (free at wordfence.com)"
             )
         else:
-            wordpress_found = wordpress_client.find_vulnerabilities(
-                wordpress_deps, include_unknown_versions=settings.query_unknown_versions
-            )
-            log.info("scan: Wordfence reports advisories for %d packages", len(wordpress_found))
-            found.update(wordpress_found)
+            try:
+                wordpress_found = wordpress_client.find_vulnerabilities(
+                    wordpress_deps, include_unknown_versions=settings.query_unknown_versions
+                )
+            except WordfenceError as exc:
+                log.warning("scan: Wordfence failed: %s", exc)
+                source_errors.append(
+                    f"Wordfence unavailable: {exc}. "
+                    f"{_plural(len(wordpress_deps), 'WordPress package', 'WordPress packages')} "
+                    "not checked"
+                )
+            else:
+                log.info("scan: Wordfence reports advisories for %d packages", len(wordpress_found))
+                found.update(wordpress_found)
             warnings.extend(getattr(wordpress_client, "warnings", []))
 
     if image_deps:
@@ -306,11 +340,19 @@ def scan(
                 ttl_hours=settings.nvd_ttl_hours,
                 image_products=parse_image_products(settings.image_products),
             )
-        image_found = nvd_client.find_vulnerabilities(
-            image_deps, include_unknown_versions=settings.query_unknown_versions
-        )
-        log.info("scan: NVD reports advisories for %d images", len(image_found))
-        found.update(image_found)
+        try:
+            image_found = nvd_client.find_vulnerabilities(
+                image_deps, include_unknown_versions=settings.query_unknown_versions
+            )
+        except NVDError as exc:
+            log.warning("scan: NVD failed: %s", exc)
+            source_errors.append(
+                f"NVD unavailable: {exc}. "
+                f"{_plural(len(image_deps), 'container image', 'container images')} not checked"
+            )
+        else:
+            log.info("scan: NVD reports advisories for %d images", len(image_found))
+            found.update(image_found)
         warnings.extend(getattr(nvd_client, "warnings", []))
 
     findings = [Finding(dep, vulns) for dep, vulns in found.items() if vulns]
@@ -330,7 +372,18 @@ def scan(
             webpack_merge=webpack_merge,
         )
     )
-    log.info("scan: finished with %d findings and %d warnings", len(findings), len(warnings))
+    if nvd_client is not None:
+        # The NVD client records its own per-image failures (including those from
+        # the forward-check) rather than raising; surface them once, at the end.
+        source_errors.extend(getattr(nvd_client, "error_lines", list)())
+    for line in source_errors:
+        log.warning("scan: %s", line)
+    log.info(
+        "scan: finished with %d findings, %d warnings and %d source errors",
+        len(findings),
+        len(warnings),
+        len(source_errors),
+    )
     return ScanResult(
         project_path=settings.project_path,
         dependencies=deps,
@@ -338,4 +391,5 @@ def scan(
         warnings=warnings,
         scanned_at=datetime.now(UTC),
         webpack_merge=webpack_merge,
+        source_errors=source_errors,
     )

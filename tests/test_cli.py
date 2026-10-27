@@ -774,3 +774,21 @@ def test_watch_mode_still_reports_progress_on_stderr_with_debug_on(
     assert code == 0
     assert "scanning" in capsys.readouterr().err
     assert "scanning" in log.read_text()
+
+
+def test_source_errors_are_printed_but_output_is_still_written(tmp_path: Path, monkeypatch, capsys):
+    def partial(settings):
+        result = fake_result(settings.project_path)
+        result.source_errors.append("NVD: HTTP 429; not checked: php 8.2.19")
+        return result
+
+    monkeypatch.setattr(cli, "scan", partial)
+    out = tmp_path / "out"
+    args = ["--update-feeds", "--markdown", "--path", str(tmp_path), "--feed-dir", str(out)]
+    code = cli.main(args)
+    assert code == 0
+    assert (tmp_path / "out" / "vulns.rss.xml").is_file()
+    assert (tmp_path / "out" / "vulns.md").is_file()
+    err = capsys.readouterr().err
+    assert "error: NVD: HTTP 429; not checked: php 8.2.19" in err
+    assert "warning: a warning" in err

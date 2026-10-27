@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
@@ -42,6 +43,8 @@ PUBLIC_INTERVAL_SECONDS = 6.0
 """Spacing between requests without an API key (5 requests per rolling 30 seconds)."""
 KEYED_INTERVAL_SECONDS = 0.6
 """Spacing between requests with an API key (50 requests per rolling 30 seconds)."""
+RATE_LIMIT_WINDOW_SECONDS = 30.0
+"""Length of NVD's rolling rate-limit window; a refused request waits this long and retries."""
 
 IMAGE_PRODUCTS: dict[str, str] = {
     # Languages and runtimes
@@ -344,6 +347,12 @@ class NVDClient:
 
     ``image_products`` extends :data:`IMAGE_PRODUCTS`. ``transport`` and ``sleep`` are
     for tests. Warnings about images that cannot be checked accumulate in ``warnings``.
+
+    A failed lookup never raises out of :meth:`find_vulnerabilities`: the first failure
+    is recorded in ``errors``, the client stops going to the network for the rest of
+    the run (cached answers are still served) and every image it could not check is
+    listed in ``unchecked``. :meth:`error_lines` summarises both for the user. Requests
+    are serialised with a lock so concurrent callers share one rate limit.
     """
 
     def __init__(
@@ -368,6 +377,17 @@ class NVDClient:
         self._sleep = sleep or time.sleep
         self._last_request: float | None = None
         self._memory: dict[tuple[str, str], list[dict]] = {}
+        self.errors: list[str] = []
+        self.unchecked: list[str] = []
+        self._unavailable: str | None = None
+        self._lock = threading.Lock()
+
+    def error_lines(self) -> list[str]:
+        """Prominent one-line summaries of why lookups failed and which images were skipped."""
+        if not self.errors:
+            return []
+        skipped = ", ".join(self.unchecked) or "none"
+        return [f"NVD unavailable: {self.errors[0]}. Container images not checked: {skipped}"]
 
     # -- cache ---------------------------------------------------------------------
 
@@ -409,6 +429,14 @@ class NVDClient:
                 self._sleep(interval - elapsed)
         self._last_request = time.monotonic()
 
+    def _request(self, params: dict[str, str], headers: dict[str, str]) -> httpx.Response:
+        self._throttle()
+        try:
+            with debuglog.Client(timeout=self.timeout, transport=self._transport) as http:
+                return http.get(self.base_url, params=params, headers=headers)
+        except httpx.HTTPError as exc:
+            raise NVDError(f"NVD request failed: {exc}") from exc
+
     def _get_page(self, match: str, start: int) -> dict:
         headers = {"User-Agent": f"vulnscan/{__version__}", "Accept": "application/json"}
         if self.api_key:
@@ -418,12 +446,18 @@ class NVDClient:
             "resultsPerPage": str(PAGE_SIZE),
             "startIndex": str(start),
         }
-        self._throttle()
-        try:
-            with debuglog.Client(timeout=self.timeout, transport=self._transport) as http:
-                response = http.get(self.base_url, params=params, headers=headers)
-        except httpx.HTTPError as exc:
-            raise NVDError(f"NVD request failed: {exc}") from exc
+        response = self._request(params, headers)
+        if response.status_code in (403, 429):
+            # NVD answers 403 or 429 when the rolling window is exhausted; one full
+            # window later the limit has reset, so wait it out and try once more.
+            log.warning(
+                "NVD refused the request (HTTP %d); waiting %.0f s for the rate-limit "
+                "window to reset before retrying once",
+                response.status_code,
+                RATE_LIMIT_WINDOW_SECONDS,
+            )
+            self._sleep(RATE_LIMIT_WINDOW_SECONDS)
+            response = self._request(params, headers)
         if response.status_code in (403, 429):
             raise NVDError(
                 f"NVD refused the request (HTTP {response.status_code}): the public rate "
@@ -441,6 +475,8 @@ class NVDClient:
         return data
 
     def _download(self, product: str, version: str) -> list[dict]:
+        if self._unavailable is not None:
+            raise NVDError(self._unavailable)
         vendor, name = product.split(":", 1)
         match = f"cpe:2.3:a:{vendor}:{name}:{version}"
         records: list[dict] = []
@@ -460,7 +496,15 @@ class NVDClient:
         return records
 
     def _records_for(self, product: str, version: str) -> list[dict]:
-        """Cached records for one ``(product, version)``, from memory, disk or NVD."""
+        """Cached records for one ``(product, version)``, from memory, disk or NVD.
+
+        Serialised across threads so that concurrent forward-checks queue behind one
+        rate limit rather than each racing to the network.
+        """
+        with self._lock:
+            return self._records_for_locked(product, version)
+
+    def _records_for_locked(self, product: str, version: str) -> list[dict]:
         key = (product, version)
         if key in self._memory:
             log.debug("NVD: %s %s served from memory", product, version)
@@ -502,6 +546,17 @@ class NVDClient:
 
     # -- matching ------------------------------------------------------------------
 
+    def _record_failure(self, dep: Dependency, exc: NVDError) -> None:
+        label = f"{dep.name} {dep.version}"
+        if self._unavailable is None:
+            self._unavailable = str(exc)
+            self.errors.append(str(exc))
+            log.warning("NVD: %s; remaining uncached lookups this run are skipped", exc)
+        else:
+            log.info("NVD: %s not checked (NVD unavailable)", label)
+        if label not in self.unchecked:
+            self.unchecked.append(label)
+
     def _warn_unmapped(self, dep: Dependency) -> None:
         self.warnings.append(
             f"{dep.name} ({dep.source_file}): no advisory source is known for this image; map "
@@ -516,7 +571,9 @@ class NVDClient:
         Images without a version cannot be matched and are skipped whatever
         ``include_unknown_versions`` says; images with no known product produce a
         warning. NVD's own matching is filtered again against the parsed ranges, so a
-        version at or above a ``versionEndExcluding`` bound is never reported.
+        version at or above a ``versionEndExcluding`` bound is never reported. An image
+        whose lookup fails is left out of the result and recorded (see
+        :meth:`error_lines`) rather than raising.
         """
         found: dict[Dependency, list[Vulnerability]] = {}
         warned: set[str] = set()
@@ -530,8 +587,13 @@ class NVDClient:
                     warned.add(canonical)
                     self._warn_unmapped(dep)
                 continue
+            try:
+                records = self._records_for(product, query_version(dep.version))
+            except NVDError as exc:
+                self._record_failure(dep, exc)
+                continue
             vulns: list[Vulnerability] = []
-            for record in self._records_for(product, query_version(dep.version)):
+            for record in records:
                 if str(record.get("vulnStatus", "")).lower() == "rejected":
                     continue
                 vuln = parse_nvd_record(record, product)

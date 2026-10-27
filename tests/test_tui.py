@@ -128,6 +128,22 @@ async def test_status_shows_counts_and_warnings(tmp_path: Path):
         assert "1 warning" in status
 
 
+async def test_status_leads_with_source_errors(tmp_path: Path):
+    def partial(s):
+        result = sample_result(s.project_path)
+        result.source_errors.append("NVD: HTTP 429; not checked: php 8.2.19")
+        return result
+
+    settings = settings_for(tmp_path)
+    app = VulnScanApp(settings, scan_fn=partial)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        status = app.status_text
+        assert "NVD: HTTP 429; not checked: php 8.2.19" in status
+        assert status.index("NVD") < status.index("warning")
+        assert app.query_one("#deps", DataTable).row_count == 2
+
+
 async def test_status_spins_while_scan_is_in_progress(tmp_path: Path):
     import threading
 

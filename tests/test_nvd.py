@@ -12,7 +12,6 @@ from vulnscan.nvd import (
     IMAGE_PRODUCTS,
     OS_IMAGES,
     NVDClient,
-    NVDError,
     parse_image_products,
     parse_nvd_record,
     product_for_image,
@@ -496,7 +495,7 @@ def test_results_are_cached_on_disk_until_the_ttl_expires(tmp_path: Path):
     assert len(handler.requests) == 2
 
 
-def test_errors_raise_without_cache_and_fall_back_to_stale_cache(tmp_path: Path):
+def test_errors_are_recorded_without_cache_and_fall_back_to_stale_cache(tmp_path: Path):
     good = Recorder({"cpe:2.3:a:php:php:8.2.19": [RECORD]})
     php = image("php", "8.2.19")
     make_client(good, tmp_path).find_vulnerabilities([php])
@@ -509,31 +508,27 @@ def test_errors_raise_without_cache_and_fall_back_to_stale_cache(tmp_path: Path)
     found = client.find_vulnerabilities([php])
     assert [v.id for v in found[php]] == ["CVE-2024-4577"]
     assert any("stale" in w.lower() for w in client.warnings)
+    assert client.error_lines() == []
 
-    with pytest.raises(NVDError):
-        make_client(broken, tmp_path / "empty").find_vulnerabilities([php])
+    fresh = make_client(broken, tmp_path / "empty")
+    assert fresh.find_vulnerabilities([php]) == {}
+    assert any("503" in line and "php 8.2.19" in line for line in fresh.error_lines())
 
 
 def test_rate_limit_and_forbidden_responses_explain_the_api_key(tmp_path: Path):
     for status in (403, 429):
         client = make_client(Recorder(status=status), tmp_path / str(status))
-        with pytest.raises(NVDError) as info:
-            client.find_vulnerabilities([image("php", "8.2.19")])
-        assert "VULNSCAN_NVD_API_KEY" in str(info.value)
+        assert client.find_vulnerabilities([image("php", "8.2.19")]) == {}
+        assert any("VULNSCAN_NVD_API_KEY" in line for line in client.error_lines())
 
 
-def test_network_failure_and_bad_json_raise(tmp_path: Path):
-    def boom(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("down", request=request)
-
-    with pytest.raises(NVDError):
-        make_client(boom, tmp_path / "a").find_vulnerabilities([image("php", "8.2.19")])
-
+def test_bad_json_is_recorded_as_an_error(tmp_path: Path):
     def garbage(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="<html>")
 
-    with pytest.raises(NVDError):
-        make_client(garbage, tmp_path / "b").find_vulnerabilities([image("php", "8.2.19")])
+    client = make_client(garbage, tmp_path / "b")
+    assert client.find_vulnerabilities([image("php", "8.2.19")]) == {}
+    assert any("JSON" in line for line in client.error_lines())
 
 
 def test_cache_file_is_valid_json_and_does_not_hold_the_api_key(tmp_path: Path):
@@ -543,3 +538,92 @@ def test_cache_file_is_valid_json_and_does_not_hold_the_api_key(tmp_path: Path):
         text = path.read_text()
         json.loads(text)
         assert "secret" not in text
+
+
+# --- carrying on after failures ----------------------------------------------------------
+
+
+def test_rate_limited_request_waits_a_full_window_and_retries_once(tmp_path: Path):
+    statuses = iter([429])
+    good = Recorder({"cpe:2.3:a:php:php:8.2.19": [RECORD]})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        status = next(statuses, 200)
+        if status != 200:
+            good.requests.append(request)
+            return httpx.Response(status, text="slow down")
+        return good(request)
+
+    slept: list[float] = []
+    client = make_client(handler, tmp_path, sleep=slept.append)
+    php = image("php", "8.2.19")
+    found = client.find_vulnerabilities([php])
+    assert [v.id for v in found[php]] == ["CVE-2024-4577"]
+    assert len(good.requests) == 2
+    assert max(slept) >= 30.0
+    assert client.error_lines() == []
+
+
+def test_persistent_failure_is_reported_and_later_images_are_skipped(tmp_path: Path):
+    good = Recorder({"cpe:2.3:a:traefik:traefik:2.10.7": [RECORD]})
+    traefik = image("traefik", "2.10.7")
+    make_client(good, tmp_path).find_vulnerabilities([traefik])
+
+    broken = Recorder(status=429)
+    client = make_client(broken, tmp_path, sleep=lambda seconds: None)
+    php = image("php", "8.2.19")
+    nginx = image("nginx", "1.25.0")
+    found = client.find_vulnerabilities([php, nginx, traefik])
+
+    assert [v.id for v in found[traefik]] == ["CVE-2024-4577"]  # fresh cache still answers
+    assert php not in found and nginx not in found
+    assert len(broken.requests) <= 2  # one attempt plus one retry, then no more network
+    lines = client.error_lines()
+    assert lines
+    joined = " ".join(lines)
+    assert "429" in joined
+    assert "php 8.2.19" in joined and "nginx 1.25.0" in joined
+    assert "traefik" not in joined
+
+
+def test_connection_failure_does_not_raise(tmp_path: Path):
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("down", request=request)
+
+    client = make_client(boom, tmp_path)
+    assert client.find_vulnerabilities([image("php", "8.2.19")]) == {}
+    assert any("down" in line for line in client.error_lines())
+
+
+def test_requests_never_overlap_across_threads(tmp_path: Path):
+    import threading
+
+    lock = threading.Lock()
+    in_flight = 0
+    peak = 0
+    pages = {f"cpe:2.3:a:php:php:8.2.{n}": [] for n in range(8)}
+    inner = Recorder(pages)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        time.sleep(0.02)
+        try:
+            return inner(request)
+        finally:
+            with lock:
+                in_flight -= 1
+
+    client = make_client(handler, tmp_path)
+    threads = [
+        threading.Thread(target=client.find_vulnerabilities, args=([image("php", f"8.2.{n}")],))
+        for n in range(8)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(inner.requests) == 8
+    assert peak == 1

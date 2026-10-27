@@ -841,7 +841,12 @@ class VulnScanApp(App[None]):
             summary += f" First: {first}"
             if len(result.warnings) > 1:
                 summary += f" (+{len(result.warnings) - 1} more in the exported report)"
-        self._set_status(summary.replace("dependencys", "dependencies"))
+        summary = summary.replace("dependencys", "dependencies")
+        if result.source_errors:
+            summary = f"INCOMPLETE: {'; '.join(result.source_errors)}. {summary}"
+            for line in result.source_errors:
+                self.notify(line, title="Advisory source unavailable", severity="error", timeout=15)
+        self._set_status(summary)
         if self._rows:
             self._show_finding(0)
 

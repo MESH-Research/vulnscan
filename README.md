@@ -486,10 +486,19 @@ reference is dropped. Candidate versions are the tags on the image's registry
 share the same variant suffix.
 
 NVD allows 5 requests per 30 seconds without a key, so vulnscan spaces its
-requests, caches each answer for `VULNSCAN_NVD_TTL_HOURS` and falls back to a
-stale cache with a warning if a refresh fails. A free key from
+requests 6 seconds apart (across every thread that consults NVD), caches each
+answer for `VULNSCAN_NVD_TTL_HOURS` and falls back to a stale cache with a
+warning if a refresh fails. A refused request (HTTP 403 or 429) waits out one
+full 30-second window and is retried once. A free key from
 [nvd.nist.gov/developers/request-an-api-key](https://nvd.nist.gov/developers/request-an-api-key)
 in `VULNSCAN_NVD_API_KEY` allows 50 requests per 30 seconds.
+
+A source that stays unavailable (NVD, OSV or Wordfence) does not abort the
+scan. The packages it serves go unchecked for that run, the rest of the scan
+completes, and the failure is shown prominently: an `INCOMPLETE:` status line
+and a notification in the TUI, `error:` lines on stderr in non-interactive
+mode, an **Errors** section at the top of the Markdown and text reports, and a
+warning in the debug log.
 
 ## How versions are determined
 
