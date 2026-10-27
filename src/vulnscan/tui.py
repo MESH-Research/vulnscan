@@ -6,6 +6,7 @@ import threading
 import time
 import webbrowser
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -185,6 +186,83 @@ def _nearest_safe_label(finding: Finding) -> str:
 
 def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _resolve_from_line(pkg) -> str:
+    """Detail-pane line naming the mock-lock manifest and its directory."""
+    site = getattr(pkg, "resolve_from", "") or ""
+    if not site:
+        return "- **Mock-locked from:** —"
+    if site.startswith("invenio-assets"):
+        return f"- **Mock-locked from:** `{site}` (project root; virtual webpack merge tree)"
+    # Manifest at project root (no slash): build root is `.`
+    parent = str(Path(site).parent).replace("\\", "/")
+    if parent in {".", ""}:
+        return f"- **Mock-locked from:** `{site}` (build root `.`)"
+    return f"- **Mock-locked from:** `{site}` (build root `{parent}`)"
+
+
+def preflight_package_markdown(pkg) -> str:
+    """Markdown shown in the detail pane for one preflight package.
+
+    Risks are scored against the **would-be** version from the mock lock, not the
+    project's current pin.
+    """
+    from vulnscan.preflight import PreflightPackage
+
+    if not isinstance(pkg, PreflightPackage):
+        raise TypeError(f"expected PreflightPackage, got {type(pkg)!r}")
+
+    dep = pkg.dependency
+    would = pkg.would_be
+    current = pkg.current
+    lines = [
+        f"# {dep.name}",
+        "",
+        f"- **Package:** {dep.name} ({dep.ecosystem})",
+        f"- **Build process:** {pkg.build_process or '—'}",
+        _resolve_from_line(pkg),
+        f"- **Current (project):** {current or 'not in project lock'}",
+        f"- **Would-be (mock lock):** `{would}`",
+        f"- **Would bump:** {'yes' if pkg.would_bump else 'no'}",
+    ]
+    if dep.constraint:
+        lines.append(f"- **Constraint:** `{dep.constraint}`")
+    declared = dep.declared_in_text
+    if declared and not declared.startswith("(mock lock)"):
+        lines.append(
+            f"- **Declared in (current tree):** {declared}"
+            + (f" (current version from {dep.version_source})" if current else "")
+        )
+    elif current and dep.version_source:
+        lines.append(f"- **Current version from:** {dep.version_source}")
+    upstream = getattr(pkg, "upstream_constraints_text", None)
+    if upstream is not None:
+        lines.append(f"- **Upstream constraints:** {upstream}")
+
+    lines += ["", f"## Risks for would-be version `{would}`", ""]
+    risks = pkg.score.risks if pkg.score else ()
+    if not risks:
+        lines.append(f"_No advisory/malware/fresh/yank risks for would-be `{would}`._")
+    else:
+        for r in risks:
+            bits = [f"**{r.kind}**"]
+            if r.severity:
+                bits.append(f"({r.severity})")
+            if r.advisory_id:
+                bits.append(f"`{r.advisory_id}`")
+            head = " ".join(bits)
+            detail = r.detail or ""
+            lines.append(f"- {head}: {detail}" if detail else f"- {head}")
+            meta: list[str] = []
+            if r.published_at is not None:
+                meta.append(f"published {r.published_at:%Y-%m-%d}")
+            if r.url:
+                meta.append(f"<{r.url}>")
+            if meta:
+                lines.append(f"  - {' · '.join(meta)}")
+
+    return "\n".join(lines)
 
 
 def vulnerability_markdown(finding: Finding, vuln: Vulnerability) -> str:
@@ -479,8 +557,10 @@ class VulnScanApp(App[None]):
 
     Scans run in a worker thread so the interface stays responsive. Keys: ``r`` rescan,
     ``f`` write feeds, ``e`` export reports, ``u`` upgrade the selected dependency,
-    ``o`` open the selected advisory in a browser, ``q`` quit. ``scan_fn`` and
-    ``versions_fn`` replace the real scanner and registry lookups in tests.
+    ``o`` open the selected advisory in a browser, ``p`` run preflight against the
+    current manifests (including upgrades applied this session), ``n`` return to the
+    last normal/outdated scan result, ``q`` quit. ``scan_fn`` and ``versions_fn``
+    replace the real scanner and registry lookups in tests.
 
     With ``outdated`` the dependency table lists every dependency that has a newer
     stable release, whether or not an advisory affects it, and ``u`` offers the newest
@@ -506,6 +586,8 @@ class VulnScanApp(App[None]):
         Binding("e", "export_reports", "Export md/txt"),
         Binding("u", "remediate", "Upgrade dep"),
         Binding("o", "open_advisory", "Open advisory"),
+        Binding("p", "preflight", "Preflight"),
+        Binding("n", "normal_scan", "Last scan"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -522,6 +604,7 @@ class VulnScanApp(App[None]):
         self.outdated = outdated
         self.preflight = preflight
         self._preflight_report = None
+        self._last_outdated: list[OutdatedPackage] | None = None
         self._scan_fn: ScanFn = scan_fn or scan
         self._versions_fn: VersionsFn | None = versions_fn
         self.result: ScanResult | None = None
@@ -560,10 +643,7 @@ class VulnScanApp(App[None]):
     def compose(self) -> ComposeResult:
         """Lay out the dependency table, advisory table, detail pane and status bar."""
         yield Header()
-        if self.preflight:
-            yield Static(PREFLIGHT_BANNER, id="mode-banner")
-        elif self.outdated:
-            yield Static(OUTDATED_BANNER, id="mode-banner")
+        yield Static(self._banner_text(), id="mode-banner")
         with Horizontal():
             yield DataTable(id="deps", cursor_type="row", zebra_stripes=True)
             with Vertical(id="right"):
@@ -577,18 +657,47 @@ class VulnScanApp(App[None]):
     def on_mount(self) -> None:
         """Add the table columns and start the first scan."""
         self.sub_title = str(self.settings.project_path)
-        columns = DEP_COLUMNS
-        if self.preflight:
-            columns = PREFLIGHT_COLUMNS
-        elif self.outdated:
+        if self.outdated and not self.preflight:
             self.sub_title += f"  |  {OUTDATED_SUBTITLE}"
-            columns = OUTDATED_COLUMNS
-        self._dep_column_keys = self.query_one("#deps", DataTable).add_columns(*columns)
+        self._dep_column_keys = self.query_one("#deps", DataTable).add_columns(*self._dep_columns())
         self.query_one("#vulns", DataTable).add_columns(*VULN_COLUMNS)
+        self._sync_mode_banner()
         self.query_one("#activity", Static).display = False
         activity.subscribe(self._on_transfer)
         self._activity_timer = self.set_interval(0.2, self._refresh_activity)
         self._start_scan()
+
+    def _banner_text(self) -> str:
+        if self.preflight:
+            return PREFLIGHT_BANNER
+        if self.outdated:
+            return OUTDATED_BANNER
+        return ""
+
+    def _dep_columns(self) -> tuple[str, ...]:
+        if self.preflight:
+            return PREFLIGHT_COLUMNS
+        if self.outdated:
+            return OUTDATED_COLUMNS
+        return DEP_COLUMNS
+
+    def _sync_mode_banner(self) -> None:
+        """Show or hide the mode banner for the current scan / preflight / outdated mode."""
+        banner = self.query_one("#mode-banner", Static)
+        text = self._banner_text()
+        if text:
+            banner.update(text)
+            banner.display = True
+        else:
+            banner.update("")
+            banner.display = False
+
+    def _rebuild_dep_columns(self) -> None:
+        """Clear and re-add dependency table columns for the current mode."""
+        deps = self.query_one("#deps", DataTable)
+        deps.clear(columns=True)
+        self._dep_column_keys = deps.add_columns(*self._dep_columns())
+        self._dep_row_keys = []
 
     # -- HTTP activity panel -------------------------------------------------------
 
@@ -723,10 +832,12 @@ class VulnScanApp(App[None]):
         return [by_key.get(o.dependency.key) or Finding(o.dependency, []) for o in outdated]
 
     def _apply_preflight(self, report) -> None:
-        """Populate the tables from a preflight report."""
+        """Populate the tables from a preflight report.
+
+        Keeps ``self.result`` / ``_last_outdated`` so ``n`` can restore the last scan.
+        """
         self._stop_busy()
         self._preflight_report = report
-        self.result = None
         self._rows = []
         deps = self.query_one("#deps", DataTable)
         deps.clear()
@@ -744,7 +855,7 @@ class VulnScanApp(App[None]):
                 pkg.current or "-",
                 pkg.would_be,
                 kinds,
-                ", ".join(pkg.dependency.source_files),
+                pkg.resolve_from or ", ".join(pkg.dependency.source_files) or "-",
             )
             self._dep_row_keys.append(key)
             self._rows.append(Finding(pkg.dependency, []))
@@ -789,36 +900,13 @@ class VulnScanApp(App[None]):
             self._show_preflight_overview()
             return
         pkg = report.packages[index]
-        lines = [
-            f"# {pkg.dependency.name}",
-            "",
-            f"- **Ecosystem:** {pkg.dependency.ecosystem}",
-            f"- **Process:** {pkg.build_process or '—'}",
-            f"- **Current:** {pkg.current or 'not in project lock'}",
-            f"- **Would be:** {pkg.would_be}",
-            f"- **Would bump:** {'yes' if pkg.would_bump else 'no'}",
-            "",
-            "## Risks",
-            "",
-        ]
-        if pkg.score and pkg.score.risks:
-            for r in pkg.score.risks:
-                extra = f" (`{r.advisory_id}`)" if r.advisory_id else ""
-                lines.append(f"- **{r.kind}:** {r.detail}{extra}")
-        else:
-            lines.append("_No advisory/malware/fresh/yank risks for this version._")
-        if report.warnings:
-            lines.extend(["", "## Warnings", ""])
-            for w in report.warnings[:20]:
-                lines.append(f"- {w}")
-            if len(report.warnings) > 20:
-                lines.append(f"- …and {len(report.warnings) - 20} more")
-        self.query_one("#detail", Markdown).update(chr(10).join(lines))
+        self.query_one("#detail", Markdown).update(preflight_package_markdown(pkg))
 
     def _apply_result(
         self, result: ScanResult, outdated: list[OutdatedPackage] | None = None
     ) -> None:
         self.result = result
+        self._last_outdated = outdated
         self._clear_tables()
         if outdated is not None:
             self._rows = self._outdated_rows(result, outdated)
@@ -958,6 +1046,40 @@ class VulnScanApp(App[None]):
     def action_rescan(self) -> None:
         """Scan the project again (``r``)."""
         self._start_scan()
+
+    def action_preflight(self) -> None:
+        """Switch to preflight and resolve against the current on-disk pins (``p``).
+
+        Works from normal or outdated mode. Remediations already rewrite manifests, so
+        this floats against whatever is on disk after upgrades this session. Pressing
+        ``p`` again while already in preflight re-runs the resolve.
+        """
+        if not self.preflight:
+            self.preflight = True
+            self._rebuild_dep_columns()
+            self._sync_mode_banner()
+            # Drop the outdated subtitle while preflight is active.
+            self.sub_title = str(self.settings.project_path)
+        self._start_scan()
+
+    def action_normal_scan(self) -> None:
+        """Return to the last normal or outdated scan result (``n``)."""
+        if not self.preflight:
+            self.notify("Already showing the last scan result.", severity="information")
+            return
+        if self.result is None:
+            self.notify(
+                "No prior scan to restore; press r to scan, or start without --preflight.",
+                severity="warning",
+            )
+            return
+        self.preflight = False
+        self._rebuild_dep_columns()
+        self._sync_mode_banner()
+        self.sub_title = str(self.settings.project_path)
+        if self.outdated:
+            self.sub_title += f"  |  {OUTDATED_SUBTITLE}"
+        self._apply_result(self.result, self._last_outdated)
 
     def action_write_feeds(self) -> None:
         """Write the RSS and Atom feeds for the last result (``f``); warns if no scan completed."""

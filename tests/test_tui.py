@@ -641,14 +641,14 @@ async def test_outdated_mode_clearly_marks_updates_as_non_security(tmp_path: Pat
 
 
 async def test_normal_mode_has_no_outdated_banner(tmp_path: Path):
-    from textual.css.query import NoMatches
     from textual.widgets import Static
 
     app = VulnScanApp(settings_for(tmp_path), scan_fn=lambda s: sample_result(s.project_path))
     async with app.run_test() as pilot:
         await settle(app, pilot)
-        with pytest.raises(NoMatches):
-            app.query_one("#mode-banner", Static)
+        banner = app.query_one("#mode-banner", Static)
+        assert banner.display is False
+        assert not str(banner.content).strip()
         assert "not security" not in app.sub_title.lower()
 
 
@@ -1126,3 +1126,160 @@ async def test_activity_refresh_tolerates_a_torn_down_panel(tmp_path: Path):
         await app.query_one("#activity", Static).remove()
         await pilot.pause()
         app._refresh_activity()  # must not raise NoMatches
+
+
+async def test_preflight_key_switches_from_scan_and_n_restores(tmp_path: Path, monkeypatch):
+    """``p`` flips into preflight; ``n`` restores the cached scan without re-scanning."""
+    from vulnscan.models import NPM
+    from vulnscan.preflight import PreflightPackage, PreflightReport
+    from vulnscan.tui import PREFLIGHT_COLUMNS
+
+    settings = settings_for(tmp_path)
+    scans = {"count": 0}
+
+    def scan_fn(s):
+        scans["count"] += 1
+        return sample_result(s.project_path)
+
+    def fake_preflight(settings, **kwargs):
+        dep = Dependency("left-pad", NPM, "^1.0", "1.3.0", "preflight", "package.json")
+        return PreflightReport(
+            project_path=settings.project_path,
+            resolve_ok=True,
+            packages=[
+                PreflightPackage(
+                    dependency=dep,
+                    current="1.0.0",
+                    would_be="1.3.0",
+                    would_bump=True,
+                    build_process="npm",
+                )
+            ],
+            ecosystems=("npm",),
+        )
+
+    monkeypatch.setattr("vulnscan.preflight.run_preflight", fake_preflight)
+    app = VulnScanApp(settings, scan_fn=scan_fn)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert scans["count"] == 1
+        assert app.preflight is False
+        assert app.query_one("#deps", DataTable).row_count == 2
+
+        await pilot.press("p")
+        await settle(app, pilot)
+        assert app.preflight is True
+        assert app.result is not None  # prior scan kept for n
+        deps = app.query_one("#deps", DataTable)
+        assert [c.label.plain for c in deps.ordered_columns] == list(PREFLIGHT_COLUMNS)
+        assert deps.row_count == 1
+        assert "Preflight" in app.status_text
+
+        await pilot.press("n")
+        await settle(app, pilot)
+        assert app.preflight is False
+        assert scans["count"] == 1  # no re-scan
+        assert app.query_one("#deps", DataTable).row_count == 2
+
+
+async def test_preflight_key_from_outdated_mode(tmp_path: Path, monkeypatch):
+    from vulnscan.models import NPM
+    from vulnscan.preflight import PreflightPackage, PreflightReport
+
+    settings = settings_for(tmp_path)
+    result = sample_result(settings.project_path)
+
+    def fake_preflight(settings, **kwargs):
+        dep = Dependency("left-pad", NPM, "^1", "1.3.0", "preflight", "package.json")
+        return PreflightReport(
+            project_path=settings.project_path,
+            resolve_ok=True,
+            packages=[
+                PreflightPackage(
+                    dependency=dep,
+                    current=None,
+                    would_be="1.3.0",
+                    would_bump=True,
+                    build_process="npm",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("vulnscan.preflight.run_preflight", fake_preflight)
+
+    def versions_fn(dep):
+        if dep.name == "flask":
+            return ["3.0.0", "3.0.1", "4.0.0"]
+        return [dep.version] if dep.version else []
+
+    app = VulnScanApp(
+        settings,
+        scan_fn=lambda s: result,
+        versions_fn=versions_fn,
+        outdated=True,
+    )
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.outdated is True
+        assert app.preflight is False
+        await pilot.press("p")
+        await settle(app, pilot)
+        assert app.preflight is True
+        assert app.outdated is True
+        await pilot.press("n")
+        await settle(app, pilot)
+        assert app.preflight is False
+        assert app.outdated is True
+
+
+def test_preflight_package_markdown_ties_risks_to_would_be_version():
+    from datetime import UTC, datetime
+
+    from vulnscan.models import NPM, Dependency
+    from vulnscan.preflight import PreflightPackage
+    from vulnscan.risk import RiskKind, VersionRisk, VersionScore
+    from vulnscan.tui import preflight_package_markdown
+
+    dep = Dependency("left-pad", NPM, "^1.0", "1.0.0", "lock", "package.json")
+    score = VersionScore(
+        version="1.3.0",
+        risks=(
+            VersionRisk(
+                kind=RiskKind.ADVISORY,
+                detail="Prototype pollution",
+                advisory_id="GHSA-xxxx",
+                url="https://osv.dev/GHSA-xxxx",
+                severity="HIGH",
+                published_at=datetime(2024, 1, 15, tzinfo=UTC),
+            ),
+            VersionRisk(
+                kind=RiskKind.FRESH,
+                detail="left-pad 1.3.0 was published 2h ago (within 24h)",
+                published_at=datetime(2024, 6, 1, tzinfo=UTC),
+            ),
+        ),
+    )
+    pkg = PreflightPackage(
+        dependency=dep,
+        current="1.0.0",
+        would_be="1.3.0",
+        would_bump=True,
+        build_process="npm",
+        resolve_from="frontend/package.json",
+        upstream_constraints_text="site/app/webpack.py as ^1.0.0; pkg/webpack.py as ^1.2.0",
+        score=score,
+    )
+    md = preflight_package_markdown(pkg)
+    assert "## Risks for would-be version `1.3.0`" in md
+    assert "**Would-be (mock lock):** `1.3.0`" in md
+    assert "**Current (project):** 1.0.0" in md
+    assert "**Build process:** npm" in md
+    assert "**Mock-locked from:** `frontend/package.json` (build root `frontend`)" in md
+    assert "Declared in (current tree)" in md
+    assert "package.json as ^1.0" in md or "package.json as `^1.0`" in md or "as ^1.0" in md
+    assert "**Upstream constraints:** site/app/webpack.py as ^1.0.0; pkg/webpack.py as ^1.2.0" in md
+    assert "**advisory** (HIGH) `GHSA-xxxx`" in md
+    assert "Prototype pollution" in md
+    assert "https://osv.dev/GHSA-xxxx" in md
+    assert "**fresh**" in md
+    assert "this version" not in md.lower() or "would-be" in md.lower()
