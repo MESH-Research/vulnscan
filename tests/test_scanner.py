@@ -2,8 +2,6 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest
-
 from vulnscan.config import Settings
 from vulnscan.models import CONTAINER, NPM, PYPI, Dependency, Vulnerability
 from vulnscan.osv import OSVError
@@ -160,14 +158,17 @@ def test_scan_warns_when_no_manifests(tmp_path: Path):
     assert result.warnings
 
 
-def test_scan_propagates_osv_errors(tmp_path: Path):
+def test_scan_carries_on_when_osv_fails(tmp_path: Path):
     write_project(tmp_path)
-    with pytest.raises(OSVError):
-        scan(
-            settings_for(tmp_path),
-            client=FakeClient({}, error=OSVError("down")),
-            registry=EmptyRegistry(),
-        )
+    result = scan(
+        settings_for(tmp_path),
+        client=FakeClient({}, error=OSVError("OSV returned HTTP 503 for /v1/querybatch")),
+        registry=EmptyRegistry(),
+    )
+    assert result.findings == []
+    assert len(result.dependencies) == 4
+    assert any("OSV returned HTTP 503" in line for line in result.source_errors)
+    assert any("not checked" in line for line in result.source_errors)
 
 
 def test_scan_with_no_vulnerabilities(tmp_path: Path):
@@ -471,19 +472,70 @@ def test_scan_does_not_build_nvd_client_without_images(tmp_path: Path, monkeypat
     scan(settings_for(tmp_path), client=FakeClient({}), registry=EmptyRegistry())
 
 
-def test_scan_propagates_nvd_errors(tmp_path: Path):
+def test_scan_carries_on_when_nvd_fails(tmp_path: Path):
     from vulnscan.nvd import NVDError
 
     write_container_project(tmp_path)
     nvd = FakeNVDClient({})
     nvd.error = NVDError("NVD down")
-    with pytest.raises(NVDError):
-        scan(
-            settings_for(tmp_path),
-            client=FakeClient({}),
-            nvd_client=nvd,
-            registry=EmptyRegistry(),
-        )
+    result = scan(
+        settings_for(tmp_path),
+        client=FakeClient({("requests", "2.30.0"): [vuln("GHSA-R", "LOW")]}),
+        nvd_client=nvd,
+        registry=EmptyRegistry(),
+    )
+    assert [f.dependency.name for f in result.findings] == ["requests"]
+    assert any("NVD down" in line for line in result.source_errors)
+
+
+def test_scan_reports_the_nvd_clients_own_error_lines(tmp_path: Path):
+    write_container_project(tmp_path)
+    nvd = FakeNVDClient({("php", "8.2.19"): [vuln("CVE-2024-4577", "CRITICAL")]})
+    nvd.error_lines = lambda: ["NVD: HTTP 429; not checked: traefik 2.10.7"]
+    result = scan(
+        settings_for(tmp_path), client=FakeClient({}), nvd_client=nvd, registry=EmptyRegistry()
+    )
+    assert [f.dependency.name for f in result.findings] == ["php"]
+    assert result.source_errors == ["NVD: HTTP 429; not checked: traefik 2.10.7"]
+
+
+def test_scan_carries_on_when_wordfence_fails(tmp_path: Path):
+    from vulnscan.wordfence import WordfenceError
+
+    write_wordpress_project(tmp_path)
+    wp = FakeWordpressClient({})
+    wp.error = WordfenceError("Wordfence rate limit hit (HTTP 429)")
+    result = scan(
+        settings_for(tmp_path, wordfence_api_key="k"),
+        client=FakeClient({("monolog/monolog", "1.0.0"): [vuln("GHSA-M", "LOW")]}),
+        wordpress_client=wp,
+        registry=EmptyRegistry(),
+    )
+    assert [f.dependency.name for f in result.findings] == ["monolog/monolog"]
+    assert any("Wordfence rate limit hit" in line for line in result.source_errors)
+    assert any("WordPress" in line for line in result.source_errors)
+
+
+def test_forward_check_source_failure_is_a_warning_not_an_abort(tmp_path: Path):
+    from vulnscan.nvd import NVDError
+
+    class FlakyNVD(FakeNVDClient):
+        def find_vulnerabilities(self, deps, include_unknown_versions=False):
+            if self.seen:  # the first call (the scan itself) succeeds, forward-checks fail
+                raise NVDError("NVD down")
+            return super().find_vulnerabilities(deps, include_unknown_versions)
+
+    write_container_project(tmp_path)
+    nvd = FlakyNVD({("php", "8.2.19"): [vuln("CVE-2024-4577", "CRITICAL")]})
+    result = scan(
+        settings_for(tmp_path),
+        client=FakeClient({}),
+        nvd_client=nvd,
+        registry=ListingRegistry({"php": ["8.2.19", "8.2.20", "8.3.0"]}),
+    )
+    assert [f.dependency.name for f in result.findings] == ["php"]
+    assert result.findings[0].upgrade_plan is not None
+    assert any("NVD down" in w for w in result.warnings + result.source_errors)
 
 
 class ListingRegistry:

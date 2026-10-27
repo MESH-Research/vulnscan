@@ -9,6 +9,13 @@
   ``PNPMPackage`` (else ``packageManager: pnpm@…``, else npm); restore a missing root
   ``package.json`` ``packageManager`` field (and align ``engines``) when the cfg requires pnpm
 
+## 1.11.2 (2026-10-27)
+
+### Fix
+
+- **sources**: carry on when an advisory source fails and share the NVD rate limit
+
+
 ## 1.11.1 (2026-10-23)
 
 ### Fix

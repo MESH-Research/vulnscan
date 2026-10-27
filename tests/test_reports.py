@@ -211,3 +211,21 @@ def test_reports_mark_transitive_dependencies():
         assert "certifi" in text
         assert "transitive" in text
         assert "httpcore, httpx" in text
+
+
+def test_reports_show_source_errors_before_warnings(tmp_path: Path):
+    result = sample(tmp_path)
+    result.source_errors.append("NVD: HTTP 429; not checked: php 8.2.19")
+    md = render_markdown(result)
+    assert "## Errors" in md
+    assert "- NVD: HTTP 429; not checked: php 8.2.19" in md
+    assert md.index("## Errors") < md.index("## Warnings")
+    text = render_text(result)
+    assert "Errors" in text
+    assert "NVD: HTTP 429; not checked: php 8.2.19" in text
+    assert text.index("Errors") < text.index("Warnings")
+
+
+def test_reports_have_no_errors_section_without_source_errors(tmp_path: Path):
+    assert "Errors" not in render_markdown(sample(tmp_path))
+    assert "Errors" not in render_text(sample(tmp_path))

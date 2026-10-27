@@ -253,3 +253,5 @@ class ScanResult:
     scanned_at: datetime
     webpack_merge: object | None = None
     """Optional :class:`vulnscan.invenio.WebpackMergeIndex` from the post-scan merge pass."""
+    source_errors: list[str] = field(default_factory=list)
+    """Advisory sources that could not be consulted this run, one line each."""
