@@ -252,6 +252,27 @@ def _iter_cpe_matches(configurations: object):
                     yield entry
 
 
+def record_targets_product(data: dict, product: str) -> bool:
+    """Whether an NVD record's configurations name ``vendor:product`` as vulnerable.
+
+    A record with no configuration data at all (one still awaiting analysis) counts
+    as targeting the product, since NVD returned it for the product's CPE and there
+    is nothing to say otherwise. A record whose configurations mention the product
+    only as a non-vulnerable platform (``vulnerable: false``, the "running with
+    Python 3.6+" half of an AND node) does not.
+    """
+    wanted = product.lower()
+    seen_any = False
+    for entry in _iter_cpe_matches(data.get("configurations")):
+        seen_any = True
+        parsed = _cpe_version(str(entry.get("criteria", "")))
+        if parsed is None or parsed[0].lower() != wanted:
+            continue
+        if entry.get("vulnerable", True):
+            return True
+    return not seen_any
+
+
 def parse_nvd_record(data: dict, product: str) -> Vulnerability:
     """Convert one NVD CVE record into our model, scoped to ``vendor:product``.
 
@@ -570,8 +591,10 @@ class NVDClient:
 
         Images without a version cannot be matched and are skipped whatever
         ``include_unknown_versions`` says; images with no known product produce a
-        warning. NVD's own matching is filtered again against the parsed ranges, so a
-        version at or above a ``versionEndExcluding`` bound is never reported. An image
+        warning. NVD's own matching is filtered again: records that name the image's
+        product only as a non-vulnerable platform are dropped, and the rest are checked
+        against the parsed ranges, so a version at or above a ``versionEndExcluding``
+        bound is never reported. An image
         whose lookup fails is left out of the result and recorded (see
         :meth:`error_lines`) rather than raising.
         """
@@ -595,6 +618,11 @@ class NVDClient:
             vulns: list[Vulnerability] = []
             for record in records:
                 if str(record.get("vulnStatus", "")).lower() == "rejected":
+                    continue
+                if not record_targets_product(record, product):
+                    # NVD's match string also hits the non-vulnerable platform half of
+                    # an AND configuration ("Odoo, when running with Python 3.6+"), so
+                    # a record that only names the image as a platform is not about it.
                     continue
                 vuln = parse_nvd_record(record, product)
                 scoped = vuln.affected_ranges or vuln.affected_versions
