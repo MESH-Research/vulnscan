@@ -142,6 +142,10 @@ def render_markdown(result: ScanResult) -> str:
             for src, constraint in conflict.entries:
                 lines.append(f"  - `{src}`: `{constraint}`")
             lines.append("")
+    if result.source_errors:
+        lines += ["## Errors", ""]
+        lines += [f"- {e}" for e in result.source_errors]
+        lines += ["", "Packages served by a failed source were not checked this run.", ""]
     if result.warnings:
         lines += ["## Warnings", ""]
         lines += [f"- {w}" for w in result.warnings]
@@ -187,6 +191,10 @@ def render_text(result: ScanResult) -> str:
             for src, constraint in conflict.entries:
                 lines.append(f"    - {src}: {constraint}")
             lines.append("")
+    if result.source_errors:
+        lines += ["Errors", "------"]
+        lines += [f"  - {e}" for e in result.source_errors]
+        lines += ["  Packages served by a failed source were not checked this run.", ""]
     if result.warnings:
         lines += ["Warnings", "--------"]
         lines += [f"  - {w}" for w in result.warnings]

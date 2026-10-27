@@ -106,8 +106,11 @@ versions are scored for bumps and risks against the project's current tree.
 `scan(settings)` is the orchestration: parse, drop dev dependencies if
 configured, merge declarations, warn about custom sources, query each
 source, and return a `ScanResult` with findings sorted by worst severity
-then name. The OSV, Wordfence and NVD clients can be passed in, which is how
-the tests inject fakes; the TUI instead injects a whole scan function.
+then name. A source that fails (`OSVError`, `WordfenceError`, `NVDError`) is
+caught: its packages are left unchecked, the failure is recorded in
+`ScanResult.source_errors`, and the scan continues with the other sources. The
+OSV, Wordfence and NVD clients can be passed in, which is how the tests inject
+fakes; the TUI instead injects a whole scan function.
 
 ## Outputs
 

@@ -444,10 +444,23 @@ def _print_summary(result: ScanResult, written: list[Path]) -> None:
             print(f"      transitive dependency{via}")
         print(f"      advisories: {ids}")
         print(f"      fixed in: {fixed}")
+    _print_source_errors(result)
     for warning in result.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     for path in written:
         print(f"Wrote {path}")
+
+
+def _print_source_errors(result: ScanResult) -> None:
+    """Advisory sources that failed this run, on stderr, ahead of the ordinary warnings."""
+    for line in result.source_errors:
+        print(f"error: {line}", file=sys.stderr)
+    if result.source_errors:
+        print(
+            "error: the results above are incomplete; packages served by a failed source "
+            "were not checked this run",
+            file=sys.stderr,
+        )
 
 
 def _export(content: str, target: str, default: Path) -> Path | None:
@@ -487,6 +500,7 @@ def run_non_interactive(settings: Settings, args: argparse.Namespace) -> int:
     if not to_stdout:
         _print_summary(result, written)
     else:
+        _print_source_errors(result)
         for warning in result.warnings:
             print(f"warning: {warning}", file=sys.stderr)
     return 0

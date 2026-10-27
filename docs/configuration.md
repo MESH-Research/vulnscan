@@ -73,8 +73,14 @@ NVD by CPE name: the image name is mapped to a `vendor:product` pair (`php` to
 `php:php`, `traefik` to `traefik:traefik`, `nginx` to `f5:nginx`) and NVD is asked
 which CVEs apply to the version in the tag. Each answer is cached under
 `VULNSCAN_CACHE_DIR/nvd/` for the TTL, requests are spaced to stay inside the
-public rate limit, and a failed refresh falls back to the stale cache with a
-warning. Only when nothing is cached does a failure abort the scan.
+public rate limit (6 seconds apart without a key, shared across threads), a
+refused request waits out one 30-second window and is retried once, and a
+failed refresh falls back to the stale cache with a warning. When nothing is
+cached either, the image goes unchecked for that run and the scan carries on;
+after the first such failure no further NVD requests are made in that run.
+The failure is reported in the TUI status line and as a notification, as
+`error:` lines on stderr, in an **Errors** section of the reports, and in the
+debug log.
 
 Images vulnscan does not know produce a warning naming the setting to use.
 Give it the vendor and product exactly as they appear in NVD's CPE names, for
