@@ -1,3 +1,9 @@
+## 1.12.1 (2026-10-28)
+
+### Fix
+
+- **nvd**: drop CVEs that name a container image only as a platform
+
 ## 1.12.0 (2026-10-27)
 
 ## 1.11.2 (2026-10-27)
