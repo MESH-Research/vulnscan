@@ -213,7 +213,7 @@ class Finding:
     upgrade_plan: object | None = None
     """Forward-checked :class:`~vulnscan.remediate.RemediationPlan` when scan enrichment ran."""
     candidate_warnings: tuple[str, ...] = ()
-    """Non-blocking forward-check notes (freshness, skipped candidates, lookup failures)."""
+    """Forward-check notes derived from the upgrade plan (fresh ages, skips, lookup failures)."""
 
     @property
     def worst_severity(self) -> str:

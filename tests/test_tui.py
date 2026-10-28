@@ -1136,12 +1136,14 @@ async def test_preflight_key_switches_from_scan_and_n_restores(tmp_path: Path, m
 
     settings = settings_for(tmp_path)
     scans = {"count": 0}
+    preflights = {"count": 0}
 
     def scan_fn(s):
         scans["count"] += 1
         return sample_result(s.project_path)
 
     def fake_preflight(settings, **kwargs):
+        preflights["count"] += 1
         dep = Dependency("left-pad", NPM, "^1.0", "1.3.0", "preflight", "package.json")
         return PreflightReport(
             project_path=settings.project_path,
@@ -1170,6 +1172,7 @@ async def test_preflight_key_switches_from_scan_and_n_restores(tmp_path: Path, m
         await settle(app, pilot)
         assert app.preflight is True
         assert app.result is not None  # prior scan kept for n
+        assert preflights["count"] == 1
         deps = app.query_one("#deps", DataTable)
         assert [c.label.plain for c in deps.ordered_columns] == list(PREFLIGHT_COLUMNS)
         assert deps.row_count == 1
@@ -1180,6 +1183,89 @@ async def test_preflight_key_switches_from_scan_and_n_restores(tmp_path: Path, m
         assert app.preflight is False
         assert scans["count"] == 1  # no re-scan
         assert app.query_one("#deps", DataTable).row_count == 2
+
+        await pilot.press("p")
+        await settle(app, pilot)
+        assert app.preflight is True
+        assert preflights["count"] == 1  # cached preflight restored
+        assert app.query_one("#deps", DataTable).row_count == 1
+
+
+async def test_preflight_p_while_active_refreshes_cache(tmp_path: Path, monkeypatch):
+    """``p`` while already in preflight re-runs the resolve."""
+    from vulnscan.models import NPM
+    from vulnscan.preflight import PreflightPackage, PreflightReport
+
+    settings = settings_for(tmp_path)
+    preflights = {"count": 0}
+
+    def fake_preflight(settings, **kwargs):
+        preflights["count"] += 1
+        dep = Dependency("left-pad", NPM, "^1.0", "1.3.0", "preflight", "package.json")
+        return PreflightReport(
+            project_path=settings.project_path,
+            resolve_ok=True,
+            packages=[
+                PreflightPackage(
+                    dependency=dep,
+                    current="1.0.0",
+                    would_be="1.3.0",
+                    would_bump=True,
+                    build_process="npm",
+                )
+            ],
+            ecosystems=("npm",),
+        )
+
+    monkeypatch.setattr("vulnscan.preflight.run_preflight", fake_preflight)
+    app = VulnScanApp(settings, scan_fn=lambda s: sample_result(s.project_path), preflight=True)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert preflights["count"] == 1
+        await pilot.press("p")
+        await settle(app, pilot)
+        assert preflights["count"] == 2
+
+
+async def test_preflight_cache_invalidates_after_remediation(tmp_path: Path, monkeypatch):
+    """A session remediation changes pins, so the next ``p`` re-runs preflight."""
+    from vulnscan.models import NPM
+    from vulnscan.preflight import PreflightPackage, PreflightReport
+
+    settings = settings_for(tmp_path)
+    preflights = {"count": 0}
+
+    def fake_preflight(settings, **kwargs):
+        preflights["count"] += 1
+        dep = Dependency("left-pad", NPM, "^1.0", "1.3.0", "preflight", "package.json")
+        return PreflightReport(
+            project_path=settings.project_path,
+            resolve_ok=True,
+            packages=[
+                PreflightPackage(
+                    dependency=dep,
+                    current="1.0.0",
+                    would_be="1.3.0",
+                    would_bump=True,
+                    build_process="npm",
+                )
+            ],
+            ecosystems=("npm",),
+        )
+
+    monkeypatch.setattr("vulnscan.preflight.run_preflight", fake_preflight)
+    app = VulnScanApp(settings, scan_fn=lambda s: sample_result(s.project_path))
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        await pilot.press("p")
+        await settle(app, pilot)
+        assert preflights["count"] == 1
+        await pilot.press("n")
+        await settle(app, pilot)
+        app._remediated[("PyPI", "requests")] = "requests==2.32.4"
+        await pilot.press("p")
+        await settle(app, pilot)
+        assert preflights["count"] == 2
 
 
 async def test_preflight_key_from_outdated_mode(tmp_path: Path, monkeypatch):
@@ -1230,6 +1316,121 @@ async def test_preflight_key_from_outdated_mode(tmp_path: Path, monkeypatch):
         await settle(app, pilot)
         assert app.preflight is False
         assert app.outdated is True
+
+
+async def test_n_from_preflight_startup_runs_fresh_scan(tmp_path: Path, monkeypatch):
+    """Started with --preflight: ``n`` scans normally when nothing is cached yet."""
+    from vulnscan.models import NPM
+    from vulnscan.preflight import PreflightPackage, PreflightReport
+    from vulnscan.tui import DEP_COLUMNS
+
+    settings = settings_for(tmp_path)
+    scans = {"count": 0, "settings": None}
+
+    def scan_fn(s):
+        scans["count"] += 1
+        scans["settings"] = s
+        return sample_result(s.project_path)
+
+    def fake_preflight(settings, **kwargs):
+        dep = Dependency("left-pad", NPM, "^1.0", "1.3.0", "preflight", "package.json")
+        return PreflightReport(
+            project_path=settings.project_path,
+            resolve_ok=True,
+            packages=[
+                PreflightPackage(
+                    dependency=dep,
+                    current="1.0.0",
+                    would_be="1.3.0",
+                    would_bump=True,
+                    build_process="npm",
+                )
+            ],
+            ecosystems=("npm",),
+        )
+
+    monkeypatch.setattr("vulnscan.preflight.run_preflight", fake_preflight)
+    app = VulnScanApp(settings, scan_fn=scan_fn, preflight=True)
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.preflight is True
+        assert app.result is None
+        assert scans["count"] == 0
+
+        await pilot.press("n")
+        await settle(app, pilot)
+        assert app.preflight is False
+        assert scans["count"] == 1
+        assert scans["settings"] is settings
+        assert app.result is not None
+        deps = app.query_one("#deps", DataTable)
+        assert [c.label.plain for c in deps.ordered_columns] == list(DEP_COLUMNS)
+        assert deps.row_count == 2
+
+
+async def test_n_from_preflight_startup_respects_outdated_flag(tmp_path: Path, monkeypatch):
+    """``--preflight --outdated``: ``n`` runs an outdated scan with the same settings."""
+    from vulnscan.models import NPM
+    from vulnscan.outdated import UpgradeOptions
+    from vulnscan.preflight import PreflightPackage, PreflightReport
+    from vulnscan.tui import OUTDATED_COLUMNS, OUTDATED_SUBTITLE
+
+    settings = settings_for(tmp_path)
+    result = sample_result(settings.project_path)
+    scans = {"count": 0}
+
+    def scan_fn(s):
+        scans["count"] += 1
+        return result
+
+    def fake_preflight(settings, **kwargs):
+        dep = Dependency("left-pad", NPM, "^1", "1.3.0", "preflight", "package.json")
+        return PreflightReport(
+            project_path=settings.project_path,
+            resolve_ok=True,
+            packages=[
+                PreflightPackage(
+                    dependency=dep,
+                    current=None,
+                    would_be="1.3.0",
+                    would_bump=True,
+                    build_process="npm",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("vulnscan.preflight.run_preflight", fake_preflight)
+
+    def versions_fn(dep):
+        if dep.name == "flask":
+            return ["3.0.0", "3.0.1", "4.0.0"]
+        if dep.name == "requests":
+            return ["2.30.0", "2.31.0"]
+        return [dep.version] if dep.version else []
+
+    app = VulnScanApp(
+        settings,
+        scan_fn=scan_fn,
+        versions_fn=versions_fn,
+        outdated=True,
+        preflight=True,
+    )
+    async with app.run_test() as pilot:
+        await settle(app, pilot)
+        assert app.preflight is True
+        assert app.outdated is True
+        assert scans["count"] == 0
+
+        await pilot.press("n")
+        await settle(app, pilot)
+        assert app.preflight is False
+        assert app.outdated is True
+        assert scans["count"] == 1
+        assert OUTDATED_SUBTITLE in (app.sub_title or "")
+        deps = app.query_one("#deps", DataTable)
+        assert [c.label.plain for c in deps.ordered_columns] == list(OUTDATED_COLUMNS)
+        assert deps.row_count >= 1
+        assert any(isinstance(opts, UpgradeOptions) for opts in app._upgrades.values())
 
 
 def test_preflight_package_markdown_ties_risks_to_would_be_version():
@@ -1283,3 +1484,45 @@ def test_preflight_package_markdown_ties_risks_to_would_be_version():
     assert "https://osv.dev/GHSA-xxxx" in md
     assert "**fresh**" in md
     assert "this version" not in md.lower() or "would-be" in md.lower()
+
+
+def test_remediate_screen_separates_freshness_from_blockers():
+    from datetime import timedelta
+
+    from vulnscan.models import VersionRange
+    from vulnscan.remediate import RemediationPlan
+    from vulnscan.risk import RiskKind, VersionRisk, format_fresh_age
+    from vulnscan.tui import RemediateScreen
+
+    dep = Dependency("pkg", PYPI, "==1.0", "1.0", "pinned", "requirements.txt")
+    vuln = Vulnerability(
+        "GHSA-old",
+        "old",
+        "d",
+        affected_ranges=[VersionRange(lower="0", upper="1.1")],
+    )
+    finding = Finding(dep, [vuln])
+    age = timedelta(hours=5)
+    plan = RemediationPlan(
+        current="1.0",
+        nearest_safe="1.1",
+        latest="1.2",
+        latest_is_safe=False,
+        nearest_fresh_age=age,
+        latest_fresh_age=None,
+        latest_blockers=(VersionRisk(RiskKind.ADVISORY, "still bad", advisory_id="GHSA-new"),),
+    )
+    finding.upgrade_plan = plan
+    screen = RemediateScreen(finding, plan)
+    prompts = [opt.prompt for opt in screen.options()]
+    assert f"1.1  ({format_fresh_age(age)})" in prompts[0]
+    assert "~fresh" not in prompts[0]
+    assert "still has known advisories" in prompts[1]
+    assert "GHSA-new" not in prompts[1]
+    summary = "\n".join(screen.summary_lines())
+    assert "GHSA-new" in summary
+    detail = vulnerability_markdown(finding, vuln)
+    assert format_fresh_age(age) in detail
+    assert "GHSA-new" in detail
+    assert "still has known advisories" in detail
+    assert "~fresh" not in detail

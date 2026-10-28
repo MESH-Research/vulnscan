@@ -91,6 +91,28 @@ def test_markdown_contains_summary_table_and_details(tmp_path: Path):
     assert "2 of 2" in md or "2 dependencies" in md
 
 
+def test_nearest_safe_cell_uses_fresh_age_not_tilde_marker(tmp_path: Path):
+    from datetime import timedelta
+
+    from vulnscan.remediate import RemediationPlan
+    from vulnscan.reports import _nearest_safe_cell
+    from vulnscan.risk import format_fresh_age
+
+    result = sample(tmp_path)
+    finding = result.findings[1]  # requests
+    age = timedelta(hours=4)
+    finding.upgrade_plan = RemediationPlan(
+        current="2.30.0",
+        nearest_safe="2.31.0",
+        latest="2.32.0",
+        latest_is_safe=True,
+        nearest_fresh_age=age,
+    )
+    cell = _nearest_safe_cell(finding, result)
+    assert cell == f"2.31.0 ({format_fresh_age(age)})"
+    assert "~fresh" not in cell
+
+
 def test_markdown_orders_findings_as_given(tmp_path: Path):
     md = render_markdown(sample(tmp_path))
     assert md.index("wp-plugin/elementor") < md.index("requests")
