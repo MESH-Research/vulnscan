@@ -1526,3 +1526,41 @@ def test_remediate_screen_separates_freshness_from_blockers():
     assert "GHSA-new" in detail
     assert "still has known advisories" in detail
     assert "~fresh" not in detail
+
+
+@pytest.mark.asyncio
+async def test_option_dialog_keeps_options_visible_with_long_summary(tmp_path: Path):
+    """A very long summary scrolls; the option list and key hint stay on screen."""
+    from textual.widgets import Label, OptionList
+
+    from vulnscan.remediate import RemediationPlan
+    from vulnscan.tui import RemediateScreen
+
+    settings = settings_for(tmp_path)
+    (tmp_path / "proj").mkdir()
+    result = sample_result(tmp_path / "proj")
+    finding = result.findings[1]
+    plan = RemediationPlan(
+        current="2.30.0",
+        nearest_safe="2.32.4",
+        latest="2.33.0",
+        latest_is_safe=True,
+        warnings=tuple(f"skipped 2.31.{n} (advisory: CVE-2025-{n:04d})" for n in range(200)),
+    )
+    app = VulnScanApp(settings, scan_fn=lambda s: result)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await settle(app, pilot)
+        app.push_screen(RemediateScreen(finding, plan))
+        await settle(app, pilot)
+        screen = app.screen
+        assert screen.__class__.__name__ == "RemediateScreen"
+        options = screen.query_one("#remediate-options", OptionList)
+        help_label = screen.query_one("#remediate-help", Label)
+        height = app.size.height
+        assert options.region.height >= 2
+        assert options.region.bottom <= height
+        assert help_label.region.height >= 1
+        assert help_label.region.bottom <= height
+        await pilot.press("enter")
+        await settle(app, pilot)
+        assert app.screen.__class__.__name__ != "RemediateScreen"
