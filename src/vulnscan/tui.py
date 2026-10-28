@@ -31,10 +31,12 @@ from vulnscan.remediate import (
     RemediationPlan,
     RemediationResult,
     apply_remediation,
+    format_latest_unsafe_note,
     plan_pin,
     plan_remediation,
 )
 from vulnscan.reports import write_reports
+from vulnscan.risk import format_fresh_age
 from vulnscan.scanner import scan
 from vulnscan.wordfence import SOURCE as WORDFENCE_SOURCE
 from vulnscan.wordfence import wordfence_attribution
@@ -170,6 +172,15 @@ def _cells(values: list[str], remediated: bool) -> list[str | Text]:
     return [Text(v, style=REMEDIATED_STYLE) for v in values]
 
 
+def _version_with_fresh(version: str | None, age) -> str:
+    """Version label with optional ``fresh: Nh ago`` annotation from a plan age."""
+    if not version:
+        return "none"
+    if age is None:
+        return version
+    return f"{version} ({format_fresh_age(age)})"
+
+
 def _nearest_safe_label(finding: Finding) -> str:
     """Forward-checked nearest safe for the deps table, with optional freshness marker."""
     plan = getattr(finding, "upgrade_plan", None)
@@ -177,10 +188,7 @@ def _nearest_safe_label(finding: Finding) -> str:
         nearest = getattr(plan, "nearest_safe", None)
         if not nearest:
             return "none"
-        warnings = getattr(plan, "warnings", ()) or ()
-        if any(nearest in w and "published within the freshness" in w for w in warnings):
-            return f"{nearest} ~fresh"
-        return nearest
+        return _version_with_fresh(nearest, getattr(plan, "nearest_fresh_age", None))
     return ", ".join(finding.fixed_versions) or "-"
 
 
@@ -300,13 +308,33 @@ def vulnerability_markdown(finding: Finding, vuln: Vulnerability) -> str:
     ]
     plan = getattr(finding, "upgrade_plan", None)
     if plan is not None:
+        nearest_label = _version_with_fresh(
+            plan.nearest_safe, getattr(plan, "nearest_fresh_age", None)
+        )
+        latest_label = _version_with_fresh(plan.latest, getattr(plan, "latest_fresh_age", None))
+        if plan.latest and not plan.latest_is_safe:
+            latest_label += f" ({format_latest_unsafe_note(plan)})"
         lines += [
-            f"- **Nearest safe:** {plan.nearest_safe or 'none'}",
-            f"- **Latest:** {plan.latest or 'none'}"
-            + ("" if plan.latest_is_safe else " (not clear of known risks)"),
+            f"- **Nearest safe:** {nearest_label}",
+            f"- **Latest:** {latest_label}",
         ]
+        for risk in getattr(plan, "latest_blockers", ()) or ():
+            bits = [f"**{risk.kind}**"]
+            if risk.severity:
+                bits.append(f"({risk.severity})")
+            if risk.advisory_id:
+                bits.append(f"`{risk.advisory_id}`")
+            head = " ".join(bits)
+            detail = risk.detail or ""
+            line = f"- **Latest blocker:** {head}"
+            if detail:
+                line = f"{line}: {detail}"
+            lines.append(line)
+            if risk.url:
+                lines.append(f"  - <{risk.url}>")
         for warning in plan.warnings:
-            lines.append(f"- **Warning:** {warning}")
+            if "skipped " in warning:
+                lines.append(f"- **Warning:** {warning}")
     if vuln.published:
         lines.append(f"- **Published:** {vuln.published:%Y-%m-%d}")
     if vuln.modified:
@@ -431,27 +459,51 @@ class RemediateScreen(OptionDialog):
         ]
         if not self.plan.nearest_safe and not self.finding.upgrade_limit:
             summary.append("Nearest safe: none available")
+        if self.plan.nearest_fresh_age is not None and self.plan.nearest_safe:
+            summary.append(
+                f"{dep.name} {self.plan.nearest_safe} "
+                f"({format_fresh_age(self.plan.nearest_fresh_age)})"
+            )
+        if (
+            self.plan.latest_fresh_age is not None
+            and self.plan.latest
+            and self.plan.latest != self.plan.nearest_safe
+        ):
+            summary.append(
+                f"{dep.name} {self.plan.latest} ({format_fresh_age(self.plan.latest_fresh_age)})"
+            )
+        if not self.plan.latest_is_safe and self.plan.latest:
+            summary.append(f"Latest {format_latest_unsafe_note(self.plan)}")
+            for risk in self.plan.latest_blockers:
+                label = risk.advisory_id or str(risk.kind)
+                summary.append(f"  - {label}: {risk.detail}" if risk.detail else f"  - {label}")
         for warning in self.plan.warnings:
-            summary.append(warning)
+            if warning.startswith("skipped "):
+                summary.append(warning)
         return summary
 
     def options(self) -> list[Option]:
         """Nearest safe version and latest release, disabled when unavailable."""
         if self.plan.nearest_safe:
+            fresh = (
+                f"  ({format_fresh_age(self.plan.nearest_fresh_age)})"
+                if self.plan.nearest_fresh_age is not None
+                else ""
+            )
             nearest = Option(
-                f"Nearest safe version: {self.plan.nearest_safe}  "
+                f"Nearest safe version: {self.plan.nearest_safe}{fresh}  "
                 "(smallest upgrade that clears all known advisories)",
                 id="nearest",
             )
         else:
             nearest = Option("Nearest safe version: none available", id="nearest", disabled=True)
         if self.plan.latest:
-            if self.plan.latest_is_safe:
-                note = ""
-                if any(self.plan.latest in w and "freshness" in w for w in self.plan.warnings):
-                    note = "  (~fresh)"
-            else:
-                note = "  (still has known advisories or other risks!)"
+            parts: list[str] = []
+            if self.plan.latest_fresh_age is not None:
+                parts.append(format_fresh_age(self.plan.latest_fresh_age))
+            if not self.plan.latest_is_safe:
+                parts.append(format_latest_unsafe_note(self.plan))
+            note = f"  ({'; '.join(parts)})" if parts else ""
             latest = Option(f"Latest release: {self.plan.latest}{note}", id="latest")
         else:
             latest = Option("Latest release: none found", id="latest", disabled=True)
@@ -558,9 +610,11 @@ class VulnScanApp(App[None]):
     Scans run in a worker thread so the interface stays responsive. Keys: ``r`` rescan,
     ``f`` write feeds, ``e`` export reports, ``u`` upgrade the selected dependency,
     ``o`` open the selected advisory in a browser, ``p`` run preflight against the
-    current manifests (including upgrades applied this session), ``n`` return to the
-    last normal/outdated scan result, ``q`` quit. ``scan_fn`` and ``versions_fn``
-    replace the real scanner and registry lookups in tests.
+    current manifests (including upgrades applied this session; restores a cached
+    preflight when inputs are unchanged), ``n`` leave preflight for the last
+    normal/outdated scan (or a fresh one if none is cached), ``q`` quit.
+    ``scan_fn`` and ``versions_fn`` replace the real scanner and registry lookups in
+    tests.
 
     With ``outdated`` the dependency table lists every dependency that has a newer
     stable release, whether or not an advisory affects it, and ``u`` offers the newest
@@ -604,6 +658,7 @@ class VulnScanApp(App[None]):
         self.outdated = outdated
         self.preflight = preflight
         self._preflight_report = None
+        self._preflight_cache_key: tuple | None = None
         self._last_outdated: list[OutdatedPackage] | None = None
         self._scan_fn: ScanFn = scan_fn or scan
         self._versions_fn: VersionsFn | None = versions_fn
@@ -831,13 +886,33 @@ class VulnScanApp(App[None]):
         self._upgrades = {o.dependency.key: o.options for o in outdated}
         return [by_key.get(o.dependency.key) or Finding(o.dependency, []) for o in outdated]
 
+    def _preflight_inputs_key(self) -> tuple:
+        """Inputs that must match for a cached preflight report to be reusable.
+
+        Remediations this session change on-disk pins, so they invalidate the cache.
+        External edits outside the TUI still need ``r`` (or ``p`` while already in
+        preflight) to refresh.
+        """
+        settings = self.settings
+        return (
+            str(settings.project_path.resolve()),
+            float(settings.fresh_hours),
+            settings.invenio_webpack,
+            str(settings.invenio_webpack_overlay or ""),
+            tuple(settings.preflight_ignore),
+            tuple(settings.ignore_dirs),
+            tuple(sorted(self._remediated.items())),
+        )
+
     def _apply_preflight(self, report) -> None:
         """Populate the tables from a preflight report.
 
         Keeps ``self.result`` / ``_last_outdated`` so ``n`` can restore the last scan.
+        Caches the report keyed by :meth:`_preflight_inputs_key` for a later ``p``.
         """
         self._stop_busy()
         self._preflight_report = report
+        self._preflight_cache_key = self._preflight_inputs_key()
         self._rows = []
         deps = self.query_one("#deps", DataTable)
         deps.clear()
@@ -1051,8 +1126,10 @@ class VulnScanApp(App[None]):
         """Switch to preflight and resolve against the current on-disk pins (``p``).
 
         Works from normal or outdated mode. Remediations already rewrite manifests, so
-        this floats against whatever is on disk after upgrades this session. Pressing
-        ``p`` again while already in preflight re-runs the resolve.
+        this floats against whatever is on disk after upgrades this session. Switching
+        back with unchanged settings and no new remediations restores the cached
+        preflight report. Pressing ``p`` again while already in preflight (or ``r``)
+        re-runs the resolve.
         """
         if not self.preflight:
             self.preflight = True
@@ -1060,18 +1137,24 @@ class VulnScanApp(App[None]):
             self._sync_mode_banner()
             # Drop the outdated subtitle while preflight is active.
             self.sub_title = str(self.settings.project_path)
+            if (
+                self._preflight_report is not None
+                and self._preflight_cache_key == self._preflight_inputs_key()
+            ):
+                self._apply_preflight(self._preflight_report)
+                return
         self._start_scan()
 
     def action_normal_scan(self) -> None:
-        """Return to the last normal or outdated scan result (``n``)."""
+        """Leave preflight for the last normal/outdated scan, or scan fresh (``n``).
+
+        Restores a cached :attr:`result` when one exists (including outdated rows when
+        the app was started with ``outdated=True``). If the session began in preflight
+        and nothing is cached yet, runs a normal scan with the same settings and
+        outdated flag instead of refusing.
+        """
         if not self.preflight:
             self.notify("Already showing the last scan result.", severity="information")
-            return
-        if self.result is None:
-            self.notify(
-                "No prior scan to restore; press r to scan, or start without --preflight.",
-                severity="warning",
-            )
             return
         self.preflight = False
         self._rebuild_dep_columns()
@@ -1079,7 +1162,10 @@ class VulnScanApp(App[None]):
         self.sub_title = str(self.settings.project_path)
         if self.outdated:
             self.sub_title += f"  |  {OUTDATED_SUBTITLE}"
-        self._apply_result(self.result, self._last_outdated)
+        if self.result is not None:
+            self._apply_result(self.result, self._last_outdated)
+            return
+        self._start_scan()
 
     def action_write_feeds(self) -> None:
         """Write the RSS and Atom feeds for the last result (``f``); warns if no scan completed."""

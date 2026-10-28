@@ -92,7 +92,10 @@
 
 ### Feat
 
-- **tui**: ``p`` runs preflight from normal/outdated mode; ``n`` restores the last scan
+- **tui**: ``p`` runs preflight from normal/outdated mode; ``n`` restores the last
+  scan or runs a fresh one (honouring ``--outdated``) when started in preflight;
+  switching back to preflight reuses the cached report when settings and session
+  remediations are unchanged (``r`` / ``p`` while already in preflight still refresh)
 - **tui / preflight**: detail pane and JSON include ``resolve_from`` (mock-lock site) and,
   in Invenio mode, ``upstream_constraints`` (per-file merge-tree constraints, scan-parity)
 - **preflight**: choose pnpm when ``invenio.cfg`` sets ``WEBPACKEXT_NPM_PKG_CLS`` to

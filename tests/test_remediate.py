@@ -67,20 +67,70 @@ def test_plan_skips_forward_blocked_candidate():
 
 
 def test_plan_freshness_warns_but_does_not_block():
-    from vulnscan.risk import RiskKind, VersionRisk, VersionScore
+    from datetime import timedelta
+
+    from vulnscan.risk import RiskKind, VersionRisk, VersionScore, format_fresh_age
 
     dep = Dependency("pkg", PYPI, "==1.0", "1.0", "pinned", "requirements.txt")
     vuln = vuln_with_ranges(VersionRange(lower="0", upper="1.1"))
     finding = Finding(dep, [vuln])
+    age = timedelta(hours=3)
     scores = {
         "1.1": VersionScore(
             "1.1",
-            (VersionRisk(RiskKind.FRESH, "new"),),
+            (VersionRisk(RiskKind.FRESH, "new", age=age),),
         ),
     }
     plan = plan_remediation(finding, ["1.0", "1.1"], scores=scores)
     assert plan.nearest_safe == "1.1"
-    assert plan.warnings
+    assert plan.latest_is_safe is True
+    assert plan.nearest_fresh_age == age
+    assert plan.latest_fresh_age == age
+    assert plan.latest_blockers == ()
+    assert any(format_fresh_age(age) in w for w in plan.warnings)
+
+
+def test_plan_latest_blockers_exclude_freshness():
+    from datetime import timedelta
+
+    from vulnscan.remediate import format_latest_unsafe_note
+    from vulnscan.risk import RiskKind, VersionRisk, VersionScore, format_blocker_kinds
+
+    dep = Dependency("pkg", PYPI, "==1.0", "1.0", "pinned", "requirements.txt")
+    vuln = vuln_with_ranges(VersionRange(lower="0", upper="1.1"))
+    finding = Finding(dep, [vuln])
+    age = timedelta(hours=2)
+    scores = {
+        "1.1": VersionScore(
+            "1.1",
+            (
+                VersionRisk(RiskKind.ADVISORY, "still bad", advisory_id="GHSA-aaaa"),
+                VersionRisk(RiskKind.FRESH, "new", age=age),
+            ),
+        ),
+    }
+    plan = plan_remediation(finding, ["1.0", "1.1"], scores=scores)
+    assert plan.nearest_safe is None
+    assert plan.latest_is_safe is False
+    assert plan.latest_fresh_age == age
+    assert [r.kind for r in plan.latest_blockers] == [RiskKind.ADVISORY]
+    assert format_latest_unsafe_note(plan) == "still has known advisories"
+    assert "GHSA" not in format_blocker_kinds(plan.latest_blockers)
+
+
+def test_format_latest_unsafe_note_merge_reads_naturally():
+    from vulnscan.remediate import RemediationPlan, format_latest_unsafe_note
+
+    plan = RemediationPlan(
+        current="1.0",
+        nearest_safe=None,
+        latest="2.0",
+        latest_is_safe=False,
+        latest_merge_blocked=True,
+    )
+    note = format_latest_unsafe_note(plan)
+    assert note == "incompatible with webpack merge"
+    assert not note.startswith("still has")
 
 
 def test_plan_respects_release_branches():
