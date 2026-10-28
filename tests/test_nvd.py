@@ -16,6 +16,7 @@ from vulnscan.nvd import (
     parse_nvd_record,
     product_for_image,
     query_version,
+    record_targets_product,
 )
 
 
@@ -565,7 +566,25 @@ def test_rate_limited_request_waits_a_full_window_and_retries_once(tmp_path: Pat
 
 
 def test_persistent_failure_is_reported_and_later_images_are_skipped(tmp_path: Path):
-    good = Recorder({"cpe:2.3:a:traefik:traefik:2.10.7": [RECORD]})
+    traefik_record = dict(
+        RECORD,
+        configurations=[
+            {
+                "nodes": [
+                    {
+                        "cpeMatch": [
+                            cpe_match(
+                                "cpe:2.3:a:traefik:traefik:*:*:*:*:*:*:*:*",
+                                versionStartIncluding="2.10.0",
+                                versionEndExcluding="2.10.8",
+                            )
+                        ]
+                    }
+                ]
+            }
+        ],
+    )
+    good = Recorder({"cpe:2.3:a:traefik:traefik:2.10.7": [traefik_record]})
     traefik = image("traefik", "2.10.7")
     make_client(good, tmp_path).find_vulnerabilities([traefik])
 
@@ -627,3 +646,113 @@ def test_requests_never_overlap_across_threads(tmp_path: Path):
         t.join()
     assert len(inner.requests) == 8
     assert peak == 1
+
+
+# --- platform-only matches ----------------------------------------------------------------------
+
+
+def platform_record(cve_id: str, product_cpe: str, platform_cpe: str, **platform_bounds) -> dict:
+    """A record whose vulnerable product is one thing and whose platform is another."""
+    platform = {"vulnerable": False, "criteria": platform_cpe, "matchCriteriaId": "P"}
+    platform.update(platform_bounds)
+    return {
+        "id": cve_id,
+        "descriptions": [{"lang": "en", "value": f"{cve_id} in something else"}],
+        "vulnStatus": "Analyzed",
+        "configurations": [
+            {
+                "operator": "AND",
+                "nodes": [
+                    {
+                        "operator": "OR",
+                        "negate": False,
+                        "cpeMatch": [
+                            cpe_match(
+                                product_cpe,
+                                versionStartIncluding="11.0",
+                                versionEndIncluding="13.0",
+                            )
+                        ],
+                    },
+                    {"operator": "OR", "negate": False, "cpeMatch": [platform]},
+                ],
+            }
+        ],
+    }
+
+
+ODOO_ON_PYTHON = platform_record(
+    "CVE-2020-29396",
+    "cpe:2.3:a:odoo:odoo:*:*:*:*:community:*:*:*",
+    "cpe:2.3:a:python:python:*:*:*:*:*:*:*:*",
+    versionStartIncluding="3.6.0",
+)
+DJANGO_ON_PYTHON = platform_record(
+    "CVE-2021-32052",
+    "cpe:2.3:a:djangoproject:django:*:*:*:*:*:*:*:*",
+    "cpe:2.3:a:python:python:*:*:*:*:*:*:*:*",
+    versionStartIncluding="3.9.5",
+)
+PYTHON_ITSELF = {
+    "id": "CVE-2025-1",
+    "descriptions": [{"lang": "en", "value": "Python bug"}],
+    "vulnStatus": "Analyzed",
+    "configurations": [
+        {
+            "nodes": [
+                {
+                    "cpeMatch": [
+                        cpe_match(
+                            "cpe:2.3:a:python:python:*:*:*:*:*:*:*:*",
+                            versionStartIncluding="3.14.0",
+                            versionEndExcluding="3.14.10",
+                        )
+                    ]
+                }
+            ]
+        }
+    ],
+}
+
+
+def test_record_targets_product_true_for_vulnerable_entry():
+    assert record_targets_product(RECORD, "php:php") is True
+    assert record_targets_product(PYTHON_ITSELF, "python:python") is True
+
+
+def test_record_targets_product_false_when_only_a_platform():
+    assert record_targets_product(ODOO_ON_PYTHON, "python:python") is False
+    assert record_targets_product(DJANGO_ON_PYTHON, "python:python") is False
+    # The platform CPE is non-vulnerable even in the record for the vulnerable product.
+    assert record_targets_product(RECORD, "microsoft:windows") is False
+
+
+def test_record_targets_product_true_for_the_actually_vulnerable_product():
+    assert record_targets_product(ODOO_ON_PYTHON, "odoo:odoo") is True
+    assert record_targets_product(DJANGO_ON_PYTHON, "djangoproject:django") is True
+
+
+def test_record_targets_product_true_without_configurations():
+    bare = {"id": "CVE-2024-1", "descriptions": [], "configurations": [], "vulnStatus": "Analyzed"}
+    assert record_targets_product(bare, "php:php") is True
+    assert record_targets_product({"id": "CVE-2024-2"}, "php:php") is True
+
+
+def test_record_targets_product_is_case_insensitive():
+    assert record_targets_product(PYTHON_ITSELF, "Python:Python") is True
+
+
+def test_find_vulnerabilities_drops_records_where_the_image_is_only_the_platform(tmp_path: Path):
+    handler = Recorder(
+        {"cpe:2.3:a:python:python:3.14.9": [ODOO_ON_PYTHON, DJANGO_ON_PYTHON, PYTHON_ITSELF]}
+    )
+    client = make_client(handler, tmp_path)
+    python = image("python", "3.14.9")
+    found = client.find_vulnerabilities([python])
+    assert [v.id for v in found[python]] == ["CVE-2025-1"]
+
+
+def test_find_vulnerabilities_omits_image_when_every_match_is_platform_only(tmp_path: Path):
+    handler = Recorder({"cpe:2.3:a:python:python:3.14.9": [ODOO_ON_PYTHON, DJANGO_ON_PYTHON]})
+    client = make_client(handler, tmp_path)
+    assert client.find_vulnerabilities([image("python", "3.14.9")]) == {}
