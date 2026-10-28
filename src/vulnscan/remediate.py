@@ -160,6 +160,23 @@ def format_latest_unsafe_note(plan: RemediationPlan) -> str:
     return "still has known advisories"
 
 
+def _blocking_summary(blocking) -> str:
+    """Compact ``kind: id, id; kind: detail`` text for the risks that disqualified a version.
+
+    Advisories are named by identifier rather than quoting their descriptions, which for
+    NVD-sourced advisories can run to many lines each.
+    """
+    by_kind: dict[str, list[str]] = {}
+    for risk in blocking:
+        kind = str(getattr(risk, "kind", "risk"))
+        label = getattr(risk, "advisory_id", None) or str(getattr(risk, "detail", risk))
+        if label not in by_kind.setdefault(kind, []):
+            by_kind[kind].append(label)
+    return "; ".join(f"{kind}: {', '.join(labels)}" for kind, labels in by_kind.items()) or (
+        "blocking risk"
+    )
+
+
 def plan_remediation(
     finding: Finding,
     versions: list[str],
@@ -255,8 +272,7 @@ def plan_remediation(
             score = score_for_version(version)
             if score is not None and getattr(score, "has_blocking", False):
                 blocking = blockers_for(version)
-                detail = ", ".join(f"{r.kind}: {r.detail}" for r in blocking) or "blocking risk"
-                warnings.append(f"skipped {version} ({detail})")
+                warnings.append(f"skipped {version} ({_blocking_summary(blocking)})")
                 break
     log.info(
         "plan: %s %s: %d candidates above current, %d safe; nearest %s, latest %s%s",
