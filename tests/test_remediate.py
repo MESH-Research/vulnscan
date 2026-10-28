@@ -1100,3 +1100,35 @@ def test_apply_to_ci_file_missing_image_raises(tmp_path: Path):
     (tmp_path / ".gitlab-ci.yml").write_text("image: nginx:1.25.4\n")
     with pytest.raises(RemediationError):
         apply_remediation(tmp_path, image("php", "8.2.19", "8.2.19", ".gitlab-ci.yml"), "8.2.20")
+
+
+def test_plan_skipped_warning_names_advisories_not_descriptions():
+    """The skipped note lists advisory ids; it never quotes the full advisory text."""
+    from vulnscan.risk import RiskKind, VersionRisk, VersionScore
+
+    dep = Dependency("mariadb", CONTAINER, "10.11", "10.11", "image", "docker-compose.yml")
+    vuln = vuln_with_ranges(VersionRange(lower="0", upper="10.11.18"))
+    finding = Finding(dep, [vuln])
+    description = "MariaDB server is a community developed fork of MySQL server. " * 20
+    scores = {
+        "11.4.10": VersionScore(
+            "11.4.10",
+            (
+                VersionRisk(RiskKind.ADVISORY, description, advisory_id="CVE-2025-0001"),
+                VersionRisk(RiskKind.ADVISORY, description, advisory_id="CVE-2025-0002"),
+                VersionRisk(
+                    RiskKind.YANKED, "mariadb 11.4.10 is yanked/unpublished on the registry"
+                ),
+            ),
+        ),
+        "11.4.11": VersionScore("11.4.11", ()),
+    }
+    plan = plan_remediation(finding, ["10.11", "11.4.10", "11.4.11"], scores=scores)
+    assert plan.nearest_safe == "11.4.11"
+    skipped = [w for w in plan.warnings if w.startswith("skipped 11.4.10")]
+    assert len(skipped) == 1
+    assert "CVE-2025-0001" in skipped[0]
+    assert "CVE-2025-0002" in skipped[0]
+    assert "yanked" in skipped[0]
+    assert "community developed fork" not in skipped[0]
+    assert len(skipped[0]) < 200
