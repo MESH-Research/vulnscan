@@ -370,7 +370,8 @@ class OptionDialog(ModalScreen[str | None]):
         width: 90; height: auto; max-height: 90%; padding: 1 2;
         border: thick $primary; background: $surface;
     }
-    #remediate-summary { height: auto; margin-bottom: 1; }
+    #remediate-summary-scroll { height: auto; margin-bottom: 1; }
+    #remediate-summary { height: auto; }
     #remediate-options { height: auto; margin-top: 1; }
     #remediate-help { color: $text-muted; margin-top: 1; }
     """
@@ -388,20 +389,42 @@ class OptionDialog(ModalScreen[str | None]):
         """Build the dialog: a multi-line summary, the options and a key hint."""
         with Vertical(id="remediate-box"):
             # Plain text: section names such as "[project]" must not be read as markup.
-            yield Static("\n".join(self.summary_lines()), id="remediate-summary", markup=False)
+            with VerticalScroll(id="remediate-summary-scroll"):
+                yield Static("\n".join(self.summary_lines()), id="remediate-summary", markup=False)
             yield OptionList(*self.options(), id="remediate-options")
             yield Label(
                 "Enter to apply the highlighted option, Esc to cancel.", id="remediate-help"
             )
 
     def on_mount(self) -> None:
-        """Focus the option list and highlight the first enabled option."""
+        """Focus the option list, highlight the first enabled option and fit the summary."""
         options = self.query_one("#remediate-options", OptionList)
         options.focus()
         for index in range(options.option_count):
             if not options.get_option_at_index(index).disabled:
                 options.highlighted = index
                 break
+        self.call_after_refresh(self._fit_summary)
+
+    def on_resize(self) -> None:
+        """Refit the summary when the terminal changes size."""
+        self._fit_summary()
+
+    def _fit_summary(self) -> None:
+        """Cap the summary's height so the options and key hint always stay on screen.
+
+        The box may use at most 90% of the terminal; whatever the options, the hint and
+        their margins do not need is left for the summary, which scrolls beyond that.
+        """
+        box = self.query_one("#remediate-box", Vertical)
+        scroll = self.query_one("#remediate-summary-scroll", VerticalScroll)
+        options = self.query_one("#remediate-options", OptionList)
+        help_label = self.query_one("#remediate-help", Label)
+        box_limit = self.size.height * 90 // 100 - box.gutter.height
+        reserved = scroll.styles.margin.height
+        for widget in (options, help_label):
+            reserved += widget.outer_size.height + widget.styles.margin.height
+        scroll.styles.max_height = max(3, box_limit - reserved)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         """Dismiss with the chosen option id."""
