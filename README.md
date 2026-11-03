@@ -216,8 +216,8 @@ advisory affects, so `symfony/http-kernel` 5.4.0 goes to 5.4.20, not 6.x) or the
 itself checked against OSV and the registry first (the **forward check**): a
 version that carries its own advisory, is reported as malware or has been
 yanked is skipped and the output says why, and one published less than
-`VULNSCAN_FRESH_HOURS` ago (default 24) is offered with a `~fresh` warning
-rather than silently. Pre-release and
+`VULNSCAN_FRESH_HOURS` ago (default 24) is offered with a `fresh: 12h ago`
+annotation rather than treated as unsafe. Pre-release and
 yanked versions are never offered. The constraint is rewritten in every manifest
 that declares the package, keeping the operator style (`^12.2` becomes `^16.3`,
 `~4.18.2` becomes `~4.19.2`, `Django>=4.2,<5` becomes `Django>=4.2.11,<5`) and

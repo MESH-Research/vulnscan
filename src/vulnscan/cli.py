@@ -24,7 +24,12 @@ from vulnscan.ntfy import NtfyClient
 from vulnscan.nvd import NVDError
 from vulnscan.osv import OSVError
 from vulnscan.registry import RegistryClient, RegistryError
-from vulnscan.remediate import RemediationError, apply_remediation, plan_remediation
+from vulnscan.remediate import (
+    RemediationError,
+    apply_remediation,
+    format_latest_unsafe_note,
+    plan_remediation,
+)
 from vulnscan.reports import render_markdown, render_text
 from vulnscan.scanner import scan
 from vulnscan.wordfence import WordfenceError
@@ -276,7 +281,7 @@ def run_remediate(settings: Settings, args: argparse.Namespace) -> int:
         )
         return 1
     if args.strategy == "latest" and not plan.latest_is_safe:
-        print(f"warning: {target} still has known advisories", file=sys.stderr)
+        print(f"warning: {target} {format_latest_unsafe_note(plan)}", file=sys.stderr)
     try:
         outcome = apply_remediation(
             settings.project_path,
@@ -418,7 +423,8 @@ def run_tui(settings: Settings, outdated: bool = False, preflight: bool = False)
     """Start the interactive Textual interface (imported lazily to keep CLI start-up light).
 
     With ``outdated`` the TUI lists dependencies with newer releases instead of
-    vulnerable ones. With ``preflight`` it lists pin-float would-be risks.
+    vulnerable ones (also remembered when starting in ``preflight`` so ``n`` can
+    return to outdated mode). With ``preflight`` it lists pin-float would-be risks.
     """
     from vulnscan.tui import VulnScanApp
 
@@ -649,8 +655,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         log.info("mode: preflight, non-interactive")
         return run_preflight_cli(settings, args)
     if args.preflight:
-        log.info("mode: preflight TUI")
-        run_tui(settings, preflight=True)
+        log.info("mode: preflight TUI (outdated=%s)", args.outdated)
+        run_tui(settings, outdated=args.outdated, preflight=True)
         return 0
     if args.update_feeds or args.markdown is not None or args.text is not None:
         log.info(

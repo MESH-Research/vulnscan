@@ -6,6 +6,7 @@ from pathlib import Path
 
 from vulnscan.config import Settings
 from vulnscan.models import Finding, ScanResult, Vulnerability
+from vulnscan.risk import format_fresh_age
 from vulnscan.wordfence import SOURCE as WORDFENCE_SOURCE
 from vulnscan.wordfence import wordfence_attribution
 
@@ -43,9 +44,10 @@ def _nearest_safe_cell(finding: Finding, result: ScanResult) -> str:
         nearest = getattr(plan, "nearest_safe", None)
         if not nearest:
             return "none"
-        warnings = getattr(plan, "warnings", ()) or ()
-        fresh = any(nearest in w and "published within the freshness" in w for w in warnings)
-        return f"{nearest} ~fresh" if fresh else nearest
+        age = getattr(plan, "nearest_fresh_age", None)
+        if age is not None:
+            return f"{nearest} ({format_fresh_age(age)})"
+        return nearest
     if finding.webpack_merge_block:
         return "none"
     merge = result.webpack_merge

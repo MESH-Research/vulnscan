@@ -23,11 +23,14 @@ is the subject of a malicious-package report, or that has been yanked
 (PyPI) or unpublished (npm) is skipped, and the plan explains the first such
 skip, for example `skipped 2.31.0 (advisory: GHSA-…)`. A candidate published
 less than `VULNSCAN_FRESH_HOURS` ago (default 24) is still offered but
-marked: the **Nearest safe** column reads `2.32.4 ~fresh`, the detail pane
-and the upgrade dialog carry a `Warning:` line, and `--remediate` prints
-`warning: … was published within the freshness window`. Waiting a day before
-taking a brand-new release is the cheapest defence against a hijacked
-package. WordPress candidates are checked against Wordfence for advisories
+annotated with its age (`fresh: 12h ago`) rather than treated as unsafe: the
+**Nearest safe** column, upgrade dialog and detail pane all show that
+annotation, and `--remediate` prints the same on stderr. Freshness never
+blocks nearest-safe selection. When the latest release still has blocking
+risks, the option says so by kind (`still has known advisories`,
+`blocked: malware`, `blocked: yanked`, or `incompatible with webpack merge`)
+without listing advisory ids; the detail pane lists those ids. Waiting a day before taking a brand-new release is the
+cheapest defence against a hijacked package. WordPress candidates are checked against Wordfence for advisories
 only, since wordpress.org publishes no release times. Container image
 candidates are checked against the NVD, which answers one version per
 rate-limited request, so only the nearest candidate and the latest tag are

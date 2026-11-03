@@ -537,14 +537,32 @@ def test_parser_outdated_flag():
 def test_outdated_flag_launches_tui_in_outdated_mode(tmp_path: Path, monkeypatch):
     launched = {}
 
-    def fake_run_tui(settings, outdated=False):
+    def fake_run_tui(settings, outdated=False, preflight=False):
         launched["outdated"] = outdated
+        launched["preflight"] = preflight
 
     monkeypatch.setattr(cli, "run_tui", fake_run_tui)
     assert cli.main(["--outdated", "--path", str(tmp_path)]) == 0
     assert launched["outdated"] is True
+    assert launched["preflight"] is False
     assert cli.main(["--path", str(tmp_path)]) == 0
     assert launched["outdated"] is False
+    assert launched["preflight"] is False
+
+
+def test_preflight_tui_preserves_outdated_flag(tmp_path: Path, monkeypatch):
+    """Interactive --preflight keeps --outdated so ``n`` can return to outdated mode."""
+    launched = {}
+
+    def fake_run_tui(settings, outdated=False, preflight=False):
+        launched["outdated"] = outdated
+        launched["preflight"] = preflight
+
+    monkeypatch.setattr(cli, "run_tui", fake_run_tui)
+    assert cli.main(["--preflight", "--path", str(tmp_path)]) == 0
+    assert launched == {"outdated": False, "preflight": True}
+    assert cli.main(["--preflight", "--outdated", "--path", str(tmp_path)]) == 0
+    assert launched == {"outdated": True, "preflight": True}
 
 
 @pytest.mark.parametrize(

@@ -9,7 +9,31 @@ import httpx
 from vulnscan.models import PYPI, Dependency, Vulnerability
 from vulnscan.osv import OSVClient
 from vulnscan.registry import RegistryClient
-from vulnscan.risk import RiskKind, is_malware_advisory, score_for, score_versions
+from vulnscan.risk import (
+    RiskKind,
+    VersionRisk,
+    format_blocker_kinds,
+    format_fresh_age,
+    is_malware_advisory,
+    score_for,
+    score_versions,
+)
+
+
+def test_format_fresh_age():
+    assert format_fresh_age(timedelta(minutes=20)) == "fresh: <1h ago"
+    assert format_fresh_age(timedelta(hours=1)) == "fresh: 1h ago"
+    assert format_fresh_age(timedelta(hours=12)) == "fresh: 12h ago"
+
+
+def test_format_blocker_kinds_omits_advisory_ids():
+    blockers = (
+        VersionRisk(RiskKind.ADVISORY, "x", advisory_id="GHSA-aaaa"),
+        VersionRisk(RiskKind.YANKED, "gone"),
+    )
+    text = format_blocker_kinds(blockers)
+    assert text == "known advisories; yanked"
+    assert "GHSA" not in text
 
 
 def test_is_malware_advisory_mal_prefix():
@@ -81,6 +105,8 @@ def test_score_versions_advisory_and_fresh():
     assert RiskKind.FRESH in kinds
     assert score.has_blocking is True
     assert score.is_fresh is True
+    assert score.fresh_age == timedelta(hours=3)
+    assert all(r.age == timedelta(hours=3) for r in score.risks if r.kind == RiskKind.FRESH)
 
 
 def test_score_versions_malware_mal_id():

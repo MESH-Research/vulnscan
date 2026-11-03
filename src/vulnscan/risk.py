@@ -5,7 +5,7 @@ Used by forward-checked remediation planning and by ``--preflight``.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -39,6 +39,8 @@ class VersionRisk:
     url: str | None = None
     severity: str | None = None
     published_at: datetime | None = None
+    age: timedelta | None = None
+    """Release age when ``kind`` is :attr:`RiskKind.FRESH` (snapshot at score time)."""
 
 
 @dataclass(frozen=True)
@@ -59,10 +61,60 @@ class VersionScore:
         """Whether a freshness warning is present."""
         return any(r.kind == RiskKind.FRESH for r in self.risks)
 
+    @property
+    def fresh_age(self) -> timedelta | None:
+        """Age snapshot from the freshness risk, or ``None`` when not fresh."""
+        for risk in self.risks:
+            if risk.kind != RiskKind.FRESH:
+                continue
+            if risk.age is not None:
+                return risk.age
+            if risk.published_at is not None:
+                published = risk.published_at
+                if published.tzinfo is None:
+                    published = published.replace(tzinfo=UTC)
+                return datetime.now(UTC) - published
+            return timedelta(0)
+        return None
+
     def blocking(self) -> tuple[VersionRisk, ...]:
         """Risks that disqualify a remediation candidate."""
         blocking = {RiskKind.ADVISORY, RiskKind.MALWARE, RiskKind.YANKED}
         return tuple(r for r in self.risks if r.kind in blocking)
+
+
+def format_fresh_age(age: timedelta) -> str:
+    """Human-readable freshness annotation, e.g. ``fresh: 12h ago``."""
+    hours = max(0, int(age.total_seconds() // 3600))
+    if hours < 1:
+        return "fresh: <1h ago"
+    return f"fresh: {hours}h ago"
+
+
+def format_blocker_kinds(blockers: Sequence[VersionRisk]) -> str:
+    """Compact label for blocking risks without advisory ids (for option lists / cells)."""
+    labels: list[str] = []
+    seen: set[RiskKind] = set()
+    for risk in blockers:
+        if risk.kind in seen:
+            continue
+        seen.add(risk.kind)
+        if risk.kind == RiskKind.ADVISORY:
+            labels.append("known advisories")
+        elif risk.kind == RiskKind.MALWARE:
+            labels.append("malware")
+        elif risk.kind == RiskKind.YANKED:
+            labels.append("yanked")
+    if not labels:
+        return "known advisories or other risks"
+    if labels == ["known advisories"]:
+        return "known advisories"
+    if len(labels) == 1:
+        return labels[0]
+    if "known advisories" in labels:
+        rest = [part for part in labels if part != "known advisories"]
+        return "known advisories; " + ", ".join(rest)
+    return ", ".join(labels)
 
 
 def is_malware_advisory(vuln: Vulnerability, raw: dict | None = None) -> bool:
@@ -196,6 +248,7 @@ def score_versions(
                                 f"(within {fresh_hours:g}h)"
                             ),
                             published_at=info.published_at,
+                            age=age,
                         )
                     )
         scores[key] = VersionScore(version=version, risks=tuple(risks))
