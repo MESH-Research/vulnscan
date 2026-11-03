@@ -1,3 +1,10 @@
+## 1.13.0 (2026-11-03)
+
+### Feat
+
+- **config**: add VULNSCAN_CNA_SOURCES for extra CNA mappings
+- **nvd**: flag unanalysed CVEs from the CNA's affected-version ranges
+
 ## 1.12.1 (2026-10-28)
 
 ### Fix
