@@ -4,6 +4,7 @@ from pathlib import Path
 
 from vulnscan.config import Settings
 from vulnscan.models import CONTAINER, NPM, PYPI, Dependency, Vulnerability
+from vulnscan.nvd import CNASource
 from vulnscan.osv import OSVError
 from vulnscan.scanner import scan
 
@@ -428,7 +429,9 @@ def test_scan_builds_nvd_client_from_settings(tmp_path: Path, monkeypatch):
     created = {}
 
     class Recording(FakeNVDClient):
-        def __init__(self, api_key, base_url, timeout, cache_dir, ttl_hours, image_products):
+        def __init__(
+            self, api_key, base_url, timeout, cache_dir, ttl_hours, image_products, cna_sources
+        ):
             super().__init__({})
             created.update(
                 api_key=api_key,
@@ -437,6 +440,7 @@ def test_scan_builds_nvd_client_from_settings(tmp_path: Path, monkeypatch):
                 cache_dir=cache_dir,
                 ttl_hours=ttl_hours,
                 image_products=image_products,
+                cna_sources=cna_sources,
             )
 
     monkeypatch.setattr(scanner_module, "NVDClient", Recording)
@@ -448,6 +452,7 @@ def test_scan_builds_nvd_client_from_settings(tmp_path: Path, monkeypatch):
         nvd_ttl_hours=6.0,
         cache_dir=tmp_path / "cache",
         image_products=("myorg/app=myorg:app",),
+        cna_sources=("myorg:app=sec@myorg.example;My Org;App",),
         request_timeout=9.0,
     )
     scan(settings, client=FakeClient({}), registry=EmptyRegistry())
@@ -458,6 +463,7 @@ def test_scan_builds_nvd_client_from_settings(tmp_path: Path, monkeypatch):
         "cache_dir": tmp_path / "cache",
         "ttl_hours": 6.0,
         "image_products": {"myorg/app": "myorg:app"},
+        "cna_sources": {"myorg:app": CNASource("sec@myorg.example", "My Org", "App")},
     }
 
 

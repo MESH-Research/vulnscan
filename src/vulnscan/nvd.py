@@ -19,6 +19,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -148,6 +149,105 @@ class NVDError(Exception):
 # --- image to product mapping --------------------------------------------------------------
 
 _PRODUCT = re.compile(r"^[^\s:]+:[^\s:]+$")
+
+
+@dataclass(frozen=True)
+class CNASource:
+    """Where a product's own CNA files its CVEs and how it names the product there."""
+
+    source: str
+    vendor: str
+    product: str
+
+
+CNA_SOURCES: dict[str, CNASource] = {
+    "python:python": CNASource("cna@python.org", "Python Software Foundation", "CPython"),
+    "php:php": CNASource("security@php.net", "PHP Group", "PHP"),
+    "f5:nginx": CNASource("f5sirt@f5.com", "F5", "NGINX Open Source"),
+}
+"""Products whose own CNA files their CVEs, keyed by CPE ``vendor:product``.
+
+A CVE filed by the product's CNA carries the CNA's affected-version ranges from the
+day it is published, long before NVD adds CPE configurations. Vendor and product are
+the names the CNA uses in its ``affected`` block, which need not match the CPE names.
+"""
+
+
+def parse_cna_sources(entries: Iterable[str]) -> dict[str, CNASource]:
+    """Turn ``vendor:product=source;Vendor Name;Product Name`` entries into a mapping.
+
+    Blank entries are skipped; anything without ``=``, without a ``vendor:product``
+    key or without all three ``;``-separated parts raises ``ValueError``.
+    """
+    sources: dict[str, CNASource] = {}
+    for entry in entries:
+        text = entry.strip()
+        if not text:
+            continue
+        product, eq, rest = text.partition("=")
+        product = product.strip()
+        parts = [part.strip() for part in rest.split(";")]
+        if not eq or not _PRODUCT.match(product) or len(parts) != 3 or not all(parts):
+            raise ValueError(
+                "VULNSCAN_CNA_SOURCES entries look like "
+                f"vendor:product=source;Vendor Name;Product Name (got {text!r})"
+            )
+        sources[product] = CNASource(*parts)
+    return sources
+
+
+def _cna_affected_entries(data: dict, source: CNASource):
+    vendor, product = source.vendor.lower(), source.product.lower()
+    for block in data.get("affected") or []:
+        if not isinstance(block, dict):
+            continue
+        for entry in block.get("affectedData") or []:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("vendor", "")).lower() != vendor:
+                continue
+            if str(entry.get("product", "")).lower() != product:
+                continue
+            yield entry
+
+
+def parse_cna_record(data: dict, source: CNASource) -> Vulnerability:
+    """Convert an NVD record into our model from the CNA's ``affected`` block.
+
+    Only entries naming the source's vendor and product count. Each ``affected``
+    version with a ``lessThan``/``lessThanOrEqual`` bound becomes a range (``0`` as the
+    start means unbounded below) and every ``lessThan`` is a fixed version; a bare
+    version is an explicit affected version. Git commit ranges are ignored.
+    """
+    ranges: list[VersionRange] = []
+    explicit: list[str] = []
+    fixed: list[str] = []
+    for entry in _cna_affected_entries(data, source):
+        for item in entry.get("versions") or []:
+            if not isinstance(item, dict) or item.get("status", "affected") != "affected":
+                continue
+            if str(item.get("versionType", "")).lower() == "git":
+                continue
+            start = str(item.get("version", "") or "")
+            upper_excl = item.get("lessThan")
+            upper_incl = item.get("lessThanOrEqual")
+            if not upper_excl and not upper_incl:
+                if start:
+                    explicit.append(normalize_version(start))
+                continue
+            lower = None if start in ("", "0") else normalize_version(start)
+            upper = str(upper_excl or upper_incl)
+            ranges.append(
+                VersionRange(
+                    lower=lower,
+                    lower_inclusive=True,
+                    upper=normalize_version(upper),
+                    upper_inclusive=not upper_excl,
+                )
+            )
+            if upper_excl:
+                fixed.append(normalize_version(upper))
+    return _vulnerability(data, ranges, explicit, fixed)
 
 
 def parse_image_products(entries: Iterable[str]) -> dict[str, str]:
@@ -306,7 +406,13 @@ def parse_nvd_record(data: dict, product: str) -> Vulnerability:
         ranges.append(rng)
         if entry.get("versionEndExcluding"):
             fixed.append(normalize_version(str(entry["versionEndExcluding"])))
+    return _vulnerability(data, ranges, explicit, fixed)
 
+
+def _vulnerability(
+    data: dict, ranges: list[VersionRange], explicit: list[str], fixed: list[str]
+) -> Vulnerability:
+    """Our model for an NVD record with the affected versions already worked out."""
     descriptions = [
         str(d.get("value", ""))
         for d in data.get("descriptions") or []
@@ -341,12 +447,14 @@ def parse_nvd_record(data: dict, product: str) -> Vulnerability:
 
 
 def slim_record(data: dict) -> dict:
-    """Only the fields :func:`parse_nvd_record` reads, for a compact cache."""
+    """Only the fields :func:`parse_nvd_record` and :func:`parse_cna_record` read."""
     return {
         "id": data.get("id"),
         "published": data.get("published"),
         "lastModified": data.get("lastModified"),
         "vulnStatus": data.get("vulnStatus"),
+        "sourceIdentifier": data.get("sourceIdentifier"),
+        "affected": data.get("affected") or [],
         "descriptions": [
             d
             for d in data.get("descriptions") or []
@@ -384,6 +492,7 @@ class NVDClient:
         cache_dir: Path | None = None,
         ttl_hours: float = 24.0,
         image_products: dict[str, str] | None = None,
+        cna_sources: dict[str, CNASource] | None = None,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
@@ -393,11 +502,12 @@ class NVDClient:
         self.cache_dir = Path(cache_dir) / "nvd" if cache_dir is not None else None
         self.ttl_hours = ttl_hours
         self.image_products = dict(image_products or {})
+        self.cna_sources = dict(cna_sources or {})
         self.warnings: list[str] = []
         self._transport = transport
         self._sleep = sleep or time.sleep
         self._last_request: float | None = None
-        self._memory: dict[tuple[str, str], list[dict]] = {}
+        self._memory: dict[str, list[dict]] = {}
         self.errors: list[str] = []
         self.unchecked: list[str] = []
         self._unavailable: str | None = None
@@ -412,10 +522,10 @@ class NVDClient:
 
     # -- cache ---------------------------------------------------------------------
 
-    def _cache_path(self, product: str, version: str) -> Path | None:
+    def _cache_path(self, name: str) -> Path | None:
         if self.cache_dir is None:
             return None
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{product}__{version}")
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
         return self.cache_dir / f"{safe}.json"
 
     @staticmethod
@@ -458,15 +568,11 @@ class NVDClient:
         except httpx.HTTPError as exc:
             raise NVDError(f"NVD request failed: {exc}") from exc
 
-    def _get_page(self, match: str, start: int) -> dict:
+    def _get_page(self, query: dict[str, str], start: int) -> dict:
         headers = {"User-Agent": f"vulnscan/{__version__}", "Accept": "application/json"}
         if self.api_key:
             headers["apiKey"] = self.api_key
-        params = {
-            "virtualMatchString": match,
-            "resultsPerPage": str(PAGE_SIZE),
-            "startIndex": str(start),
-        }
+        params = {**query, "resultsPerPage": str(PAGE_SIZE), "startIndex": str(start)}
         response = self._request(params, headers)
         if response.status_code in (403, 429):
             # NVD answers 403 or 429 when the rolling window is exhausted; one full
@@ -495,16 +601,14 @@ class NVDClient:
             raise NVDError("NVD returned an unexpected response")
         return data
 
-    def _download(self, product: str, version: str) -> list[dict]:
+    def _download(self, query: dict[str, str], label: str) -> list[dict]:
         if self._unavailable is not None:
             raise NVDError(self._unavailable)
-        vendor, name = product.split(":", 1)
-        match = f"cpe:2.3:a:{vendor}:{name}:{version}"
         records: list[dict] = []
         start = 0
         while True:
-            log.info("NVD: fetching %s from index %d", match, start)
-            page = self._get_page(match, start)
+            log.info("NVD: fetching %s from index %d", label, start)
+            page = self._get_page(query, start)
             for item in page.get("vulnerabilities") or []:
                 cve = item.get("cve") if isinstance(item, dict) else None
                 if isinstance(cve, dict):
@@ -517,35 +621,48 @@ class NVDClient:
         return records
 
     def _records_for(self, product: str, version: str) -> list[dict]:
-        """Cached records for one ``(product, version)``, from memory, disk or NVD.
+        """Cached records whose CPE configurations match ``product`` at ``version``."""
+        vendor, name = product.split(":", 1)
+        match = f"cpe:2.3:a:{vendor}:{name}:{version}"
+        return self._cached(
+            f"{product}__{version}", f"{product} {version}", {"virtualMatchString": match}
+        )
+
+    def _cna_records_for(self, source: CNASource) -> list[dict]:
+        """Cached records filed by one CNA, whatever product they concern."""
+        return self._cached(
+            f"cna__{source.source}", f"CNA {source.source}", {"sourceIdentifier": source.source}
+        )
+
+    def _cached(self, name: str, label: str, query: dict[str, str]) -> list[dict]:
+        """Records for one query, from memory, disk or NVD.
 
         Serialised across threads so that concurrent forward-checks queue behind one
         rate limit rather than each racing to the network.
         """
         with self._lock:
-            return self._records_for_locked(product, version)
+            return self._cached_locked(name, label, query)
 
-    def _records_for_locked(self, product: str, version: str) -> list[dict]:
-        key = (product, version)
-        if key in self._memory:
-            log.debug("NVD: %s %s served from memory", product, version)
-            return self._memory[key]
-        path = self._cache_path(product, version)
+    def _cached_locked(self, name: str, label: str, query: dict[str, str]) -> list[dict]:
+        if name in self._memory:
+            log.debug("NVD: %s served from memory", label)
+            return self._memory[name]
+        path = self._cache_path(name)
         age = self._cache_age(path)
         if path is not None and age is not None and age < self.ttl_hours * 3600:
             try:
                 records = self._read_cache(path)
             except (OSError, ValueError):
-                log.info("NVD: cached answer for %s %s unreadable", product, version, exc_info=True)
+                log.info("NVD: cached answer for %s unreadable", label, exc_info=True)
                 records = None
             if records is not None:
-                log.info("NVD: %s %s from cache (%.1f h old)", product, version, age / 3600)
-                self._memory[key] = records
+                log.info("NVD: %s from cache (%.1f h old)", label, age / 3600)
+                self._memory[name] = records
                 return records
         try:
-            records = self._download(product, version)
+            records = self._download(query, label)
         except NVDError as exc:
-            log.info("NVD: download for %s %s failed: %s", product, version, exc)
+            log.info("NVD: download for %s failed: %s", label, exc)
             if path is None or age is None:
                 raise
             try:
@@ -553,8 +670,7 @@ class NVDClient:
             except (OSError, ValueError):
                 raise exc from None
             self.warnings.append(
-                f"{exc}; using stale cached NVD answer for {product} {version} from "
-                f"{age / 3600:.0f} hours ago"
+                f"{exc}; using stale cached NVD answer for {label} from {age / 3600:.0f} hours ago"
             )
         else:
             if path is not None:
@@ -562,7 +678,7 @@ class NVDClient:
                     self._write_cache(path, records)
                 except OSError:
                     pass
-        self._memory[key] = records
+        self._memory[name] = records
         return records
 
     # -- matching ------------------------------------------------------------------
@@ -594,9 +710,14 @@ class NVDClient:
         warning. NVD's own matching is filtered again: records that name the image's
         product only as a non-vulnerable platform are dropped, and the rest are checked
         against the parsed ranges, so a version at or above a ``versionEndExcluding``
-        bound is never reported. An image
-        whose lookup fails is left out of the result and recorded (see
-        :meth:`error_lines`) rather than raising.
+        bound is never reported. An image whose lookup fails is left out of the result
+        and recorded (see :meth:`error_lines`) rather than raising.
+
+        For a product with a known CNA (see :data:`CNA_SOURCES`) the CVEs that CNA
+        filed are fetched as well, and those NVD has not analysed yet (no
+        configurations at all) are matched against the CNA's own affected ranges.
+        NVD's configurations stay authoritative once they exist. A failed CNA lookup
+        only costs a warning; the CPE answer still stands.
         """
         found: dict[Dependency, list[Vulnerability]] = {}
         warned: set[str] = set()
@@ -629,6 +750,36 @@ class NVDClient:
                 if scoped and not vuln.affects(dep.version, CONTAINER):
                     continue
                 vulns.append(vuln)
+            vulns.extend(self._cna_vulnerabilities(dep, product, {v.id for v in vulns}))
             if vulns:
                 found[dep] = vulns
         return found
+
+    def _cna_vulnerabilities(
+        self, dep: Dependency, product: str, seen: set[str]
+    ) -> list[Vulnerability]:
+        """CVEs the product's CNA filed that NVD has not analysed and that affect ``dep``."""
+        source = self.cna_sources.get(product) or CNA_SOURCES.get(product)
+        if source is None or not dep.version:
+            return []
+        try:
+            records = self._cna_records_for(source)
+        except NVDError as exc:
+            self.warnings.append(
+                f"NVD: could not fetch the CVEs filed by {source.source} for {dep.name}: {exc}"
+            )
+            return []
+        vulns: list[Vulnerability] = []
+        for record in records:
+            if str(record.get("id", "")) in seen:
+                continue
+            if str(record.get("vulnStatus", "")).lower() == "rejected":
+                continue
+            if any(True for _ in _iter_cpe_matches(record.get("configurations"))):
+                continue  # analysed: the CPE query already gave NVD's verdict
+            vuln = parse_cna_record(record, source)
+            if not (vuln.affected_ranges or vuln.affected_versions):
+                continue
+            if vuln.affects(dep.version, CONTAINER):
+                vulns.append(vuln)
+        return vulns

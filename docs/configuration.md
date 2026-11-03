@@ -67,6 +67,7 @@ reports and TUI, as the licence requires.
 | `VULNSCAN_NVD_URL`         | `https://services.nvd.nist.gov/rest/json/cves/2.0` | API base URL                                                                   |
 | `VULNSCAN_NVD_TTL_HOURS`   | `24`                                               | How long a cached answer for one image version stays fresh                     |
 | `VULNSCAN_IMAGE_PRODUCTS`  | empty                                              | Extra `image=vendor:product` mappings, comma separated (see below)             |
+| `VULNSCAN_CNA_SOURCES`     | empty                                              | Extra `vendor:product=source;Vendor;Product` CNA mappings (see below)          |
 
 Container images found in Dockerfiles and Compose files are checked against the
 NVD by CPE name: the image name is mapped to a `vendor:product` pair (`php` to
@@ -91,6 +92,25 @@ VULNSCAN_IMAGE_PRODUCTS=myorg/app=myorg:app,ghcr.io/example/tool=example:tool
 ```
 
 An entry for a built-in image overrides the built-in mapping.
+
+### CVEs NVD has not analysed yet
+
+The CPE query only finds records NVD has analysed, which can lag publication by
+weeks. A CVE filed by the product's own CNA carries that CNA's affected-version
+ranges from the day it is published, so for products whose vendor is their own
+CNA vulnscan also fetches every CVE that CNA filed (one request per CNA, cached
+for the same TTL) and matches the ranges locally against the image version.
+This only applies to records NVD has not analysed; once NVD has added CPE
+configurations to a record, its verdict is used instead. A failed CNA lookup
+costs a warning rather than leaving the image unchecked.
+
+Built in: CPython (`python`), PHP (`php`) and NGINX Open Source (`nginx`).
+Add others with the CNA's NVD source identifier and the vendor and product
+names it uses in its `affected` block, which need not match the CPE names:
+
+```
+VULNSCAN_CNA_SOURCES=myorg:app=security@myorg.example;My Org;App
+```
 
 ## Forward check and preflight
 

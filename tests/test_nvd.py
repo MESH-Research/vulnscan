@@ -9,9 +9,13 @@ import pytest
 
 from vulnscan.models import CONTAINER, Dependency
 from vulnscan.nvd import (
+    CNA_SOURCES,
     IMAGE_PRODUCTS,
     OS_IMAGES,
+    CNASource,
     NVDClient,
+    parse_cna_record,
+    parse_cna_sources,
     parse_image_products,
     parse_nvd_record,
     product_for_image,
@@ -347,6 +351,8 @@ class Recorder:
         if self.status != 200:
             return httpx.Response(self.status, text="nope")
         match = request.url.params.get("virtualMatchString", "")
+        if not match and request.url.params.get("sourceIdentifier"):
+            match = "source=" + request.url.params["sourceIdentifier"]
         start = int(request.url.params.get("startIndex", "0"))
         records = self.pages.get(match, [])
         page = records[start : start + 2000]
@@ -359,6 +365,11 @@ class Recorder:
                 "vulnerabilities": [{"cve": r} for r in page],
             },
         )
+
+
+def cpe_requests(requests: list[httpx.Request]) -> list[httpx.Request]:
+    """The CPE match requests, leaving aside the per-CNA lookups built-in products add."""
+    return [r for r in requests if r.url.params.get("virtualMatchString")]
 
 
 def make_client(handler, tmp_path: Path, **kwargs) -> NVDClient:
@@ -452,7 +463,7 @@ def test_find_vulnerabilities_follows_pagination(tmp_path: Path):
     php = image("php", "8.2.19")
     found = client.find_vulnerabilities([php])
     assert len(found[php]) == 2001
-    assert [r.url.params["startIndex"] for r in handler.requests] == ["0", "2000"]
+    assert [r.url.params["startIndex"] for r in cpe_requests(handler.requests)] == ["0", "2000"]
 
 
 def test_find_vulnerabilities_sends_api_key_header(tmp_path: Path):
@@ -467,7 +478,7 @@ def test_requests_are_spaced_for_the_public_rate_limit(tmp_path: Path):
     handler = Recorder({"cpe:2.3:a:php:php:8.2.19": [RECORD], "cpe:2.3:a:php:php:8.3.0": []})
     client = make_client(handler, tmp_path, sleep=slept.append)
     client.find_vulnerabilities([image("php", "8.2.19"), image("php", "8.3")])
-    assert len(handler.requests) == 2
+    assert len(cpe_requests(handler.requests)) == 2
     assert slept and sum(slept) >= 5.5  # the remainder of the 6 s window after request time
     slept.clear()
     client = make_client(handler, tmp_path / "other", sleep=slept.append, api_key="k")
@@ -480,20 +491,20 @@ def test_results_are_cached_on_disk_until_the_ttl_expires(tmp_path: Path):
     client = make_client(handler, tmp_path, ttl_hours=1)
     php = image("php", "8.2.19")
     client.find_vulnerabilities([php])
-    assert len(handler.requests) == 1
+    assert len(cpe_requests(handler.requests)) == 1
     cached = list((tmp_path / "cache").rglob("*.json"))
     assert cached, "expected a cache file"
 
     again = make_client(handler, tmp_path, ttl_hours=1)
     assert [v.id for v in again.find_vulnerabilities([php])[php]] == ["CVE-2024-4577"]
-    assert len(handler.requests) == 1
+    assert len(cpe_requests(handler.requests)) == 1
 
     old = time.time() - 2 * 3600
     for path in cached:
         os.utime(path, (old, old))
     stale = make_client(handler, tmp_path, ttl_hours=1)
     stale.find_vulnerabilities([php])
-    assert len(handler.requests) == 2
+    assert len(cpe_requests(handler.requests)) == 2
 
 
 def test_errors_are_recorded_without_cache_and_fall_back_to_stale_cache(tmp_path: Path):
@@ -560,7 +571,7 @@ def test_rate_limited_request_waits_a_full_window_and_retries_once(tmp_path: Pat
     php = image("php", "8.2.19")
     found = client.find_vulnerabilities([php])
     assert [v.id for v in found[php]] == ["CVE-2024-4577"]
-    assert len(good.requests) == 2
+    assert len(cpe_requests(good.requests)) == 2
     assert max(slept) >= 30.0
     assert client.error_lines() == []
 
@@ -644,7 +655,7 @@ def test_requests_never_overlap_across_threads(tmp_path: Path):
         t.start()
     for t in threads:
         t.join()
-    assert len(inner.requests) == 8
+    assert len(cpe_requests(inner.requests)) == 8
     assert peak == 1
 
 
@@ -756,3 +767,286 @@ def test_find_vulnerabilities_omits_image_when_every_match_is_platform_only(tmp_
     handler = Recorder({"cpe:2.3:a:python:python:3.14.9": [ODOO_ON_PYTHON, DJANGO_ON_PYTHON]})
     client = make_client(handler, tmp_path)
     assert client.find_vulnerabilities([image("python", "3.14.9")]) == {}
+
+
+# --- CNA affected-version data -------------------------------------------------------------
+
+PSF = CNASource("cna@python.org", "Python Software Foundation", "CPython")
+
+
+def cna_record(cve_id: str, versions: list[dict], **extra) -> dict:
+    """An unanalysed record carrying only the CNA's affected block for CPython."""
+    data = {
+        "id": cve_id,
+        "sourceIdentifier": "cna@python.org",
+        "published": "2026-10-22T21:17:16.543",
+        "lastModified": "2026-10-23T08:00:00.000",
+        "vulnStatus": "Awaiting Analysis",
+        "descriptions": [
+            {"lang": "en", "value": "tarfile.tar_filter could be bypassed.\nMore detail."}
+        ],
+        "metrics": {
+            "cvssMetricV31": [
+                {
+                    "source": "cna@python.org",
+                    "type": "Secondary",
+                    "cvssData": {
+                        "version": "3.1",
+                        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N",
+                        "baseScore": 6.5,
+                        "baseSeverity": "MEDIUM",
+                    },
+                }
+            ]
+        },
+        "references": [{"url": "https://github.com/python/cpython/issues/160300"}],
+        "affected": [
+            {
+                "source": "cna@python.org",
+                "affectedData": [
+                    {
+                        "vendor": "Python Software Foundation",
+                        "product": "CPython",
+                        "defaultStatus": "unaffected",
+                        "versions": versions,
+                    }
+                ],
+            }
+        ],
+    }
+    data.update(extra)
+    return data
+
+
+TARFILE_VERSIONS = [
+    {"version": "0", "lessThan": "3.11.18", "versionType": "python", "status": "affected"},
+    {"version": "3.12.0", "lessThan": "3.12.16", "versionType": "python", "status": "affected"},
+    {"version": "3.14.0", "lessThan": "3.14.10", "versionType": "python", "status": "affected"},
+    {"version": "3.15.0", "lessThan": "3.15.2", "versionType": "python", "status": "affected"},
+]
+TARFILE = cna_record("CVE-2026-114583", TARFILE_VERSIONS)
+
+
+def test_builtin_cna_sources_cover_python():
+    assert CNA_SOURCES["python:python"] == PSF
+    assert CNA_SOURCES["php:php"].source == "security@php.net"
+    assert CNA_SOURCES["f5:nginx"].source == "f5sirt@f5.com"
+
+
+def test_parse_cna_sources():
+    parsed = parse_cna_sources(
+        [
+            "myorg:app=security@myorg.example; My Org ;App",
+            "",
+            " python:python=cna@python.org;PSF;CPython ",
+        ]
+    )
+    assert parsed == {
+        "myorg:app": CNASource("security@myorg.example", "My Org", "App"),
+        "python:python": CNASource("cna@python.org", "PSF", "CPython"),
+    }
+    for bad in ["myorg:app", "myorg:app=x;y", "=a;b;c", "noproduct=a;b;c"]:
+        with pytest.raises(ValueError):
+            parse_cna_sources([bad])
+
+
+def test_parse_cna_record_builds_ranges_from_the_affected_block():
+    vuln = parse_cna_record(TARFILE, PSF)
+    assert vuln.id == "CVE-2026-114583"
+    assert vuln.source == "nvd"
+    assert vuln.link == "https://nvd.nist.gov/vuln/detail/CVE-2026-114583"
+    assert vuln.summary == "tarfile.tar_filter could be bypassed."
+    assert vuln.severity == "MEDIUM"
+    assert vuln.cvss == "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N"
+    assert vuln.published == datetime(2026, 10, 22, 21, 17, 16, 543000)
+    assert vuln.references == ["https://github.com/python/cpython/issues/160300"]
+    assert vuln.fixed_versions == ["3.11.18", "3.12.16", "3.14.10", "3.15.2"]
+    assert vuln.affects("3.14.9", CONTAINER) is True
+    assert vuln.affects("3.10.0", CONTAINER) is True
+    assert vuln.affects("3.14.10", CONTAINER) is False
+    assert vuln.affects("3.13.5", CONTAINER) is False  # the 3.13 series is not listed
+
+
+def test_parse_cna_record_handles_inclusive_bounds_exact_versions_and_noise():
+    versions = [
+        {
+            "version": "2.0.0",
+            "lessThanOrEqual": "2.0.5",
+            "versionType": "python",
+            "status": "affected",
+        },
+        {"version": "1.9.9", "versionType": "python", "status": "affected"},
+        {"version": "3.0.0", "lessThan": "3.0.1", "versionType": "python", "status": "unaffected"},
+        {"version": "abc123", "lessThan": "def456", "versionType": "git", "status": "affected"},
+    ]
+    record = cna_record("CVE-2026-1", versions)
+    record["affected"][0]["affectedData"].append(
+        {
+            "vendor": "Someone Else",
+            "product": "CPython",
+            "versions": [
+                {"version": "0", "lessThan": "99", "versionType": "python", "status": "affected"}
+            ],
+        }
+    )
+    vuln = parse_cna_record(record, PSF)
+    assert vuln.affects("2.0.5", CONTAINER) is True
+    assert vuln.affects("2.0.6", CONTAINER) is False
+    assert vuln.affects("1.9.9", CONTAINER) is True
+    assert vuln.affects("1.9.8", CONTAINER) is False
+    assert vuln.affects("3.0.0", CONTAINER) is False
+    assert vuln.affects("50.0", CONTAINER) is False
+    assert vuln.fixed_versions == []
+
+
+def test_parse_cna_record_matches_vendor_and_product_case_insensitively():
+    vuln = parse_cna_record(
+        TARFILE, CNASource("cna@python.org", "python software foundation", "cpython")
+    )
+    assert vuln.affects("3.14.9", CONTAINER) is True
+
+
+def test_parse_cna_record_without_matching_affected_data_has_no_ranges():
+    vuln = parse_cna_record(TARFILE, CNASource("cna@python.org", "PSF", "Other"))
+    assert vuln.affected_ranges == []
+    assert vuln.affected_versions == []
+
+
+def test_find_vulnerabilities_flags_unanalysed_records_from_cna_affected_data(tmp_path: Path):
+    handler = Recorder({"cpe:2.3:a:python:python:3.14.9": [], "source=cna@python.org": [TARFILE]})
+    client = make_client(handler, tmp_path)
+    python = image("python", "3.14.9", "3.14.9-slim-bookworm")
+    found = client.find_vulnerabilities([python])
+    assert [v.id for v in found[python]] == ["CVE-2026-114583"]
+    assert found[python][0].fixed_versions == ["3.11.18", "3.12.16", "3.14.10", "3.15.2"]
+    sources = [r.url.params.get("sourceIdentifier") for r in handler.requests]
+    assert "cna@python.org" in sources
+    assert not client.errors
+    assert not client.warnings
+
+
+def test_find_vulnerabilities_does_not_flag_versions_outside_cna_ranges(tmp_path: Path):
+    handler = Recorder({"cpe:2.3:a:python:python:3.14.10": [], "source=cna@python.org": [TARFILE]})
+    client = make_client(handler, tmp_path)
+    assert client.find_vulnerabilities([image("python", "3.14.10")]) == {}
+
+
+def test_find_vulnerabilities_merges_cna_hits_with_cpe_hits_without_duplicates(tmp_path: Path):
+    analysed = cna_record("CVE-2025-1", TARFILE_VERSIONS, vulnStatus="Analyzed")
+    analysed["configurations"] = PYTHON_ITSELF["configurations"]
+    handler = Recorder(
+        {
+            "cpe:2.3:a:python:python:3.14.9": [analysed],
+            "source=cna@python.org": [analysed, TARFILE],
+        }
+    )
+    client = make_client(handler, tmp_path)
+    python = image("python", "3.14.9")
+    found = client.find_vulnerabilities([python])
+    assert sorted(v.id for v in found[python]) == ["CVE-2025-1", "CVE-2026-114583"]
+
+
+def test_find_vulnerabilities_prefers_nvd_configurations_over_cna_data_once_analysed(
+    tmp_path: Path,
+):
+    """A record NVD has analysed is judged by its configurations, not the CNA block."""
+    platform_only = cna_record("CVE-2020-29396", TARFILE_VERSIONS, vulnStatus="Analyzed")
+    platform_only["configurations"] = ODOO_ON_PYTHON["configurations"]
+    fixed_here = cna_record("CVE-2025-2", TARFILE_VERSIONS, vulnStatus="Analyzed")
+    fixed_here["configurations"] = [
+        {
+            "nodes": [
+                {
+                    "cpeMatch": [
+                        cpe_match(
+                            "cpe:2.3:a:python:python:*:*:*:*:*:*:*:*",
+                            versionStartIncluding="3.14.0",
+                            versionEndExcluding="3.14.5",
+                        )
+                    ]
+                }
+            ]
+        }
+    ]
+    handler = Recorder(
+        {
+            "cpe:2.3:a:python:python:3.14.9": [platform_only],
+            "source=cna@python.org": [platform_only, fixed_here],
+        }
+    )
+    client = make_client(handler, tmp_path)
+    assert client.find_vulnerabilities([image("python", "3.14.9")]) == {}
+
+
+def test_find_vulnerabilities_skips_rejected_cna_records(tmp_path: Path):
+    rejected = cna_record("CVE-2026-9", TARFILE_VERSIONS, vulnStatus="Rejected")
+    handler = Recorder({"cpe:2.3:a:python:python:3.14.9": [], "source=cna@python.org": [rejected]})
+    client = make_client(handler, tmp_path)
+    assert client.find_vulnerabilities([image("python", "3.14.9")]) == {}
+
+
+def test_find_vulnerabilities_ignores_cna_records_for_other_products(tmp_path: Path):
+    other = cna_record("CVE-2026-8", TARFILE_VERSIONS)
+    other["affected"][0]["affectedData"][0]["product"] = "Pip"
+    handler = Recorder({"cpe:2.3:a:python:python:3.14.9": [], "source=cna@python.org": [other]})
+    client = make_client(handler, tmp_path)
+    assert client.find_vulnerabilities([image("python", "3.14.9")]) == {}
+
+
+def test_find_vulnerabilities_honours_cna_source_overrides(tmp_path: Path):
+    record = cna_record("CVE-2026-7", TARFILE_VERSIONS, sourceIdentifier="sec@myorg.example")
+    record["affected"][0]["affectedData"][0].update(vendor="My Org", product="App")
+    handler = Recorder({"cpe:2.3:a:myorg:app:1.2.3": [], "source=sec@myorg.example": [record]})
+    client = make_client(
+        handler,
+        tmp_path,
+        image_products={"myorg/app": "myorg:app"},
+        cna_sources={"myorg:app": CNASource("sec@myorg.example", "My Org", "App")},
+    )
+    app = image("myorg/app", "1.2.3")
+    found = client.find_vulnerabilities([app])
+    assert [v.id for v in found[app]] == ["CVE-2026-7"]
+
+
+def test_cna_answers_are_cached_on_disk_and_shared_across_images(tmp_path: Path):
+    handler = Recorder(
+        {
+            "cpe:2.3:a:python:python:3.14.9": [],
+            "cpe:2.3:a:python:python:3.12.15": [],
+            "source=cna@python.org": [TARFILE],
+        }
+    )
+    client = make_client(handler, tmp_path, ttl_hours=1)
+    a, b = image("python", "3.14.9"), image("python", "3.12.15")
+    found = client.find_vulnerabilities([a, b])
+    assert set(found) == {a, b}
+    source_requests = [r for r in handler.requests if r.url.params.get("sourceIdentifier")]
+    assert len(source_requests) == 1
+
+    again = make_client(handler, tmp_path, ttl_hours=1)
+    assert [v.id for v in again.find_vulnerabilities([a])[a]] == ["CVE-2026-114583"]
+    assert len([r for r in handler.requests if r.url.params.get("sourceIdentifier")]) == 1
+    for path in (tmp_path / "cache").rglob("*.json"):
+        assert "cna@python.org" not in path.read_text() or json.loads(path.read_text())
+
+
+def test_cna_lookup_failure_keeps_cpe_results_and_warns(tmp_path: Path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("sourceIdentifier"):
+            return httpx.Response(500, text="boom")
+        return httpx.Response(
+            200,
+            json={
+                "resultsPerPage": 1,
+                "startIndex": 0,
+                "totalResults": 1,
+                "vulnerabilities": [{"cve": PYTHON_ITSELF}],
+            },
+        )
+
+    client = make_client(handler, tmp_path)
+    python = image("python", "3.14.9")
+    found = client.find_vulnerabilities([python])
+    assert [v.id for v in found[python]] == ["CVE-2025-1"]
+    assert any("cna@python.org" in w for w in client.warnings)
+    assert "python" not in client.unchecked

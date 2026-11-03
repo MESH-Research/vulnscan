@@ -24,7 +24,7 @@ from vulnscan.models import (
     merge_declarations,
     severity_rank,
 )
-from vulnscan.nvd import NVDClient, NVDError, parse_image_products
+from vulnscan.nvd import NVDClient, NVDError, parse_cna_sources, parse_image_products
 from vulnscan.osv import OSVClient, OSVError
 from vulnscan.parsers import load_ignore_file, parse_project
 from vulnscan.registry import RegistryClient, RegistryError
@@ -339,6 +339,7 @@ def scan(
                 cache_dir=settings.cache_dir,
                 ttl_hours=settings.nvd_ttl_hours,
                 image_products=parse_image_products(settings.image_products),
+                cna_sources=parse_cna_sources(settings.cna_sources),
             )
         try:
             image_found = nvd_client.find_vulnerabilities(

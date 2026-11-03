@@ -74,7 +74,10 @@ throttling rules are described under [Configuration](configuration.md#wordfence)
 `VULNSCAN_IMAGE_PRODUCTS`), asks NVD for the CVEs matching that product at the
 tag's version, turns each record's CPE match ranges into `VersionRange`s and
 fixed versions, filters the answer again against those ranges, and caches it
-per image version on disk.
+per image version on disk. For products whose vendor is their own CNA (built-in
+table plus `VULNSCAN_CNA_SOURCES`) it also fetches the CVEs that CNA filed,
+cached per CNA, and matches those NVD has not analysed yet against the CNA's
+own `affected` ranges, so a fresh CVE is flagged before NVD assigns CPEs.
 
 `Vulnerability.affects(version, ecosystem)` evaluates the affected ranges
 with ecosystem-aware version comparison (`vulnscan.versioncmp`), which is
