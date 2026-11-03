@@ -238,6 +238,7 @@ def test_nvd_and_image_product_defaults(tmp_path: Path):
     assert settings.nvd_url == "https://services.nvd.nist.gov/rest/json/cves/2.0"
     assert settings.nvd_ttl_hours == 24.0
     assert settings.image_products == ()
+    assert settings.cna_sources == ()
 
 
 def test_nvd_and_image_product_settings_from_environment(tmp_path: Path):
@@ -246,12 +247,14 @@ def test_nvd_and_image_product_settings_from_environment(tmp_path: Path):
         "VULNSCAN_NVD_URL": "https://nvd.example/cves/",
         "VULNSCAN_NVD_TTL_HOURS": "6",
         "VULNSCAN_IMAGE_PRODUCTS": "myorg/app=myorg:app, ghcr.io/x/y=x:y",
+        "VULNSCAN_CNA_SOURCES": "myorg:app=sec@myorg.example;My Org;App, x:y=a@b;A;B",
     }
     settings = load_settings(env=env, dotenv_path=tmp_path / "missing.env")
     assert settings.nvd_api_key == "k"
     assert settings.nvd_url == "https://nvd.example/cves"
     assert settings.nvd_ttl_hours == 6.0
     assert settings.image_products == ("myorg/app=myorg:app", "ghcr.io/x/y=x:y")
+    assert settings.cna_sources == ("myorg:app=sec@myorg.example;My Org;App", "x:y=a@b;A;B")
 
 
 def test_debug_settings_default_to_off_and_debug_log_in_cwd(tmp_path: Path, monkeypatch):
