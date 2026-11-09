@@ -30,8 +30,9 @@ channel the first time a new advisory appears.
   (no key needed);
   [Wordfence Intelligence](https://www.wordfence.com/threat-intel/) for
   WordPress core, plugins and themes installed through Composer (free API key);
-  the [NVD](https://nvd.nist.gov) for the software inside container images
-  (no key needed; an optional free key raises the rate limit).
+  the [NVD](https://nvd.nist.gov) for the software inside container images,
+  and for CVEs a package's own CNA has filed (Django, pip) that OSV does not
+  carry yet (no key needed; an optional free key raises the rate limit).
 - **Manifests:** `composer.json`; `package.json`; `pyproject.toml` (PEP 621, PEP
   735 dependency groups, Poetry); `requirements*.txt` and `requirements/*.txt`
   with `-r` includes; `Pipfile`; `setup.cfg`; Invenio `webpack.py` theme
@@ -421,10 +422,12 @@ comments.
 | `VULNSCAN_WORDFENCE_URL`                            | `https://www.wordfence.com/api/intelligence/v3`   | Wordfence API base URL                                                                 |
 | `VULNSCAN_WORDFENCE_TTL_HOURS`                      | `24`                                              | How long the cached Wordfence feed stays fresh                                         |
 | `VULNSCAN_WORDFENCE_MIN_INTERVAL_MINUTES`           | `30`                                              | Minimum gap between Wordfence requests                                                 |
-| `VULNSCAN_NVD_API_KEY`                              | empty                                             | NVD API key (optional; raises the rate limit for container image lookups)              |
+| `VULNSCAN_NVD_API_KEY`                              | empty                                             | NVD API key (optional; raises the rate limit for NVD lookups)                          |
 | `VULNSCAN_NVD_URL`                                  | `https://services.nvd.nist.gov/rest/json/cves/2.0` | NVD API base URL                                                                      |
 | `VULNSCAN_NVD_TTL_HOURS`                            | `24`                                              | How long a cached NVD answer stays fresh                                               |
 | `VULNSCAN_IMAGE_PRODUCTS`                           | empty                                             | Extra `image=vendor:product` CPE mappings for container images, comma separated        |
+| `VULNSCAN_REGISTRY_CNA_CHECK`                       | `true`                                            | Ask NVD for CVEs the package registries' CNAs filed that OSV does not carry yet        |
+| `VULNSCAN_REGISTRY_CNAS`                            | empty                                             | Extra NVD source identifiers of CNAs to include in that check, comma separated         |
 | `VULNSCAN_CACHE_DIR`                                | `$XDG_CACHE_HOME/vulnscan` or `~/.cache/vulnscan` | Cache location                                                                         |
 | `VULNSCAN_INTERVAL_MINUTES`                         | `60`                                              | Minutes between scans in `--ntfy` / `--msteams` mode (`--interval`)                    |
 | `VULNSCAN_NTFY_SERVER`                              | `https://ntfy.sh`                                 | ntfy server                                                                            |

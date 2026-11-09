@@ -24,7 +24,13 @@ from vulnscan.models import (
     merge_declarations,
     severity_rank,
 )
-from vulnscan.nvd import NVDClient, NVDError, parse_cna_sources, parse_image_products
+from vulnscan.nvd import (
+    REGISTRY_ECOSYSTEMS,
+    NVDClient,
+    NVDError,
+    parse_cna_sources,
+    parse_image_products,
+)
 from vulnscan.osv import OSVClient, OSVError
 from vulnscan.parsers import load_ignore_file, parse_project
 from vulnscan.registry import RegistryClient, RegistryError
@@ -330,17 +336,21 @@ def scan(
                 found.update(wordpress_found)
             warnings.extend(getattr(wordpress_client, "warnings", []))
 
-    if image_deps:
-        if nvd_client is None:
-            nvd_client = NVDClient(
-                api_key=settings.nvd_api_key,
-                base_url=settings.nvd_url,
-                timeout=settings.request_timeout,
-                cache_dir=settings.cache_dir,
-                ttl_hours=settings.nvd_ttl_hours,
-                image_products=parse_image_products(settings.image_products),
-                cna_sources=parse_cna_sources(settings.cna_sources),
-            )
+    registry_deps = [d for d in other_deps if d.version and d.ecosystem in REGISTRY_ECOSYSTEMS]
+    check_registry_cnas = settings.registry_cna_check and bool(registry_deps)
+    if nvd_client is None and (image_deps or check_registry_cnas):
+        nvd_client = NVDClient(
+            api_key=settings.nvd_api_key,
+            base_url=settings.nvd_url,
+            timeout=settings.request_timeout,
+            cache_dir=settings.cache_dir,
+            ttl_hours=settings.nvd_ttl_hours,
+            image_products=parse_image_products(settings.image_products),
+            cna_sources=parse_cna_sources(settings.cna_sources),
+            registry_cnas=settings.registry_cnas,
+        )
+
+    if image_deps and nvd_client is not None:
         try:
             image_found = nvd_client.find_vulnerabilities(
                 image_deps, include_unknown_versions=settings.query_unknown_versions
@@ -354,6 +364,17 @@ def scan(
         else:
             log.info("scan: NVD reports advisories for %d images", len(image_found))
             found.update(image_found)
+
+    if check_registry_cnas and nvd_client is not None:
+        # CVEs a package's own CNA filed reach NVD on publication day, often weeks
+        # before OSV's sources map them to the package; anything OSV already
+        # reported for the package is left out.
+        cna_found = nvd_client.find_registry_vulnerabilities(registry_deps, known=found)
+        log.info("scan: CNA-filed CVEs found for %d registry packages", len(cna_found))
+        for dep, vulns in cna_found.items():
+            found.setdefault(dep, []).extend(vulns)
+
+    if nvd_client is not None:
         warnings.extend(getattr(nvd_client, "warnings", []))
 
     findings = [Finding(dep, vulns) for dep, vulns in found.items() if vulns]

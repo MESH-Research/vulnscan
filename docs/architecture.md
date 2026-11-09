@@ -11,7 +11,8 @@ discover manifests ──> parse ──> resolve versions ──> merge declarat
    VULNSCAN_IGNORE_DIRS,                         ▼                       ▼
    composer install paths                   OSV.dev (PyPI,       Wordfence (WordPress
                                             Packagist, npm)      core/plugins/themes)
-                                                 │             NVD (container images)
+                                                 │             NVD (container images,
+                                                 │             CNA-filed CVEs for packages)
                                                  └───────────┬───────────┘
                                                              ▼
                                                     Finding per dependency
@@ -78,6 +79,12 @@ per image version on disk. For products whose vendor is their own CNA (built-in
 table plus `VULNSCAN_CNA_SOURCES`) it also fetches the CVEs that CNA filed,
 cached per CNA, and matches those NVD has not analysed yet against the CNA's
 own `affected` ranges, so a fresh CVE is flagged before NVD assigns CPEs.
+`find_registry_vulnerabilities` applies the same idea to PyPI, npm and Packagist
+packages: the CVEs filed by the CNAs in `REGISTRY_CNAS` (plus
+`VULNSCAN_REGISTRY_CNAS`) are matched to packages by the `collectionURL` host
+and `packageName` of their `affected` entries, so a vendor's day-one CVE is
+reported before OSV's sources map it to the package; anything OSV already
+returned for the package is left out.
 
 `Vulnerability.affects(version, ecosystem)` evaluates the affected ranges
 with ecosystem-aware version comparison (`vulnscan.versioncmp`), which is
