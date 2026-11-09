@@ -59,7 +59,7 @@ The first scan therefore takes a minute or two; later scans are fast. Records
 derived from Wordfence carry their copyright notice and licence in the feeds,
 reports and TUI, as the licence requires.
 
-## NVD (container images)
+## NVD (container images and CNA-filed CVEs)
 
 | Variable                   | Default                                            | Purpose                                                                        |
 | -------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------ |
@@ -68,6 +68,8 @@ reports and TUI, as the licence requires.
 | `VULNSCAN_NVD_TTL_HOURS`   | `24`                                               | How long a cached answer for one image version stays fresh                     |
 | `VULNSCAN_IMAGE_PRODUCTS`  | empty                                              | Extra `image=vendor:product` mappings, comma separated (see below)             |
 | `VULNSCAN_CNA_SOURCES`     | empty                                              | Extra `vendor:product=source;Vendor;Product` CNA mappings (see below)          |
+| `VULNSCAN_REGISTRY_CNA_CHECK` | `true`                                          | Also ask NVD for CVEs the package registries' CNAs filed (see below)           |
+| `VULNSCAN_REGISTRY_CNAS`   | empty                                              | Extra NVD source identifiers of CNAs to include in that check, comma separated |
 
 Container images found in Dockerfiles and Compose files are checked against the
 NVD by CPE name: the image name is mapped to a `vendor:product` pair (`php` to
@@ -111,6 +113,40 @@ names it uses in its `affected` block, which need not match the CPE names:
 ```
 VULNSCAN_CNA_SOURCES=myorg:app=security@myorg.example;My Org;App
 ```
+
+### CVEs OSV does not carry yet
+
+PyPI, npm and Packagist packages are checked through OSV, which learns about
+a CVE when one of its sources (GitHub's advisory database, PyPA's feed) maps
+it to the package. That can take days or weeks after the vendor publishes;
+Django's CVE-2026-108147 had no package mapping anywhere six days after the
+fix was released. When the vendor is its own CNA, though, the NVD record
+carries the vendor's `affected` block from publication day, naming the
+registry (`https://pypi.org/project/Django/`), the package (`django`) and the
+affected ranges (`6.1` before `6.1.3`).
+
+So after the OSV query vulnscan asks NVD for every CVE filed by a small list of
+CNAs known to tag their records this way (one request per CNA, cached for
+`VULNSCAN_NVD_TTL_HOURS` and shared with the container image path) and matches
+each record locally: the registry is read from the `collectionURL` host
+(pypi.org, npmjs.com, packagist.org; drupal.org projects count as
+`drupal/<project>` on Packagist), the package from `packageName` or, failing
+that, the project named in the URL path, and the version against the CNA's own
+ranges. Anything OSV already reported for the package, by CVE id or alias, is
+left out, so each advisory appears once. A CNA that cannot be fetched costs a
+warning; the OSV results and the other CNAs' records still stand.
+
+Built in: the Django Software Foundation and the Python Software Foundation
+(pip). Add others by their NVD source identifier, an address or a UUID as
+shown on the NVD record:
+
+```
+VULNSCAN_REGISTRY_CNAS=security@drupal.org,6f8de1f0-f67e-45a6-b68f-98777fdb759c
+```
+
+Set `VULNSCAN_REGISTRY_CNA_CHECK=false` to turn the check off, for instance
+when a project has no container images and you would rather not consult NVD at
+all.
 
 ## Forward check and preflight
 

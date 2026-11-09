@@ -22,15 +22,20 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
 from vulnscan import __version__, debuglog
 from vulnscan.models import (
     CONTAINER,
+    NPM,
+    PACKAGIST,
+    PYPI,
     Dependency,
     VersionRange,
     Vulnerability,
+    normalize_name,
     normalize_severity,
     version_sort_key,
 )
@@ -211,43 +216,184 @@ def _cna_affected_entries(data: dict, source: CNASource):
             yield entry
 
 
+def _affected_versions(entry: dict) -> tuple[list[VersionRange], list[str], list[str]]:
+    """``(ranges, explicit versions, fixed versions)`` from one ``affectedData`` entry.
+
+    Each ``affected`` version with a ``lessThan``/``lessThanOrEqual`` bound becomes a
+    range (``0`` as the start means unbounded below) and every ``lessThan`` is a fixed
+    version; a bare version is an explicit affected version. Git commit ranges are
+    ignored, as are entries marked ``unaffected`` or ``unknown``.
+    """
+    ranges: list[VersionRange] = []
+    explicit: list[str] = []
+    fixed: list[str] = []
+    for item in entry.get("versions") or []:
+        if not isinstance(item, dict) or item.get("status", "affected") != "affected":
+            continue
+        if str(item.get("versionType", "")).lower() == "git":
+            continue
+        start = str(item.get("version", "") or "")
+        upper_excl = item.get("lessThan")
+        upper_incl = item.get("lessThanOrEqual")
+        if not upper_excl and not upper_incl:
+            if start:
+                explicit.append(normalize_version(start))
+            continue
+        lower = None if start in ("", "0") else normalize_version(start)
+        upper = str(upper_excl or upper_incl)
+        ranges.append(
+            VersionRange(
+                lower=lower,
+                lower_inclusive=True,
+                upper=normalize_version(upper),
+                upper_inclusive=not upper_excl,
+            )
+        )
+        if upper_excl:
+            fixed.append(normalize_version(upper))
+    return ranges, explicit, fixed
+
+
 def parse_cna_record(data: dict, source: CNASource) -> Vulnerability:
     """Convert an NVD record into our model from the CNA's ``affected`` block.
 
-    Only entries naming the source's vendor and product count. Each ``affected``
-    version with a ``lessThan``/``lessThanOrEqual`` bound becomes a range (``0`` as the
-    start means unbounded below) and every ``lessThan`` is a fixed version; a bare
-    version is an explicit affected version. Git commit ranges are ignored.
+    Only entries naming the source's vendor and product count; see
+    :func:`_affected_versions` for how each entry's versions are read.
     """
     ranges: list[VersionRange] = []
     explicit: list[str] = []
     fixed: list[str] = []
     for entry in _cna_affected_entries(data, source):
-        for item in entry.get("versions") or []:
-            if not isinstance(item, dict) or item.get("status", "affected") != "affected":
-                continue
-            if str(item.get("versionType", "")).lower() == "git":
-                continue
-            start = str(item.get("version", "") or "")
-            upper_excl = item.get("lessThan")
-            upper_incl = item.get("lessThanOrEqual")
-            if not upper_excl and not upper_incl:
-                if start:
-                    explicit.append(normalize_version(start))
-                continue
-            lower = None if start in ("", "0") else normalize_version(start)
-            upper = str(upper_excl or upper_incl)
-            ranges.append(
-                VersionRange(
-                    lower=lower,
-                    lower_inclusive=True,
-                    upper=normalize_version(upper),
-                    upper_inclusive=not upper_excl,
-                )
-            )
-            if upper_excl:
-                fixed.append(normalize_version(upper))
+        more_ranges, more_explicit, more_fixed = _affected_versions(entry)
+        ranges.extend(more_ranges)
+        explicit.extend(more_explicit)
+        fixed.extend(more_fixed)
     return _vulnerability(data, ranges, explicit, fixed)
+
+
+# --- registry packages (PyPI, npm, Packagist) via CNA affected data ------------------------------
+
+DSF_SOURCE = "6a34fbeb-21d4-45e7-8e0a-62b95bc12c92"
+"""The Django Software Foundation's NVD source identifier (a UUID, not an address)."""
+
+REGISTRY_CNAS: tuple[str, ...] = (DSF_SOURCE, "cna@python.org")
+"""CNAs known to tag the ``affected`` block of their CVEs with a package registry URL."""
+
+
+REGISTRY_ECOSYSTEMS = frozenset({PYPI, NPM, PACKAGIST})
+"""Ecosystems whose packages the registry CNA check covers (the ones OSV indexes)."""
+
+_REGISTRY_HOSTS: dict[str, str] = {
+    "pypi.org": PYPI,
+    "pypi.python.org": PYPI,
+    "npmjs.com": NPM,
+    "npmjs.org": NPM,
+    "registry.npmjs.org": NPM,
+    "packagist.org": PACKAGIST,
+    "repo.packagist.org": PACKAGIST,
+    "drupal.org": PACKAGIST,
+}
+"""``collectionURL`` hosts (without ``www.``) and the ecosystem each one identifies."""
+
+_PACKAGE_PATH_PREFIXES = ("/project/", "/package/", "/packages/")
+"""Path segments after which a registry URL names the package itself."""
+
+
+def _collection_host(collection_url: str) -> str:
+    try:
+        host = urlsplit(str(collection_url).strip()).hostname or ""
+    except ValueError:
+        return ""
+    host = host.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def registry_ecosystem(collection_url: str) -> str | None:
+    """The vulnscan ecosystem a CNA ``collectionURL`` points at, or ``None``.
+
+    pypi.org is PyPI, npmjs.com and registry.npmjs.org are npm, packagist.org is
+    Packagist, and drupal.org projects are Packagist too (as ``drupal/<project>``).
+    """
+    return _REGISTRY_HOSTS.get(_collection_host(collection_url))
+
+
+def _package_from_path(collection_url: str) -> str | None:
+    try:
+        path = urlsplit(str(collection_url).strip()).path
+    except ValueError:
+        return None
+    for prefix in _PACKAGE_PATH_PREFIXES:
+        if prefix in path:
+            name = path.split(prefix, 1)[1].strip("/")
+            return name or None
+    return None
+
+
+def registry_package(entry: dict) -> tuple[str, str] | None:
+    """``(ecosystem, canonical package name)`` for one CNA ``affectedData`` entry, or ``None``.
+
+    The ecosystem comes from the ``collectionURL`` host and the name from
+    ``packageName``, falling back to the project named in the URL path (the PSF files
+    pip as ``https://pypi.org/project/pip`` with no package name). Entries without a
+    registry URL, or with a bare registry URL and no name, cannot be matched.
+    """
+    if not isinstance(entry, dict):
+        return None
+    url = str(entry.get("collectionURL") or "")
+    ecosystem = registry_ecosystem(url)
+    if ecosystem is None:
+        return None
+    name = str(entry.get("packageName") or "").strip() or _package_from_path(url)
+    if not name:
+        return None
+    if _collection_host(url) == "drupal.org" and "/" not in name:
+        name = f"drupal/{name}"
+    return ecosystem, normalize_name(name, ecosystem)
+
+
+def _registry_packages_in(data: dict) -> set[tuple[str, str]]:
+    """Every registry package an NVD record's CNA ``affected`` block names."""
+    packages: set[tuple[str, str]] = set()
+    for block in data.get("affected") or []:
+        if not isinstance(block, dict):
+            continue
+        for entry in block.get("affectedData") or []:
+            package = registry_package(entry)
+            if package is not None:
+                packages.add(package)
+    return packages
+
+
+def parse_registry_record(data: dict, package_name: str, ecosystem: str) -> Vulnerability:
+    """Convert an NVD record into our model from the CNA's ``affected`` block for one package.
+
+    Only entries whose registry URL and package name identify ``package_name`` in
+    ``ecosystem`` count; see :func:`_affected_versions` for how their versions are read.
+    """
+    wanted = (ecosystem, normalize_name(package_name, ecosystem))
+    ranges: list[VersionRange] = []
+    explicit: list[str] = []
+    fixed: list[str] = []
+    for block in data.get("affected") or []:
+        if not isinstance(block, dict):
+            continue
+        for entry in block.get("affectedData") or []:
+            if registry_package(entry) != wanted:
+                continue
+            more_ranges, more_explicit, more_fixed = _affected_versions(entry)
+            ranges.extend(more_ranges)
+            explicit.extend(more_explicit)
+            fixed.extend(more_fixed)
+    return _vulnerability(data, ranges, explicit, fixed)
+
+
+def _dedupe_sources(sources: Iterable[str]) -> tuple[str, ...]:
+    seen: list[str] = []
+    for source in sources:
+        text = str(source).strip()
+        if text and text not in seen:
+            seen.append(text)
+    return tuple(seen)
 
 
 def parse_image_products(entries: Iterable[str]) -> dict[str, str]:
@@ -493,6 +639,7 @@ class NVDClient:
         ttl_hours: float = 24.0,
         image_products: dict[str, str] | None = None,
         cna_sources: dict[str, CNASource] | None = None,
+        registry_cnas: Iterable[str] | None = None,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
@@ -503,6 +650,7 @@ class NVDClient:
         self.ttl_hours = ttl_hours
         self.image_products = dict(image_products or {})
         self.cna_sources = dict(cna_sources or {})
+        self.registry_cnas = _dedupe_sources([*REGISTRY_CNAS, *(registry_cnas or [])])
         self.warnings: list[str] = []
         self._transport = transport
         self._sleep = sleep or time.sleep
@@ -630,9 +778,11 @@ class NVDClient:
 
     def _cna_records_for(self, source: CNASource) -> list[dict]:
         """Cached records filed by one CNA, whatever product they concern."""
-        return self._cached(
-            f"cna__{source.source}", f"CNA {source.source}", {"sourceIdentifier": source.source}
-        )
+        return self._records_filed_by(source.source)
+
+    def _records_filed_by(self, source: str) -> list[dict]:
+        """Cached records filed by the CNA with NVD source identifier ``source``."""
+        return self._cached(f"cna__{source}", f"CNA {source}", {"sourceIdentifier": source})
 
     def _cached(self, name: str, label: str, query: dict[str, str]) -> list[dict]:
         """Records for one query, from memory, disk or NVD.
@@ -751,6 +901,53 @@ class NVDClient:
                     continue
                 vulns.append(vuln)
             vulns.extend(self._cna_vulnerabilities(dep, product, {v.id for v in vulns}))
+            if vulns:
+                found[dep] = vulns
+        return found
+
+    def find_registry_vulnerabilities(
+        self,
+        deps: Iterable[Dependency],
+        known: dict[Dependency, list[Vulnerability]] | None = None,
+    ) -> dict[Dependency, list[Vulnerability]]:
+        """Map registry packages (PyPI, npm, Packagist) to CVEs their CNAs filed.
+
+        Every CNA in ``registry_cnas`` is asked once for all the CVEs it filed (cached
+        for the TTL, shared with the container image path) and each record's
+        ``affected`` block is matched against the packages by registry URL and package
+        name, then against the version by the CNA's own ranges. Advisories already in
+        ``known`` for the same package (by id or alias, as OSV reports them) are left
+        out, so a CVE both sources carry is reported once. Packages outside these
+        ecosystems or without a version are skipped. A CNA that cannot be fetched
+        costs a warning; the other CNAs' records still count.
+        """
+        wanted = [d for d in deps if d.ecosystem in REGISTRY_ECOSYSTEMS and d.version]
+        if not wanted:
+            return {}
+        index: dict[tuple[str, str], list[dict]] = {}
+        for source in self.registry_cnas:
+            try:
+                records = self._records_filed_by(source)
+            except NVDError as exc:
+                self.warnings.append(f"NVD: could not fetch the CVEs filed by {source}: {exc}")
+                continue
+            for record in records:
+                if str(record.get("vulnStatus", "")).lower() == "rejected":
+                    continue
+                for package in _registry_packages_in(record):
+                    index.setdefault(package, []).append(record)
+        found: dict[Dependency, list[Vulnerability]] = {}
+        for dep in wanted:
+            already = {i.upper() for v in (known or {}).get(dep, []) for i in (v.id, *v.aliases)}
+            vulns: list[Vulnerability] = []
+            for record in index.get(dep.key, []):
+                if str(record.get("id", "")).upper() in already:
+                    continue
+                vuln = parse_registry_record(record, dep.name, dep.ecosystem)
+                if not (vuln.affected_ranges or vuln.affected_versions):
+                    continue
+                if vuln.affects(dep.version, dep.ecosystem):
+                    vulns.append(vuln)
             if vulns:
                 found[dep] = vulns
         return found

@@ -23,6 +23,7 @@ def settings_for(tmp_path: Path, **kwargs) -> Settings:
         request_timeout=1.0,
         include_dev=True,
         query_unknown_versions=False,
+        registry_cna_check=False,  # keep unit tests off the network; enabled per test
     )
     base.update(kwargs)
     return Settings(**base)
@@ -381,9 +382,30 @@ def test_scan_leaves_transitive_packages_out_by_default(tmp_path: Path):
 
 
 class FakeNVDClient(FakeClient):
-    def __init__(self, table: dict, warnings: list[str] | None = None):
+    """`registry_table` maps (name, version) -> CNA-filed advisories for registry packages."""
+
+    def __init__(
+        self,
+        table: dict,
+        warnings: list[str] | None = None,
+        registry_table: dict | None = None,
+    ):
         super().__init__(table)
         self.warnings = warnings or []
+        self.registry_table = registry_table or {}
+        self.registry_seen: list[Dependency] = []
+        self.known_seen: dict | None = None
+
+    def find_registry_vulnerabilities(self, deps, known=None):
+        deps = list(deps)
+        self.registry_seen.extend(deps)
+        self.known_seen = {d: list(v) for d, v in (known or {}).items()}
+        result = {}
+        for d in deps:
+            vulns = self.registry_table.get((d.name, d.version), [])
+            if vulns:
+                result[d] = vulns
+        return result
 
 
 def write_container_project(tmp_path: Path):
@@ -430,7 +452,15 @@ def test_scan_builds_nvd_client_from_settings(tmp_path: Path, monkeypatch):
 
     class Recording(FakeNVDClient):
         def __init__(
-            self, api_key, base_url, timeout, cache_dir, ttl_hours, image_products, cna_sources
+            self,
+            api_key,
+            base_url,
+            timeout,
+            cache_dir,
+            ttl_hours,
+            image_products,
+            cna_sources,
+            registry_cnas,
         ):
             super().__init__({})
             created.update(
@@ -441,6 +471,7 @@ def test_scan_builds_nvd_client_from_settings(tmp_path: Path, monkeypatch):
                 ttl_hours=ttl_hours,
                 image_products=image_products,
                 cna_sources=cna_sources,
+                registry_cnas=registry_cnas,
             )
 
     monkeypatch.setattr(scanner_module, "NVDClient", Recording)
@@ -464,10 +495,13 @@ def test_scan_builds_nvd_client_from_settings(tmp_path: Path, monkeypatch):
         "ttl_hours": 6.0,
         "image_products": {"myorg/app": "myorg:app"},
         "cna_sources": {"myorg:app": CNASource("sec@myorg.example", "My Org", "App")},
+        "registry_cnas": (),
     }
 
 
-def test_scan_does_not_build_nvd_client_without_images(tmp_path: Path, monkeypatch):
+def test_scan_does_not_build_nvd_client_without_images_when_registry_check_is_off(
+    tmp_path: Path, monkeypatch
+):
     import vulnscan.scanner as scanner_module
 
     def boom(*args, **kwargs):
@@ -475,7 +509,106 @@ def test_scan_does_not_build_nvd_client_without_images(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(scanner_module, "NVDClient", boom)
     write_project(tmp_path)
-    scan(settings_for(tmp_path), client=FakeClient({}), registry=EmptyRegistry())
+    scan(
+        settings_for(tmp_path, registry_cna_check=False),
+        client=FakeClient({}),
+        registry=EmptyRegistry(),
+    )
+
+
+def test_scan_adds_cna_filed_advisories_for_registry_packages(tmp_path: Path):
+    write_project(tmp_path)
+    osv = FakeClient({("flask", "3.0.0"): [vuln("GHSA-F", "LOW")]})
+    nvd = FakeNVDClient(
+        {},
+        registry_table={
+            ("requests", "2.30.0"): [vuln("CVE-2026-1", "HIGH")],
+            ("flask", "3.0.0"): [vuln("CVE-2026-2", "MEDIUM")],
+        },
+    )
+    result = scan(
+        settings_for(tmp_path, registry_cna_check=True),
+        client=osv,
+        nvd_client=nvd,
+        registry=EmptyRegistry(),
+    )
+    assert sorted(d.name for d in nvd.registry_seen) == [
+        "flask",
+        "monolog/monolog",
+        "pytest",
+        "requests",
+    ]
+    assert nvd.seen == []  # no container images: nothing goes through the CPE path
+    by_name = {f.dependency.name: sorted(v.id for v in f.vulnerabilities) for f in result.findings}
+    assert by_name == {
+        "requests": ["CVE-2026-1"],
+        "flask": ["CVE-2026-2", "GHSA-F"],
+    }
+    assert [f.dependency.name for f in result.findings] == ["requests", "flask"]
+    # The client was told what OSV already reported, so it can leave duplicates out.
+    assert nvd.known_seen is not None
+    assert [v.id for vs in nvd.known_seen.values() for v in vs] == ["GHSA-F"]
+
+
+def test_scan_skips_the_registry_cna_check_when_disabled(tmp_path: Path):
+    write_project(tmp_path)
+    nvd = FakeNVDClient({}, registry_table={("requests", "2.30.0"): [vuln("CVE-2026-1")]})
+    result = scan(
+        settings_for(tmp_path, registry_cna_check=False),
+        client=FakeClient({}),
+        nvd_client=nvd,
+        registry=EmptyRegistry(),
+    )
+    assert nvd.registry_seen == []
+    assert result.findings == []
+
+
+def test_scan_still_checks_registry_cnas_when_osv_fails(tmp_path: Path):
+    write_project(tmp_path)
+    nvd = FakeNVDClient({}, registry_table={("requests", "2.30.0"): [vuln("CVE-2026-1")]})
+    result = scan(
+        settings_for(tmp_path, registry_cna_check=True),
+        client=FakeClient({}, error=OSVError("down")),
+        nvd_client=nvd,
+        registry=EmptyRegistry(),
+    )
+    assert [f.dependency.name for f in result.findings] == ["requests"]
+    assert any("OSV unavailable" in line for line in result.source_errors)
+
+
+def test_scan_builds_nvd_client_for_registry_packages(tmp_path: Path, monkeypatch):
+    import vulnscan.scanner as scanner_module
+
+    created = {}
+
+    class Recording(FakeNVDClient):
+        def __init__(self, **kwargs):
+            super().__init__({})
+            created.update(kwargs)
+
+    monkeypatch.setattr(scanner_module, "NVDClient", Recording)
+    write_project(tmp_path)
+    settings = settings_for(
+        tmp_path,
+        registry_cna_check=True,
+        registry_cnas=("sec@myorg.example",),
+        cache_dir=tmp_path / "cache",
+    )
+    scan(settings, client=FakeClient({}), registry=EmptyRegistry())
+    assert created["registry_cnas"] == ("sec@myorg.example",)
+    assert created["cache_dir"] == tmp_path / "cache"
+
+
+def test_scan_collects_nvd_warnings_from_the_registry_check(tmp_path: Path):
+    write_project(tmp_path)
+    nvd = FakeNVDClient({}, warnings=["NVD: could not fetch the CVEs filed by x"])
+    result = scan(
+        settings_for(tmp_path, registry_cna_check=True),
+        client=FakeClient({}),
+        nvd_client=nvd,
+        registry=EmptyRegistry(),
+    )
+    assert "NVD: could not fetch the CVEs filed by x" in result.warnings
 
 
 def test_scan_carries_on_when_nvd_fails(tmp_path: Path):

@@ -39,6 +39,8 @@ _ENV_MAP: dict[str, tuple[str, Any]] = {
     "nvd_ttl_hours": ("NVD_TTL_HOURS", "24"),
     "image_products": ("IMAGE_PRODUCTS", ""),
     "cna_sources": ("CNA_SOURCES", ""),
+    "registry_cna_check": ("REGISTRY_CNA_CHECK", "true"),
+    "registry_cnas": ("REGISTRY_CNAS", ""),
     "cache_dir": ("CACHE_DIR", None),  # default depends on XDG_CACHE_HOME, see load_settings
     "ignore_dirs": ("IGNORE_DIRS", ""),
     "markdown_filename": ("MARKDOWN_FILE", "vulns.md"),
@@ -113,6 +115,10 @@ class Settings:
     image_products: tuple[str, ...] = ()
     cna_sources: tuple[str, ...] = ()
     """``image=vendor:product`` entries mapping container images to CPE products."""
+    registry_cna_check: bool = True
+    """Ask NVD for CVEs the package registries' CNAs filed that OSV does not yet carry."""
+    registry_cnas: tuple[str, ...] = ()
+    """Extra NVD source identifiers of CNAs that tag their CVEs with registry package names."""
     cache_dir: Path = Path.home() / ".cache" / "vulnscan"
     ignore_dirs: tuple[str, ...] = ()
     markdown_filename: str = "vulns.md"
@@ -233,6 +239,8 @@ _COERCERS = {
     "nvd_ttl_hours": float,
     "image_products": _to_tuple,
     "cna_sources": _to_tuple,
+    "registry_cna_check": _to_bool,
+    "registry_cnas": _to_tuple,
     "cache_dir": lambda v: Path(v).expanduser().absolute(),
     "ignore_dirs": _to_tuple,
     "ntfy_server": lambda v: str(v).rstrip("/"),

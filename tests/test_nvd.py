@@ -1050,3 +1050,414 @@ def test_cna_lookup_failure_keeps_cpe_results_and_warns(tmp_path: Path):
     assert [v.id for v in found[python]] == ["CVE-2025-1"]
     assert any("cna@python.org" in w for w in client.warnings)
     assert "python" not in client.unchecked
+
+
+# --- registry packages via CNA affected data ----------------------------------------------------
+
+from vulnscan.models import NPM, PACKAGIST, PYPI, Vulnerability  # noqa: E402
+from vulnscan.nvd import (  # noqa: E402
+    DSF_SOURCE,
+    REGISTRY_CNAS,
+    parse_registry_record,
+    registry_ecosystem,
+    registry_package,
+)
+
+
+def pkg(name: str, version: str | None, ecosystem: str = PYPI) -> Dependency:
+    return Dependency(
+        name,
+        ecosystem,
+        f"=={version}" if version else "*",
+        version,
+        "pinned" if version else "unknown",
+        "requirements.txt",
+    )
+
+
+def registry_record(
+    cve_id: str,
+    affected_data: list[dict],
+    source: str = DSF_SOURCE,
+    **extra,
+) -> dict:
+    data = {
+        "id": cve_id,
+        "sourceIdentifier": source,
+        "published": "2026-11-03T15:41:38.167",
+        "lastModified": "2026-11-04T08:00:00.000",
+        "vulnStatus": "Deferred",
+        "descriptions": [
+            {
+                "lang": "en",
+                "value": "An issue was discovered in Django 6.1 before 6.1.3, 6.0.4 before "
+                "6.0.10, and 5.2.13 before 5.2.19.\nMultiPartParser buffers base64 uploads.",
+            }
+        ],
+        "metrics": {
+            "cvssMetricV31": [
+                {
+                    "source": source,
+                    "type": "Secondary",
+                    "cvssData": {
+                        "version": "3.1",
+                        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",
+                        "baseScore": 7.5,
+                        "baseSeverity": "HIGH",
+                    },
+                }
+            ]
+        },
+        "references": [
+            {"url": "https://www.djangoproject.com/weblog/2026/nov/03/security-releases/"}
+        ],
+        "affected": [{"source": source, "affectedData": affected_data}],
+    }
+    data.update(extra)
+    return data
+
+
+DJANGO_VERSIONS = [
+    {"version": "6.1", "lessThan": "6.1.3", "versionType": "python", "status": "affected"},
+    {"version": "6.1.3", "versionType": "python", "status": "unaffected"},
+    {"version": "6.0", "lessThan": "6.0.4", "versionType": "python", "status": "unaffected"},
+    {"version": "6.0.4", "lessThan": "6.0.10", "versionType": "python", "status": "affected"},
+    {"version": "5.2.13", "lessThan": "5.2.19", "versionType": "python", "status": "affected"},
+    {"version": "5.2.19", "versionType": "python", "status": "unaffected"},
+]
+DJANGO_AFFECTED = {
+    "vendor": "djangoproject",
+    "product": "Django",
+    "defaultStatus": "unaffected",
+    "collectionURL": "https://pypi.org/project/Django/",
+    "packageName": "django",
+    "repo": "https://github.com/django/django/",
+    "versions": DJANGO_VERSIONS,
+}
+DJANGO = registry_record("CVE-2026-108147", [DJANGO_AFFECTED])
+
+
+def test_builtin_registry_cnas_cover_django_and_the_psf():
+    assert DSF_SOURCE in REGISTRY_CNAS
+    assert "cna@python.org" in REGISTRY_CNAS
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://pypi.org/project/Django/", PYPI),
+        ("https://pypi.org", PYPI),
+        ("https://PyPI.org/", PYPI),
+        ("https://www.npmjs.com/package/lodash", NPM),
+        ("https://registry.npmjs.org", NPM),
+        ("https://npmjs.com/", NPM),
+        ("https://packagist.org/packages/monolog/monolog", PACKAGIST),
+        ("https://repo.packagist.org/", PACKAGIST),
+        ("https://www.drupal.org/project/webform", PACKAGIST),
+        ("https://github.com/django/django", None),
+        ("https://wordpress.org/plugins", None),
+        ("not a url", None),
+        ("", None),
+    ],
+)
+def test_registry_ecosystem_maps_collection_hosts(url, expected):
+    assert registry_ecosystem(url) == expected
+
+
+def test_registry_package_prefers_package_name_and_normalises_it():
+    entry = {"collectionURL": "https://pypi.org/project/Flask_Login/", "packageName": "Flask_Login"}
+    assert registry_package(entry) == (PYPI, "flask-login")
+    npm = {"collectionURL": "https://www.npmjs.com", "packageName": "@Scope/Name"}
+    assert registry_package(npm) == (NPM, "@scope/name")
+    composer = {"collectionURL": "https://packagist.org", "packageName": "Monolog/Monolog"}
+    assert registry_package(composer) == (PACKAGIST, "monolog/monolog")
+
+
+def test_registry_package_falls_back_to_the_project_in_the_url_path():
+    assert registry_package({"collectionURL": "https://pypi.org/project/pip"}) == (PYPI, "pip")
+    assert registry_package({"collectionURL": "https://pypi.org/project/Django/"}) == (
+        PYPI,
+        "django",
+    )
+    assert registry_package({"collectionURL": "https://www.npmjs.com/package/@scope/name"}) == (
+        NPM,
+        "@scope/name",
+    )
+    assert registry_package(
+        {"collectionURL": "https://packagist.org/packages/monolog/monolog"}
+    ) == (PACKAGIST, "monolog/monolog")
+
+
+def test_registry_package_maps_drupal_projects_to_their_packagist_names():
+    assert registry_package({"collectionURL": "https://www.drupal.org/project/webform"}) == (
+        PACKAGIST,
+        "drupal/webform",
+    )
+    assert registry_package(
+        {"collectionURL": "https://www.drupal.org/project/drupal", "packageName": "drupal"}
+    ) == (PACKAGIST, "drupal/drupal")
+
+
+def test_registry_package_is_none_without_a_registry_or_a_name():
+    assert registry_package({"collectionURL": "https://pypi.org"}) is None
+    assert registry_package({"collectionURL": "https://pypi.org/"}) is None
+    assert registry_package({"packageName": "mlflow"}) is None
+    assert registry_package({"collectionURL": "https://github.com/x/y", "packageName": "y"}) is None
+    assert registry_package({"vendor": "X", "product": "Y"}) is None
+    assert registry_package("not a dict") is None  # type: ignore[arg-type]
+
+
+def test_parse_registry_record_builds_ranges_for_the_package():
+    vuln = parse_registry_record(DJANGO, "Django", PYPI)
+    assert vuln.id == "CVE-2026-108147"
+    assert vuln.source == "nvd"
+    assert vuln.link == "https://nvd.nist.gov/vuln/detail/CVE-2026-108147"
+    assert vuln.summary.startswith("An issue was discovered in Django 6.1 before 6.1.3")
+    assert vuln.severity == "HIGH"
+    assert vuln.cvss == "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+    assert vuln.published == datetime(2026, 11, 3, 15, 41, 38, 167000)
+    assert vuln.references == [
+        "https://www.djangoproject.com/weblog/2026/nov/03/security-releases/"
+    ]
+    assert vuln.fixed_versions == ["5.2.19", "6.0.10", "6.1.3"]
+    assert vuln.affects("6.1.2", PYPI) is True
+    assert vuln.affects("6.1", PYPI) is True
+    assert vuln.affects("6.1.3", PYPI) is False
+    assert vuln.affects("6.0.9", PYPI) is True
+    assert vuln.affects("6.0.3", PYPI) is False
+    assert vuln.affects("5.2.18", PYPI) is True
+    assert vuln.affects("5.2.19", PYPI) is False
+    assert vuln.affects("4.2.1", PYPI) is False
+
+
+def test_parse_registry_record_ignores_other_packages_and_ecosystems():
+    other = parse_registry_record(DJANGO, "djangorestframework", PYPI)
+    assert other.affected_ranges == []
+    assert other.affected_versions == []
+    assert other.fixed_versions == []
+    npm = parse_registry_record(DJANGO, "django", NPM)
+    assert npm.affected_ranges == []
+
+
+def test_parse_registry_record_uses_the_url_path_when_package_name_is_missing():
+    pip_affected = {
+        "vendor": "Python Software Foundation",
+        "product": "pip",
+        "collectionURL": "https://pypi.org/project/pip",
+        "versions": [
+            {"version": "0", "lessThan": "25.3", "versionType": "python", "status": "affected"}
+        ],
+    }
+    record = registry_record("CVE-2025-8869", [pip_affected], source="cna@python.org")
+    vuln = parse_registry_record(record, "pip", PYPI)
+    assert vuln.fixed_versions == ["25.3"]
+    assert vuln.affects("25.2", PYPI) is True
+    assert vuln.affects("25.3", PYPI) is False
+
+
+def test_parse_registry_record_handles_exact_versions_inclusive_bounds_and_git_noise():
+    affected = {
+        **DJANGO_AFFECTED,
+        "versions": [
+            {
+                "version": "2.0.0",
+                "lessThanOrEqual": "2.0.5",
+                "versionType": "semver",
+                "status": "affected",
+            },
+            {"version": "1.9.9", "versionType": "semver", "status": "affected"},
+            {"version": "abc123", "lessThan": "def456", "versionType": "git", "status": "affected"},
+        ],
+    }
+    vuln = parse_registry_record(registry_record("CVE-2026-1", [affected]), "django", PYPI)
+    assert vuln.affects("2.0.5", PYPI) is True
+    assert vuln.affects("2.0.6", PYPI) is False
+    assert vuln.affects("1.9.9", PYPI) is True
+    assert vuln.affects("1.9.8", PYPI) is False
+    assert vuln.fixed_versions == []
+
+
+def test_find_registry_vulnerabilities_flags_versions_in_the_cna_ranges(tmp_path: Path):
+    handler = Recorder({f"source={DSF_SOURCE}": [DJANGO], "source=cna@python.org": []})
+    client = make_client(handler, tmp_path)
+    django = pkg("Django", "6.1.2")
+    found = client.find_registry_vulnerabilities([django])
+    assert [v.id for v in found[django]] == ["CVE-2026-108147"]
+    assert found[django][0].fixed_versions == ["5.2.19", "6.0.10", "6.1.3"]
+    assert found[django][0].link == "https://nvd.nist.gov/vuln/detail/CVE-2026-108147"
+    sources = sorted(r.url.params.get("sourceIdentifier") for r in handler.requests)
+    assert sources == sorted(REGISTRY_CNAS)
+    assert not client.errors
+    assert not client.warnings
+
+
+def test_find_registry_vulnerabilities_leaves_fixed_versions_alone(tmp_path: Path):
+    handler = Recorder({f"source={DSF_SOURCE}": [DJANGO], "source=cna@python.org": []})
+    client = make_client(handler, tmp_path)
+    assert client.find_registry_vulnerabilities([pkg("django", "6.1.3")]) == {}
+    assert client.find_registry_vulnerabilities([pkg("django", "6.0.3")]) == {}
+
+
+def test_find_registry_vulnerabilities_skips_advisories_already_known_for_the_package(
+    tmp_path: Path,
+):
+    handler = Recorder({f"source={DSF_SOURCE}": [DJANGO], "source=cna@python.org": []})
+    client = make_client(handler, tmp_path)
+    django = pkg("django", "6.1.2")
+    via_osv = Vulnerability("GHSA-9v48-h9hx-rjpv", "s", "d", aliases=["CVE-2026-108147"])
+    assert client.find_registry_vulnerabilities([django], known={django: [via_osv]}) == {}
+    by_id = Vulnerability("cve-2026-108147", "s", "d")
+    assert client.find_registry_vulnerabilities([django], known={django: [by_id]}) == {}
+    # Known for another package does not hide it for this one.
+    other = pkg("requests", "2.30.0")
+    found = client.find_registry_vulnerabilities([django], known={other: [via_osv]})
+    assert [v.id for v in found[django]] == ["CVE-2026-108147"]
+
+
+def test_find_registry_vulnerabilities_ignores_other_ecosystems_and_unknown_versions(
+    tmp_path: Path,
+):
+    handler = Recorder({f"source={DSF_SOURCE}": [DJANGO], "source=cna@python.org": []})
+    client = make_client(handler, tmp_path)
+    from vulnscan.models import WORDPRESS
+
+    found = client.find_registry_vulnerabilities(
+        [image("python", "3.14.9"), pkg("akismet", "5.3", WORDPRESS), pkg("django", None)]
+    )
+    assert found == {}
+    assert handler.requests == []
+
+
+def test_find_registry_vulnerabilities_matches_npm_and_packagist_packages(tmp_path: Path):
+    lodash = {
+        "vendor": "lodash",
+        "product": "lodash",
+        "collectionURL": "https://www.npmjs.com",
+        "packageName": "lodash",
+        "versions": [
+            {"version": "0", "lessThan": "4.17.21", "versionType": "semver", "status": "affected"}
+        ],
+    }
+    monolog = {
+        "vendor": "Seldaek",
+        "product": "monolog",
+        "collectionURL": "https://packagist.org/packages/monolog/monolog",
+        "versions": [
+            {"version": "1.0.0", "lessThan": "1.1.0", "versionType": "semver", "status": "affected"}
+        ],
+    }
+    handler = Recorder(
+        {
+            f"source={DSF_SOURCE}": [],
+            "source=cna@python.org": [],
+            "source=sec@myorg.example": [
+                registry_record("CVE-2026-2", [lodash], source="sec@myorg.example"),
+                registry_record("CVE-2026-3", [monolog], source="sec@myorg.example"),
+            ],
+        }
+    )
+    client = make_client(handler, tmp_path, registry_cnas=["sec@myorg.example"])
+    js = pkg("Lodash", "4.17.20", NPM)
+    php = pkg("monolog/monolog", "1.0.5", PACKAGIST)
+    safe_js = pkg("lodash", "4.17.21", NPM)
+    found = client.find_registry_vulnerabilities([js, php, safe_js])
+    assert {d.name: [v.id for v in vs] for d, vs in found.items()} == {
+        "Lodash": ["CVE-2026-2"],
+        "monolog/monolog": ["CVE-2026-3"],
+    }
+    sources = sorted(r.url.params.get("sourceIdentifier") for r in handler.requests)
+    assert sources == sorted([*REGISTRY_CNAS, "sec@myorg.example"])
+
+
+def test_find_registry_vulnerabilities_skips_rejected_records_and_records_without_ranges(
+    tmp_path: Path,
+):
+    rejected = registry_record("CVE-2026-9", [DJANGO_AFFECTED], vulnStatus="Rejected")
+    no_ranges = registry_record(
+        "CVE-2026-8",
+        [{**DJANGO_AFFECTED, "versions": [{"version": "0", "versionType": "git"}]}],
+    )
+    handler = Recorder(
+        {f"source={DSF_SOURCE}": [rejected, no_ranges, DJANGO], "source=cna@python.org": []}
+    )
+    client = make_client(handler, tmp_path)
+    django = pkg("django", "6.1.2")
+    found = client.find_registry_vulnerabilities([django])
+    assert [v.id for v in found[django]] == ["CVE-2026-108147"]
+
+
+def test_find_registry_vulnerabilities_reports_each_cve_once_per_package(tmp_path: Path):
+    """Analysed or not, a record the CNA tagged for the package is reported, and only once."""
+    analysed = registry_record("CVE-2026-5", [DJANGO_AFFECTED], vulnStatus="Analyzed")
+    analysed["configurations"] = PYTHON_ITSELF["configurations"]
+    handler = Recorder({f"source={DSF_SOURCE}": [analysed, DJANGO], "source=cna@python.org": []})
+    client = make_client(handler, tmp_path)
+    django = pkg("django", "6.1.2")
+    found = client.find_registry_vulnerabilities([django])
+    assert sorted(v.id for v in found[django]) == ["CVE-2026-108147", "CVE-2026-5"]
+
+
+def test_find_registry_vulnerabilities_queries_each_cna_once_and_caches_on_disk(tmp_path: Path):
+    handler = Recorder({f"source={DSF_SOURCE}": [DJANGO], "source=cna@python.org": []})
+    client = make_client(handler, tmp_path, ttl_hours=1)
+    deps = [pkg("django", "6.1.2"), pkg("django", "5.2.18"), pkg("requests", "2.30.0")]
+    found = client.find_registry_vulnerabilities(deps)
+    assert sorted(d.version for d in found) == ["5.2.18", "6.1.2"]
+    assert len(handler.requests) == len(REGISTRY_CNAS)
+
+    again = make_client(handler, tmp_path, ttl_hours=1)
+    found = again.find_registry_vulnerabilities([pkg("django", "6.1.2")])
+    assert [v.id for vs in found.values() for v in vs] == ["CVE-2026-108147"]
+    assert len(handler.requests) == len(REGISTRY_CNAS)
+
+
+def test_find_registry_vulnerabilities_shares_the_cna_cache_with_container_images(
+    tmp_path: Path,
+):
+    handler = Recorder(
+        {
+            "cpe:2.3:a:python:python:3.14.9": [],
+            f"source={DSF_SOURCE}": [],
+            "source=cna@python.org": [TARFILE],
+        }
+    )
+    client = make_client(handler, tmp_path)
+    client.find_vulnerabilities([image("python", "3.14.9")])
+    client.find_registry_vulnerabilities([pkg("pip", "25.2")])
+    psf_requests = [
+        r for r in handler.requests if r.url.params.get("sourceIdentifier") == "cna@python.org"
+    ]
+    assert len(psf_requests) == 1
+
+
+def test_find_registry_vulnerabilities_failure_warns_and_keeps_other_cnas(tmp_path: Path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        source = request.url.params.get("sourceIdentifier")
+        if source == "cna@python.org":
+            return httpx.Response(500, text="boom")
+        records = [DJANGO] if source == DSF_SOURCE else []
+        return httpx.Response(
+            200,
+            json={
+                "resultsPerPage": len(records),
+                "startIndex": 0,
+                "totalResults": len(records),
+                "vulnerabilities": [{"cve": r} for r in records],
+            },
+        )
+
+    client = make_client(handler, tmp_path)
+    django = pkg("django", "6.1.2")
+    found = client.find_registry_vulnerabilities([django])
+    assert [v.id for v in found[django]] == ["CVE-2026-108147"]
+    assert any("cna@python.org" in w for w in client.warnings)
+    assert client.errors == []
+    assert client.unchecked == []
+
+
+def test_find_registry_vulnerabilities_deduplicates_configured_cnas(tmp_path: Path):
+    handler = Recorder({f"source={DSF_SOURCE}": [DJANGO], "source=cna@python.org": []})
+    client = make_client(handler, tmp_path, registry_cnas=[DSF_SOURCE, " ", "cna@python.org"])
+    assert client.registry_cnas == REGISTRY_CNAS
+    client.find_registry_vulnerabilities([pkg("django", "6.1.2")])
+    assert len(handler.requests) == len(REGISTRY_CNAS)
